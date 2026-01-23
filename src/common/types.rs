@@ -231,11 +231,9 @@ impl StructLayout {
         if let Some(name) = designator_name {
             self.fields.iter().position(|f| f.name == name)
         } else {
-            let mut idx = current_idx;
-            while idx < self.fields.len() && self.fields[idx].name.is_empty() {
-                idx += 1;
-            }
-            if idx < self.fields.len() { Some(idx) } else { None }
+            // Positional init: include anonymous struct/union members (they receive
+            // initializer data like any other field in C).
+            if current_idx < self.fields.len() { Some(current_idx) } else { None }
         }
     }
 

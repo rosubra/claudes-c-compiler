@@ -1211,6 +1211,9 @@ impl Lowerer {
                             return self.lower_struct_array_with_ptrs(items, layout, num_elems);
                         }
                         let struct_size = layout.size;
+                        // For multi-dimensional arrays, elem_size > struct_size (row stride).
+                        // Use elem_size as the stride for the outer dimension.
+                        let outer_stride = if elem_size > struct_size { elem_size } else { struct_size };
                         let mut bytes = vec![0u8; total_size];
                         let mut current_idx = 0usize;
                         let mut item_idx = 0usize;
@@ -1225,7 +1228,7 @@ impl Lowerer {
                             if current_idx >= num_elems {
                                 break;
                             }
-                            let base_offset = current_idx * struct_size;
+                            let base_offset = current_idx * outer_stride;
                             // Check for field designator after index designator: [idx].field = val
                             let field_designator_name = item.designators.iter().find_map(|d| {
                                 if let Designator::Field(ref name) = d {
@@ -1236,9 +1239,32 @@ impl Lowerer {
                             });
                             match &item.init {
                                 Initializer::List(sub_items) => {
-                                    // Sub-list initializer for struct element
-                                    self.write_struct_init_to_bytes(&mut bytes, base_offset, sub_items, layout);
-                                    item_idx += 1;
+                                    // Check if this is a sub-array (multi-dim array of structs).
+                                    // If sub_items contain Lists, they are struct inits for a row.
+                                    // Otherwise, sub_items are field inits for a single struct.
+                                    let is_subarray = !sub_items.is_empty()
+                                        && sub_items.iter().any(|si| matches!(&si.init, Initializer::List(_)));
+                                    if is_subarray {
+                                        // Multi-dimensional: sub_items are struct elements in a row.
+                                        // base_offset is the start of this row in the byte buffer.
+                                        for (si, sub_item) in sub_items.iter().enumerate() {
+                                            let sub_offset = base_offset + si * struct_size;
+                                            if sub_offset + struct_size > bytes.len() { break; }
+                                            match &sub_item.init {
+                                                Initializer::List(inner) => {
+                                                    self.write_struct_init_to_bytes(&mut bytes, sub_offset, inner, layout);
+                                                }
+                                                Initializer::Expr(_) => {
+                                                    self.fill_struct_global_bytes(&[sub_item.clone()], layout, &mut bytes, sub_offset);
+                                                }
+                                            }
+                                        }
+                                        item_idx += 1;
+                                    } else {
+                                        // Single struct initializer
+                                        self.write_struct_init_to_bytes(&mut bytes, base_offset, sub_items, layout);
+                                        item_idx += 1;
+                                    }
                                 }
                                 Initializer::Expr(expr) => {
                                     if let Some(ref fname) = field_designator_name {
