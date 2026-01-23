@@ -793,7 +793,9 @@ impl Lowerer {
                         let struct_size = layout.size;
                         let mut bytes = vec![0u8; total_size];
                         let mut current_idx = 0usize;
-                        for item in items {
+                        let mut item_idx = 0usize;
+                        while item_idx < items.len() {
+                            let item = &items[item_idx];
                             // Check for index designator
                             if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
                                 if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
@@ -816,20 +818,22 @@ impl Lowerer {
                                 Initializer::List(sub_items) => {
                                     // Sub-list initializer for struct element
                                     self.write_struct_init_to_bytes(&mut bytes, base_offset, sub_items, layout);
+                                    item_idx += 1;
                                 }
                                 Initializer::Expr(expr) => {
-                                    if let Some(val) = self.eval_const_expr(expr) {
-                                        if !layout.fields.is_empty() {
-                                            // Use designated field if specified, otherwise first field
-                                            let field = if let Some(ref fname) = field_designator_name {
-                                                layout.fields.iter().find(|f| &f.name == fname)
-                                                    .unwrap_or(&layout.fields[0])
-                                            } else {
-                                                &layout.fields[0]
-                                            };
-                                            let field_ir_ty = IrType::from_ctype(&field.ty);
-                                            self.write_const_to_bytes(&mut bytes, base_offset + field.offset, &val, field_ir_ty);
+                                    if let Some(ref fname) = field_designator_name {
+                                        // [idx].field = val: write to specific field
+                                        if let Some(val) = self.eval_const_expr(expr) {
+                                            if let Some(field) = layout.fields.iter().find(|f| &f.name == fname) {
+                                                let field_ir_ty = IrType::from_ctype(&field.ty);
+                                                self.write_const_to_bytes(&mut bytes, base_offset + field.offset, &val, field_ir_ty);
+                                            }
                                         }
+                                        item_idx += 1;
+                                    } else {
+                                        // Flat init: consume items for all fields of this struct
+                                        let consumed = self.fill_struct_global_bytes(&items[item_idx..], layout, &mut bytes, base_offset);
+                                        item_idx += consumed;
                                     }
                                 }
                             }
@@ -1134,12 +1138,62 @@ impl Lowerer {
                                     }
                                 }
                             }
-                            for (ai, sub_item) in sub_items.iter().enumerate() {
-                                if ai >= *arr_size { break; }
-                                let elem_offset = field_offset + ai * elem_size;
-                                if let Initializer::Expr(expr) = &sub_item.init {
-                                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                            if matches!(elem_ty.as_ref(), CType::Struct(_) | CType::Union(_)) {
+                                // Array of structs: each sub_item is a struct element initializer.
+                                // Sub-items may be Lists (braced struct init) or Exprs (flat filling).
+                                if let CType::Struct(st) = elem_ty.as_ref() {
+                                    let sub_layout = StructLayout::for_struct(&st.fields);
+                                    let mut sub_idx = 0usize;
+                                    let mut ai = 0usize;
+                                    while ai < *arr_size && sub_idx < sub_items.len() {
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        match &sub_items[sub_idx].init {
+                                            Initializer::List(inner_items) => {
+                                                self.fill_struct_global_bytes(inner_items, &sub_layout, bytes, elem_offset);
+                                                sub_idx += 1;
+                                            }
+                                            Initializer::Expr(_) => {
+                                                let consumed = self.fill_struct_global_bytes(&sub_items[sub_idx..], &sub_layout, bytes, elem_offset);
+                                                sub_idx += consumed;
+                                            }
+                                        }
+                                        ai += 1;
+                                    }
+                                } else if let CType::Union(st) = elem_ty.as_ref() {
+                                    let sub_layout = StructLayout::for_union(&st.fields);
+                                    let mut sub_idx = 0usize;
+                                    for ai in 0..*arr_size {
+                                        if sub_idx >= sub_items.len() { break; }
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        match &sub_items[sub_idx].init {
+                                            Initializer::List(inner_items) => {
+                                                self.fill_struct_global_bytes(inner_items, &sub_layout, bytes, elem_offset);
+                                                sub_idx += 1;
+                                            }
+                                            Initializer::Expr(_) => {
+                                                let consumed = self.fill_struct_global_bytes(&sub_items[sub_idx..], &sub_layout, bytes, elem_offset);
+                                                sub_idx += consumed;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Array of scalars: each sub_item is a scalar
+                                for (ai, sub_item) in sub_items.iter().enumerate() {
+                                    if ai >= *arr_size { break; }
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    if let Initializer::Expr(expr) = &sub_item.init {
+                                        let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                    } else if let Initializer::List(inner) = &sub_item.init {
+                                        // Brace-wrapped scalar: {5}
+                                        if let Some(first) = inner.first() {
+                                            if let Initializer::Expr(expr) = &first.init {
+                                                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             item_idx += 1;
@@ -1164,10 +1218,46 @@ impl Lowerer {
                                     continue;
                                 }
                             }
-                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                            let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                            self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
-                            item_idx += 1;
+                            // Flat initializer: fill array elements from consecutive items
+                            // in the init list. E.g., struct { int a[3]; } x = {1, 2, 3};
+                            // The items 1, 2, 3 fill a[0], a[1], a[2] respectively.
+                            if matches!(elem_ty.as_ref(), CType::Struct(_) | CType::Union(_)) {
+                                // Array of structs: consume items for each struct element
+                                if let CType::Struct(st) = elem_ty.as_ref() {
+                                    let sub_layout = StructLayout::for_struct(&st.fields);
+                                    for ai in 0..*arr_size {
+                                        if item_idx >= items.len() { break; }
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        let consumed = self.fill_struct_global_bytes(&items[item_idx..], &sub_layout, bytes, elem_offset);
+                                        item_idx += consumed;
+                                    }
+                                } else {
+                                    // Union: take one item per element
+                                    for ai in 0..*arr_size {
+                                        if item_idx >= items.len() { break; }
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        if let Initializer::Expr(e) = &items[item_idx].init {
+                                            let val = self.eval_const_expr(e).unwrap_or(IrConst::I64(0));
+                                            self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                        }
+                                        item_idx += 1;
+                                    }
+                                }
+                            } else {
+                                // Array of scalars: consume one item per element
+                                for ai in 0..*arr_size {
+                                    if item_idx >= items.len() { break; }
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    if let Initializer::Expr(e) = &items[item_idx].init {
+                                        let val = self.eval_const_expr(e).unwrap_or(IrConst::I64(0));
+                                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                    }
+                                    item_idx += 1;
+                                }
+                            }
+                            // Don't increment item_idx here; it was already advanced in the loop
+                            current_field_idx = field_idx + 1;
+                            continue;
                         }
                     }
                 }

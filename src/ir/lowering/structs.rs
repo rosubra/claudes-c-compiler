@@ -380,6 +380,15 @@ impl Lowerer {
                         if let CType::Union(st) = ctype {
                             return Some(StructLayout::for_union(&st.fields));
                         }
+                        // If the field is an array of structs, return the element struct layout
+                        if let CType::Array(elem, _) = ctype {
+                            if let CType::Struct(st) = elem.as_ref() {
+                                return Some(StructLayout::for_struct(&st.fields));
+                            }
+                            if let CType::Union(st) = elem.as_ref() {
+                                return Some(StructLayout::for_union(&st.fields));
+                            }
+                        }
                     }
                 }
                 None
@@ -394,13 +403,41 @@ impl Lowerer {
                         if let CType::Union(st) = ctype {
                             return Some(StructLayout::for_union(&st.fields));
                         }
+                        // If the field is an array of structs, return the element struct layout
+                        if let CType::Array(elem, _) = ctype {
+                            if let CType::Struct(st) = elem.as_ref() {
+                                return Some(StructLayout::for_struct(&st.fields));
+                            }
+                            if let CType::Union(st) = elem.as_ref() {
+                                return Some(StructLayout::for_union(&st.fields));
+                            }
+                        }
                     }
                 }
                 None
             }
             Expr::ArraySubscript(base, _, _) => {
                 // array[i] where array is of struct type
-                self.get_layout_for_expr(base)
+                // First try getting the layout directly from base
+                if let Some(layout) = self.get_layout_for_expr(base) {
+                    return Some(layout);
+                }
+                // If base is a member access yielding an array of structs,
+                // use CType to resolve the element type
+                if let Some(base_ctype) = self.get_expr_ctype(base) {
+                    match &base_ctype {
+                        CType::Array(elem, _) => {
+                            if let CType::Struct(st) = elem.as_ref() {
+                                return Some(StructLayout::for_struct(&st.fields));
+                            }
+                            if let CType::Union(st) = elem.as_ref() {
+                                return Some(StructLayout::for_union(&st.fields));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
                 // Compound literal: (struct tag){...} - get layout from the type specifier
