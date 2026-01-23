@@ -129,6 +129,16 @@ impl X86Codegen {
             return;
         }
 
+        // Ptr is equivalent to I64/U64 on x86-64 (both 8 bytes, no conversion needed)
+        if (from_ty == IrType::Ptr || to_ty == IrType::Ptr) && !from_ty.is_float() && !to_ty.is_float() {
+            let effective_from = if from_ty == IrType::Ptr { IrType::U64 } else { from_ty };
+            let effective_to = if to_ty == IrType::Ptr { IrType::U64 } else { to_ty };
+            if effective_from == effective_to || (effective_from.size() == 8 && effective_to.size() == 8) {
+                return;
+            }
+            return self.emit_cast_instrs(effective_from, effective_to);
+        }
+
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
             if from_ty == IrType::F64 {
@@ -167,7 +177,8 @@ impl X86Codegen {
             return;
         }
 
-        if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
+        // At this point, only integer types remain (Ptr and float handled above)
+        if from_ty.size() == to_ty.size() {
             return;
         }
 
@@ -189,14 +200,6 @@ impl X86Codegen {
                     IrType::I32 => self.state.emit("    cltq"),
                     _ => {}
                 }
-            }
-        } else if to_size == from_size {
-            // Same size: pointer <-> integer conversions
-            match (from_ty, to_ty) {
-                (IrType::I32, IrType::Ptr) | (IrType::U32, IrType::Ptr) => {
-                    self.state.emit("    movl %eax, %eax");
-                }
-                _ => {}
             }
         } else {
             // Narrowing: truncate then sign/zero-extend back to 64-bit

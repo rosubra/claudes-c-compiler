@@ -155,6 +155,16 @@ impl RiscvCodegen {
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         if from_ty == to_ty { return; }
 
+        // Ptr is equivalent to I64/U64 on RISC-V 64 (both 8 bytes, no conversion needed)
+        if (from_ty == IrType::Ptr || to_ty == IrType::Ptr) && !from_ty.is_float() && !to_ty.is_float() {
+            let effective_from = if from_ty == IrType::Ptr { IrType::U64 } else { from_ty };
+            let effective_to = if to_ty == IrType::Ptr { IrType::U64 } else { to_ty };
+            if effective_from == effective_to || (effective_from.size() == 8 && effective_to.size() == 8) {
+                return;
+            }
+            return self.emit_cast_instrs(effective_from, effective_to);
+        }
+
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
             if from_ty == IrType::F64 {

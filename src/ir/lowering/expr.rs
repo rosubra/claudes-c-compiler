@@ -536,7 +536,7 @@ impl Lowerer {
                                 };
                                 if field_idx >= layout.fields.len() { break; }
                                 let field = &layout.fields[field_idx].clone();
-                                let field_ty = self.ctype_to_ir(&field.ty);
+                                let field_ty = self.ir_type_for_elem_size(field.ty.size());
                                 let val = match &item.init {
                                     Initializer::Expr(expr) => self.lower_expr(expr),
                                     _ => Operand::Const(IrConst::I64(0)),

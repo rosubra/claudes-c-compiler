@@ -1669,8 +1669,10 @@ impl Parser {
             self.advance();
             if self.is_type_specifier() {
                 if let Some(type_spec) = self.parse_type_specifier() {
-                    // Skip pointer declarators and array dimensions in abstract declarator
+                    // Parse pointer declarators in abstract declarator
+                    let mut result_type = type_spec;
                     while self.consume_if(&TokenKind::Star) {
+                        result_type = TypeSpecifier::Pointer(Box::new(result_type));
                         self.skip_cv_qualifiers();
                     }
                     // Skip array dimensions in abstract declarators e.g. (int [3])
@@ -1681,10 +1683,10 @@ impl Parser {
                         // Check for compound literal: (type){...}
                         if matches!(self.peek(), TokenKind::LBrace) {
                             let init = self.parse_initializer();
-                            return Expr::CompoundLiteral(type_spec, Box::new(init), span);
+                            return Expr::CompoundLiteral(result_type, Box::new(init), span);
                         }
                         let expr = self.parse_cast_expr();
-                        return Expr::Cast(type_spec, Box::new(expr), span);
+                        return Expr::Cast(result_type, Box::new(expr), span);
                     }
                 }
             }

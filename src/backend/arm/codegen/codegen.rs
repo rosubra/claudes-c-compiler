@@ -279,6 +279,21 @@ impl ArmCodegen {
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         if from_ty == to_ty { return; }
 
+        // Ptr is equivalent to I64/U64 on AArch64 (both 8 bytes, no conversion needed)
+        // Treat Ptr <-> I64/U64 and Ptr <-> Ptr as no-ops
+        if (from_ty == IrType::Ptr || to_ty == IrType::Ptr) && !from_ty.is_float() && !to_ty.is_float() {
+            // Ptr -> integer smaller than 64-bit: truncate
+            // Integer smaller than 64-bit -> Ptr: zero/sign-extend
+            // Ptr <-> I64/U64: no-op (same size)
+            let effective_from = if from_ty == IrType::Ptr { IrType::U64 } else { from_ty };
+            let effective_to = if to_ty == IrType::Ptr { IrType::U64 } else { to_ty };
+            if effective_from == effective_to || (effective_from.size() == 8 && effective_to.size() == 8) {
+                return;
+            }
+            // Delegate to integer cast logic below with effective types
+            return self.emit_cast_instrs(effective_from, effective_to);
+        }
+
         // Float-to-int cast
         if from_ty.is_float() && !to_ty.is_float() {
             self.state.emit("    fmov d0, x0");
@@ -307,7 +322,7 @@ impl ArmCodegen {
             return;
         }
 
-        if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
+        if from_ty.size() == to_ty.size() {
             return;
         }
 
@@ -595,6 +610,14 @@ impl ArchCodegen for ArmCodegen {
         let num_args = args.len().min(8);
         let mut float_reg_idx = 0usize;
 
+        // For indirect calls, load the function pointer into x17 BEFORE
+        // setting up arguments, to avoid clobbering x0 (first arg register).
+        if func_ptr.is_some() && direct_name.is_none() {
+            let ptr = func_ptr.unwrap();
+            self.operand_to_x0(ptr);
+            self.state.emit("    mov x17, x0");
+        }
+
         // Load all args into temp registers first (to avoid clobbering)
         for (i, arg) in args.iter().enumerate().take(num_args) {
             self.operand_to_x0(arg);
@@ -613,9 +636,8 @@ impl ArchCodegen for ArmCodegen {
 
         if let Some(name) = direct_name {
             self.state.emit(&format!("    bl {}", name));
-        } else if let Some(ptr) = func_ptr {
-            self.operand_to_x0(ptr);
-            self.state.emit("    mov x17, x0");
+        } else if func_ptr.is_some() {
+            // x17 was loaded above before argument setup
             self.state.emit("    blr x17");
         }
 
