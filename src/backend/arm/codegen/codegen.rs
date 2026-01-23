@@ -67,9 +67,33 @@ impl ArmCodegen {
         }
     }
 
+    /// Get the access size in bytes for an AArch64 load/store instruction and register.
+    /// For str/ldr, the access size depends on the register (w=4, x=8).
+    fn access_size_for_instr(instr: &str, reg: &str) -> i64 {
+        match instr {
+            "strb" | "ldrb" | "ldrsb" => 1,
+            "strh" | "ldrh" | "ldrsh" => 2,
+            "ldrsw" => 4,
+            "str" | "ldr" => {
+                if reg.starts_with('w') { 4 } else { 8 }
+            }
+            _ => 1, // conservative default
+        }
+    }
+
+    /// Check if an offset is valid for unsigned immediate addressing on AArch64.
+    /// The unsigned offset is a 12-bit field scaled by access size: max = 4095 * access_size.
+    /// The offset must also be naturally aligned to the access size.
+    fn is_valid_imm_offset(offset: i64, instr: &str, reg: &str) -> bool {
+        if offset < 0 { return false; }
+        let access_size = Self::access_size_for_instr(instr, reg);
+        let max_offset = 4095 * access_size;
+        offset <= max_offset && offset % access_size == 0
+    }
+
     /// Emit store to [sp, #offset], handling large offsets via x16.
     fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
-        if offset >= 0 && offset <= 32760 {
+        if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
             self.load_large_imm("x16", offset);
@@ -80,7 +104,7 @@ impl ArmCodegen {
 
     /// Emit load from [sp, #offset], handling large offsets via x16.
     fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
-        if offset >= 0 && offset <= 32760 {
+        if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
             self.load_large_imm("x16", offset);
@@ -805,11 +829,7 @@ impl ArchCodegen for ArmCodegen {
                         }
                     }
                 }
-                if stack_offset == 0 {
-                    self.state.emit("    str x0, [sp]");
-                } else {
-                    self.state.emit(&format!("    str x0, [sp, #{}]", stack_offset));
-                }
+                self.emit_store_to_sp("x0", stack_offset as i64, "str");
                 stack_offset += 8;
             }
         }
