@@ -92,22 +92,10 @@ impl Lowerer {
         Operand::Value(dest)
     }
 
-    /// Load the value from an lvalue (defaults to I64 for backwards compat).
-    #[allow(dead_code)]
-    pub(super) fn load_lvalue(&mut self, lv: &LValue) -> Operand {
-        self.load_lvalue_typed(lv, IrType::I64)
-    }
-
     /// Store a value to an lvalue with a specific type.
     pub(super) fn store_lvalue_typed(&mut self, lv: &LValue, val: Operand, ty: IrType) {
         let addr = self.lvalue_addr(lv);
         self.emit(Instruction::Store { val, ptr: addr, ty });
-    }
-
-    /// Store a value to an lvalue (defaults to I64 for backwards compat).
-    #[allow(dead_code)]
-    pub(super) fn store_lvalue(&mut self, lv: &LValue, val: Operand) {
-        self.store_lvalue_typed(lv, val, IrType::I64);
     }
 
     /// Compute the address of an array element: base_addr + index * elem_size.

@@ -4,6 +4,7 @@
 /// by maintaining a stack of conditional states.
 
 use super::macro_defs::MacroTable;
+use super::utils::{is_ident_start, is_ident_cont};
 
 /// State of a single conditional (#if/#ifdef/#ifndef block).
 #[derive(Debug, Clone, Copy)]
@@ -73,11 +74,6 @@ impl ConditionalStack {
     /// Handle #endif.
     pub fn handle_endif(&mut self) {
         self.stack.pop();
-    }
-
-    /// Get current nesting depth.
-    pub fn depth(&self) -> usize {
-        self.stack.len()
     }
 }
 
@@ -654,10 +650,3 @@ impl<'a> ExprParser<'a> {
     }
 }
 
-fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-fn is_ident_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}

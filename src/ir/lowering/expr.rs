@@ -61,10 +61,10 @@ impl Lowerer {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 match op {
                     BinOp::LogicalAnd => {
-                        return self.lower_logical_and(lhs, rhs);
+                        return self.lower_short_circuit(lhs, rhs, true);
                     }
                     BinOp::LogicalOr => {
-                        return self.lower_logical_or(lhs, rhs);
+                        return self.lower_short_circuit(lhs, rhs, false);
                     }
                     _ => {}
                 }
@@ -230,15 +230,8 @@ impl Lowerer {
                         let dest = self.fresh_value();
                         self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src: val, ty: neg_ty });
                         // Truncate to sub-64-bit type if needed (not for float)
-                        if !neg_ty.is_float() && (inner_ty == IrType::U32 || inner_ty == IrType::I32) {
-                            let narrowed = self.fresh_value();
-                            self.emit(Instruction::Cast {
-                                dest: narrowed,
-                                src: Operand::Value(dest),
-                                from_ty: IrType::I64,
-                                to_ty: inner_ty,
-                            });
-                            Operand::Value(narrowed)
+                        if !neg_ty.is_float() {
+                            self.maybe_narrow(dest, inner_ty)
                         } else {
                             Operand::Value(dest)
                         }
@@ -249,18 +242,7 @@ impl Lowerer {
                         let dest = self.fresh_value();
                         self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Not, src: val, ty: IrType::I64 });
                         // Truncate to sub-64-bit type if needed (e.g., ~uint must be 32-bit)
-                        if inner_ty == IrType::U32 || inner_ty == IrType::I32 {
-                            let narrowed = self.fresh_value();
-                            self.emit(Instruction::Cast {
-                                dest: narrowed,
-                                src: Operand::Value(dest),
-                                from_ty: IrType::I64,
-                                to_ty: inner_ty,
-                            });
-                            Operand::Value(narrowed)
-                        } else {
-                            Operand::Value(dest)
-                        }
+                        self.maybe_narrow(dest, inner_ty)
                     }
                     UnaryOp::LogicalNot => {
                         let val = self.lower_expr(inner);
@@ -702,65 +684,55 @@ impl Lowerer {
         }
     }
 
-    /// Lower short-circuit && (logical AND).
-    /// Evaluates lhs; if false, result is 0; otherwise evaluates rhs.
-    fn lower_logical_and(&mut self, lhs: &Expr, rhs: &Expr) -> Operand {
-        let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
-
-        let rhs_label = self.fresh_label("and_rhs");
-        let end_label = self.fresh_label("and_end");
-
-        // Evaluate lhs
-        let lhs_val = self.lower_expr(lhs);
-
-        // If lhs is false (0), short-circuit to end with result = 0
-        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(0)), ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::CondBranch {
-            cond: lhs_val,
-            true_label: rhs_label.clone(),
-            false_label: end_label.clone(),
-        });
-
-        // Evaluate rhs
-        self.start_block(rhs_label);
-        let rhs_val = self.lower_expr(rhs);
-        // Result is (rhs != 0) ? 1 : 0
-        let rhs_bool = self.fresh_value();
-        self.emit(Instruction::Cmp {
-            dest: rhs_bool,
-            op: IrCmpOp::Ne,
-            lhs: rhs_val,
-            rhs: Operand::Const(IrConst::I64(0)),
-            ty: IrType::I64,
-        });
-        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
-
-        self.start_block(end_label);
-        let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 });
-        Operand::Value(result)
+    /// Insert a narrowing cast if the type is sub-64-bit (I32/U32).
+    /// Returns the operand unchanged for 64-bit types.
+    fn maybe_narrow(&mut self, val: Value, ty: IrType) -> Operand {
+        if ty == IrType::U32 || ty == IrType::I32 {
+            let narrowed = self.fresh_value();
+            self.emit(Instruction::Cast {
+                dest: narrowed,
+                src: Operand::Value(val),
+                from_ty: IrType::I64,
+                to_ty: ty,
+            });
+            Operand::Value(narrowed)
+        } else {
+            Operand::Value(val)
+        }
     }
 
-    /// Lower short-circuit || (logical OR).
-    /// Evaluates lhs; if true, result is 1; otherwise evaluates rhs.
-    fn lower_logical_or(&mut self, lhs: &Expr, rhs: &Expr) -> Operand {
+    /// Lower short-circuit logical operation (&& or ||).
+    /// For &&: if lhs is false, result is 0; otherwise evaluates rhs.
+    /// For ||: if lhs is true, result is 1; otherwise evaluates rhs.
+    fn lower_short_circuit(&mut self, lhs: &Expr, rhs: &Expr, is_and: bool) -> Operand {
         let result_alloca = self.fresh_value();
         self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
 
-        let rhs_label = self.fresh_label("or_rhs");
-        let end_label = self.fresh_label("or_end");
+        let prefix = if is_and { "and" } else { "or" };
+        let rhs_label = self.fresh_label(&format!("{}_rhs", prefix));
+        let end_label = self.fresh_label(&format!("{}_end", prefix));
 
         // Evaluate lhs
         let lhs_val = self.lower_expr(lhs);
 
-        // If lhs is true (nonzero), short-circuit to end with result = 1
-        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(1)), ptr: result_alloca, ty: IrType::I64 });
+        // Short-circuit: store default result (0 for &&, 1 for ||)
+        let default_val = if is_and { 0 } else { 1 };
+        self.emit(Instruction::Store {
+            val: Operand::Const(IrConst::I64(default_val)),
+            ptr: result_alloca,
+            ty: IrType::I64,
+        });
+
+        // Branch: for &&, evaluate rhs when lhs is true; for ||, when lhs is false
+        let (true_label, false_label) = if is_and {
+            (rhs_label.clone(), end_label.clone())
+        } else {
+            (end_label.clone(), rhs_label.clone())
+        };
         self.terminate(Terminator::CondBranch {
             cond: lhs_val,
-            true_label: end_label.clone(),
-            false_label: rhs_label.clone(),
+            true_label,
+            false_label,
         });
 
         // Evaluate rhs

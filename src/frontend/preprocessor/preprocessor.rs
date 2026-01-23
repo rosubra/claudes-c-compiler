@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use super::macro_defs::{MacroDef, MacroTable, parse_define};
 use super::conditionals::{ConditionalStack, evaluate_condition};
 use super::builtin_macros::define_builtin_macros;
+use super::utils::{is_ident_start, is_ident_cont};
 
 pub struct Preprocessor {
     macros: MacroTable,
@@ -574,14 +575,9 @@ impl Preprocessor {
     }
 
     /// Add an include search path for #include directives (-I flag).
+    /// Adds regardless of whether the directory currently exists.
     pub fn add_include_path(&mut self, path: &str) {
-        let pathbuf = PathBuf::from(path);
-        if pathbuf.is_dir() {
-            self.include_paths.push(pathbuf);
-        } else {
-            // Still add it even if it doesn't exist yet (might be created)
-            self.include_paths.push(pathbuf);
-        }
+        self.include_paths.push(PathBuf::from(path));
     }
 
     /// Check if a line has unbalanced parentheses, indicating a multi-line
@@ -1187,10 +1183,3 @@ fn split_first_word(s: &str) -> (&str, &str) {
     }
 }
 
-fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-fn is_ident_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}

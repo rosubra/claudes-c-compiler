@@ -169,7 +169,7 @@ impl Lowerer {
         // Try to find the struct layout from the base expression
         if let Some(layout) = self.get_layout_for_expr(base_expr) {
             if let Some((offset, ctype)) = layout.field_offset(field_name) {
-                return (offset, self.ctype_to_ir(ctype));
+                return (offset, IrType::from_ctype(ctype));
             }
         }
         // Fallback: assume 4-byte aligned int fields
@@ -183,7 +183,7 @@ impl Lowerer {
         // Try to determine what struct layout p points to
         if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
             if let Some((offset, ctype)) = layout.field_offset(field_name) {
-                return (offset, self.ctype_to_ir(ctype));
+                return (offset, IrType::from_ctype(ctype));
             }
         }
         // Fallback: assume first field at offset 0

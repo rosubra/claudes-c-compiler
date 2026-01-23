@@ -206,17 +206,6 @@ impl CType {
         matches!(self, CType::Char | CType::Short | CType::Int | CType::Long | CType::LongLong)
     }
 
-    pub fn is_pointer(&self) -> bool {
-        matches!(self, CType::Pointer(_))
-    }
-
-    pub fn is_void(&self) -> bool {
-        matches!(self, CType::Void)
-    }
-
-    pub fn is_arithmetic(&self) -> bool {
-        self.is_integer() || matches!(self, CType::Float | CType::Double)
-    }
 }
 
 /// IR-level types (simpler than C types).
@@ -291,11 +280,6 @@ impl IrType {
             IrType::U64 => IrType::I64,
             other => *other,
         }
-    }
-
-    /// Get the bit width of this type, ignoring signedness.
-    pub fn bit_width(&self) -> usize {
-        self.size() * 8
     }
 
     pub fn from_ctype(ct: &CType) -> Self {

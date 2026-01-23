@@ -785,15 +785,8 @@ impl Lowerer {
         let ts = self.resolve_type_spec(ts);
         // Check for pointer declarators
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
-        let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)));
 
-        // If both pointer and array, treat as pointer (e.g., int (*p)[5])
-        if has_pointer && !has_array {
-            let elem_size = self.sizeof_type(ts);
-            return (8, elem_size, false, true, vec![]);
-        }
-        if has_pointer && has_array {
-            // Pointer to array (e.g., int (*p)[5]) - treat as pointer
+        if has_pointer {
             let elem_size = self.sizeof_type(ts);
             return (8, elem_size, false, true, vec![]);
         }
@@ -911,94 +904,66 @@ impl Lowerer {
                 CType::Array(Box::new(elem_ctype), size)
             }
             TypeSpecifier::Struct(name, fields) => {
-                if let Some(fs) = fields {
-                    let struct_fields: Vec<StructField> = fs.iter().map(|f| {
-                        StructField {
-                            name: f.name.clone().unwrap_or_default(),
-                            ty: self.type_spec_to_ctype(&f.type_spec),
-                            bit_width: None,
-                        }
-                    }).collect();
-                    CType::Struct(crate::common::types::StructType {
-                        name: name.clone(),
-                        fields: struct_fields,
-                    })
-                } else if let Some(tag) = name {
-                    // Forward reference: look up cached layout to get field info
-                    let key = format!("struct.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
-                        let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
-                            StructField {
-                                name: f.name.clone(),
-                                ty: f.ty.clone(),
-                                bit_width: None,
-                            }
-                        }).collect();
-                        CType::Struct(crate::common::types::StructType {
-                            name: Some(tag.clone()),
-                            fields: struct_fields,
-                        })
-                    } else {
-                        // Unknown struct - return empty
-                        CType::Struct(crate::common::types::StructType {
-                            name: Some(tag.clone()),
-                            fields: Vec::new(),
-                        })
-                    }
-                } else {
-                    CType::Struct(crate::common::types::StructType {
-                        name: None,
-                        fields: Vec::new(),
-                    })
-                }
+                self.struct_or_union_to_ctype(name, fields, false)
             }
             TypeSpecifier::Union(name, fields) => {
-                if let Some(fs) = fields {
-                    let struct_fields: Vec<StructField> = fs.iter().map(|f| {
-                        StructField {
-                            name: f.name.clone().unwrap_or_default(),
-                            ty: self.type_spec_to_ctype(&f.type_spec),
-                            bit_width: None,
-                        }
-                    }).collect();
-                    CType::Union(crate::common::types::StructType {
-                        name: name.clone(),
-                        fields: struct_fields,
-                    })
-                } else if let Some(tag) = name {
-                    let key = format!("union.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
-                        let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
-                            StructField {
-                                name: f.name.clone(),
-                                ty: f.ty.clone(),
-                                bit_width: None,
-                            }
-                        }).collect();
-                        CType::Union(crate::common::types::StructType {
-                            name: Some(tag.clone()),
-                            fields: struct_fields,
-                        })
-                    } else {
-                        CType::Union(crate::common::types::StructType {
-                            name: Some(tag.clone()),
-                            fields: Vec::new(),
-                        })
-                    }
-                } else {
-                    CType::Union(crate::common::types::StructType {
-                        name: None,
-                        fields: Vec::new(),
-                    })
-                }
+                self.struct_or_union_to_ctype(name, fields, true)
             }
             TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
             TypeSpecifier::TypedefName(_) => CType::Int, // TODO: resolve typedef
         }
     }
 
-    /// Convert a CType to IrType.
-    pub(super) fn ctype_to_ir(&self, ctype: &CType) -> IrType {
-        IrType::from_ctype(ctype)
+    /// Convert a struct or union TypeSpecifier to CType.
+    /// `is_union` selects between struct and union semantics.
+    fn struct_or_union_to_ctype(
+        &self,
+        name: &Option<String>,
+        fields: &Option<Vec<StructFieldDecl>>,
+        is_union: bool,
+    ) -> CType {
+        let make = |st: crate::common::types::StructType| -> CType {
+            if is_union { CType::Union(st) } else { CType::Struct(st) }
+        };
+        let prefix = if is_union { "union" } else { "struct" };
+
+        if let Some(fs) = fields {
+            let struct_fields: Vec<StructField> = fs.iter().map(|f| {
+                StructField {
+                    name: f.name.clone().unwrap_or_default(),
+                    ty: self.type_spec_to_ctype(&f.type_spec),
+                    bit_width: None,
+                }
+            }).collect();
+            make(crate::common::types::StructType {
+                name: name.clone(),
+                fields: struct_fields,
+            })
+        } else if let Some(tag) = name {
+            let key = format!("{}.{}", prefix, tag);
+            if let Some(layout) = self.struct_layouts.get(&key) {
+                let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
+                    StructField {
+                        name: f.name.clone(),
+                        ty: f.ty.clone(),
+                        bit_width: None,
+                    }
+                }).collect();
+                make(crate::common::types::StructType {
+                    name: Some(tag.clone()),
+                    fields: struct_fields,
+                })
+            } else {
+                make(crate::common::types::StructType {
+                    name: Some(tag.clone()),
+                    fields: Vec::new(),
+                })
+            }
+        } else {
+            make(crate::common::types::StructType {
+                name: None,
+                fields: Vec::new(),
+            })
+        }
     }
 }

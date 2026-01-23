@@ -152,6 +152,46 @@ impl Parser {
         }
     }
 
+    /// Skip const/volatile/restrict qualifiers.
+    fn skip_cv_qualifiers(&mut self) {
+        loop {
+            match self.peek() {
+                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Skip array bracket dimensions like [10][20].
+    fn skip_array_dimensions(&mut self) {
+        while matches!(self.peek(), TokenKind::LBracket) {
+            self.advance();
+            while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
+                self.advance();
+            }
+            self.consume_if(&TokenKind::RBracket);
+        }
+    }
+
+    /// Try to match a compound assignment operator token, returning the corresponding BinOp.
+    fn compound_assign_op(&self) -> Option<BinOp> {
+        match self.peek() {
+            TokenKind::PlusAssign => Some(BinOp::Add),
+            TokenKind::MinusAssign => Some(BinOp::Sub),
+            TokenKind::StarAssign => Some(BinOp::Mul),
+            TokenKind::SlashAssign => Some(BinOp::Div),
+            TokenKind::PercentAssign => Some(BinOp::Mod),
+            TokenKind::AmpAssign => Some(BinOp::BitAnd),
+            TokenKind::PipeAssign => Some(BinOp::BitOr),
+            TokenKind::CaretAssign => Some(BinOp::BitXor),
+            TokenKind::LessLessAssign => Some(BinOp::Shl),
+            TokenKind::GreaterGreaterAssign => Some(BinOp::Shr),
+            _ => None,
+        }
+    }
+
     // === Parsing ===
 
     fn parse_external_decl(&mut self) -> Option<ExternalDecl> {
@@ -800,13 +840,7 @@ impl Parser {
                             None
                         };
                         // Skip array brackets
-                        while matches!(self.peek(), TokenKind::LBracket) {
-                            self.advance();
-                            while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                                self.advance();
-                            }
-                            self.consume_if(&TokenKind::RBracket);
-                        }
+                        self.skip_array_dimensions();
                         // Bit field
                         let bit_width = if self.consume_if(&TokenKind::Colon) {
                             Some(Box::new(self.parse_expr()))
@@ -861,15 +895,7 @@ impl Parser {
         // Parse pointer(s)
         while self.consume_if(&TokenKind::Star) {
             derived.push(DerivedDeclarator::Pointer);
-            // Skip const/volatile after pointer
-            loop {
-                match self.peek() {
-                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                        self.advance();
-                    }
-                    _ => break,
-                }
-            }
+            self.skip_cv_qualifiers();
         }
 
         // Parse name or parenthesized declarator
@@ -888,15 +914,7 @@ impl Parser {
             if matches!(self.peek(), TokenKind::Star) || matches!(self.peek(), TokenKind::Caret) {
                 // Function pointer declarator: (*name) or (^name)
                 self.advance(); // consume '*' or '^'
-                // Skip qualifiers
-                loop {
-                    match self.peek() {
-                        TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
+                self.skip_cv_qualifiers();
                 let inner_name = if let TokenKind::Identifier(n) = self.peek().clone() {
                     self.advance();
                     Some(n)
@@ -904,13 +922,7 @@ impl Parser {
                     None
                 };
                 // Skip array brackets inside: (*name[n])
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance();
-                    while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                        self.advance();
-                    }
-                    self.consume_if(&TokenKind::RBracket);
-                }
+                self.skip_array_dimensions();
                 self.expect(&TokenKind::RParen);
                 derived.push(DerivedDeclarator::Pointer);
                 // Parse the function parameter list or array that follows
@@ -1093,14 +1105,7 @@ impl Parser {
         let mut pointer_depth: u32 = 0;
         while self.consume_if(&TokenKind::Star) {
             pointer_depth += 1;
-            loop {
-                match self.peek() {
-                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                        self.advance();
-                    }
-                    _ => break,
-                }
-            }
+            self.skip_cv_qualifiers();
         }
         let mut is_array = false;
         let mut is_func_ptr = false;
@@ -1117,15 +1122,7 @@ impl Parser {
             if self.consume_if(&TokenKind::Star) {
                 // Function pointer: (*name) or (*)
                 is_func_ptr = true;
-                // Skip qualifiers
-                loop {
-                    match self.peek() {
-                        TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
+                self.skip_cv_qualifiers();
                 let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                     self.advance();
                     Some(n)
@@ -1133,13 +1130,7 @@ impl Parser {
                     None
                 };
                 // Skip array dimensions in function pointer declarators
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance();
-                    while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                        self.advance();
-                    }
-                    self.consume_if(&TokenKind::RBracket);
-                }
+                self.skip_array_dimensions();
                 self.expect(&TokenKind::RParen);
                 // Skip the function parameter list: (params)
                 if matches!(self.peek(), TokenKind::LParen) {
@@ -1169,13 +1160,7 @@ impl Parser {
                 };
                 self.expect(&TokenKind::RParen);
                 // Might be followed by array dimensions or param list
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance();
-                    while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                        self.advance();
-                    }
-                    self.consume_if(&TokenKind::RBracket);
-                }
+                self.skip_array_dimensions();
                 if matches!(self.peek(), TokenKind::LParen) {
                     self.skip_balanced_parens();
                 }
@@ -1194,13 +1179,9 @@ impl Parser {
         };
 
         // Skip array dimensions (and track that this is an array type -> pointer decay)
-        while matches!(self.peek(), TokenKind::LBracket) {
+        if matches!(self.peek(), TokenKind::LBracket) {
             is_array = true;
-            self.advance();
-            while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                self.advance();
-            }
-            self.consume_if(&TokenKind::RBracket);
+            self.skip_array_dimensions();
         }
 
         // Skip trailing function param list (for function pointer types without name)
@@ -1528,17 +1509,16 @@ impl Parser {
                 let rhs = self.parse_assignment_expr();
                 Expr::Assign(Box::new(lhs), Box::new(rhs), span)
             }
-            TokenKind::PlusAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Add, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::MinusAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Sub, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::StarAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Mul, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::SlashAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Div, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::PercentAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Mod, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::AmpAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::BitAnd, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::PipeAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::BitOr, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::CaretAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::BitXor, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::LessLessAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Shl, Box::new(lhs), Box::new(rhs), span) }
-            TokenKind::GreaterGreaterAssign => { let span = self.peek_span(); self.advance(); let rhs = self.parse_assignment_expr(); Expr::CompoundAssign(BinOp::Shr, Box::new(lhs), Box::new(rhs), span) }
-            _ => lhs,
+            _ => {
+                if let Some(op) = self.compound_assign_op() {
+                    let span = self.peek_span();
+                    self.advance();
+                    let rhs = self.parse_assignment_expr();
+                    Expr::CompoundAssign(op, Box::new(lhs), Box::new(rhs), span)
+                } else {
+                    lhs
+                }
+            }
         }
     }
 
@@ -1691,24 +1671,10 @@ impl Parser {
                 if let Some(type_spec) = self.parse_type_specifier() {
                     // Skip pointer declarators and array dimensions in abstract declarator
                     while self.consume_if(&TokenKind::Star) {
-                        // skip const/volatile/restrict after pointer
-                        loop {
-                            match self.peek() {
-                                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                                    self.advance();
-                                }
-                                _ => break,
-                            }
-                        }
+                        self.skip_cv_qualifiers();
                     }
                     // Skip array dimensions in abstract declarators e.g. (int [3])
-                    while matches!(self.peek(), TokenKind::LBracket) {
-                        self.advance();
-                        while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                            self.advance();
-                        }
-                        self.consume_if(&TokenKind::RBracket);
-                    }
+                    self.skip_array_dimensions();
                     if matches!(self.peek(), TokenKind::RParen) {
                         let span = self.peek_span();
                         self.advance();
@@ -1792,15 +1758,7 @@ impl Parser {
                             let mut result_type = ts;
                             while self.consume_if(&TokenKind::Star) {
                                 result_type = TypeSpecifier::Pointer(Box::new(result_type));
-                                // Skip const/volatile/restrict qualifiers after *
-                                loop {
-                                    match self.peek() {
-                                        TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
-                                            self.advance();
-                                        }
-                                        _ => break,
-                                    }
-                                }
+                                self.skip_cv_qualifiers();
                             }
                             // Parse array dimensions: sizeof(int[10])
                             while matches!(self.peek(), TokenKind::LBracket) {

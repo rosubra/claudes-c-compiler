@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::utils::{is_ident_start, is_ident_cont};
+
 /// Represents a macro definition.
 #[derive(Debug, Clone)]
 pub struct MacroDef {
@@ -750,14 +752,6 @@ fn stringify_arg(arg: &str) -> String {
         }
     }
     result
-}
-
-fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-fn is_ident_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Parse a #define directive line and return a MacroDef.

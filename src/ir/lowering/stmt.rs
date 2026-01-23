@@ -258,7 +258,7 @@ impl Lowerer {
                                     if i >= layout.fields.len() { break; }
                                     let field = &layout.fields[i];
                                     let field_offset = field.offset;
-                                    let field_ty = self.ctype_to_ir(&field.ty);
+                                    let field_ty = IrType::from_ctype(&field.ty);
                                     let val = match &item.init {
                                         Initializer::Expr(e) => self.lower_expr(e),
                                         _ => Operand::Const(IrConst::I64(0)),
