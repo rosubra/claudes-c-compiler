@@ -1115,6 +1115,24 @@ impl Lowerer {
                 Some(Designator::Field(ref name)) => Some(name.as_str()),
                 _ => None,
             };
+            // Check for array index designator after field designator: .field[idx]
+            let array_start_idx: Option<usize> = if desig_name.is_some() {
+                item.designators.iter().find_map(|d| {
+                    if let Designator::Index(ref idx_expr) = d {
+                        self.eval_const_expr_for_designator(idx_expr)
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                // Bare [idx] designator on current field
+                match item.designators.first() {
+                    Some(Designator::Index(ref idx_expr)) => {
+                        self.eval_const_expr_for_designator(idx_expr)
+                    }
+                    _ => None,
+                }
+            };
             let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
                 Some(idx) => idx,
                 None => break,
@@ -1307,8 +1325,9 @@ impl Lowerer {
                                 // Flat init for array of structs: consume items for each
                                 // struct element's fields across the array
                                 let sub_layout = StructLayout::for_struct(&st.fields);
+                                let start_ai = array_start_idx.unwrap_or(0);
                                 let mut total_consumed = 0usize;
-                                for ai in 0..*arr_size {
+                                for ai in start_ai..*arr_size {
                                     if item_idx + total_consumed >= items.len() { break; }
                                     let elem_offset = field_offset + ai * elem_size;
                                     let consumed = self.emit_struct_init(&items[item_idx + total_consumed..], base_alloca, &sub_layout, elem_offset);
@@ -1318,17 +1337,20 @@ impl Lowerer {
                             } else {
                                 // Flat init: consume up to arr_size items from the init list
                                 // to fill the array elements (e.g., struct { int a[3]; int b; } x = {1,2,3,4};)
+                                // If array_start_idx is set (e.g., .field[3] = val), start from that index.
                                 let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                let start_ai = array_start_idx.unwrap_or(0);
                                 let mut consumed = 0usize;
-                                while consumed < *arr_size && (item_idx + consumed) < items.len() {
+                                let mut ai = start_ai;
+                                while ai < *arr_size && (item_idx + consumed) < items.len() {
                                     let cur_item = &items[item_idx + consumed];
-                                    // Stop if we hit a designator (which targets a different field)
-                                    if !cur_item.designators.is_empty() { break; }
+                                    // Stop if we hit a designator (which targets a different field/index)
+                                    if !cur_item.designators.is_empty() && consumed > 0 { break; }
                                     if let Initializer::Expr(expr) = &cur_item.init {
                                         let expr_ty = self.get_expr_type(expr);
                                         let val = self.lower_expr(expr);
                                         let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
-                                        let elem_offset = field_offset + consumed * elem_size;
+                                        let elem_offset = field_offset + ai * elem_size;
                                         let addr = self.fresh_value();
                                         self.emit(Instruction::GetElementPtr {
                                             dest: addr,
@@ -1338,6 +1360,7 @@ impl Lowerer {
                                         });
                                         self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
                                         consumed += 1;
+                                        ai += 1;
                                     } else {
                                         // Hit a nested List - stop flat consumption
                                         break;
