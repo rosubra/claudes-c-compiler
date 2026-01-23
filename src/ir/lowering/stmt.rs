@@ -236,6 +236,19 @@ impl Lowerer {
                 is_bool,
             });
 
+            // Track function pointer return and param types for correct calling convention
+            for d in &declarator.derived {
+                if let DerivedDeclarator::FunctionPointer(params, _) = d {
+                    let ret_ty = self.type_spec_to_ir(&decl.type_spec);
+                    self.function_ptr_return_types.insert(declarator.name.clone(), ret_ty);
+                    let param_tys: Vec<IrType> = params.iter().map(|p| {
+                        self.type_spec_to_ir(&p.type_spec)
+                    }).collect();
+                    self.function_ptr_param_types.insert(declarator.name.clone(), param_tys);
+                    break;
+                }
+            }
+
             if let Some(ref init) = declarator.init {
                 match init {
                     Initializer::Expr(expr) => {

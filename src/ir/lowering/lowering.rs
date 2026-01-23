@@ -116,6 +116,10 @@ pub struct Lowerer {
     pub(super) function_param_types: HashMap<String, Vec<IrType>>,
     /// Function name -> is_variadic flag for calling convention handling.
     pub(super) function_variadic: HashSet<String>,
+    /// Function pointer variable name -> return type mapping.
+    pub(super) function_ptr_return_types: HashMap<String, IrType>,
+    /// Function pointer variable name -> parameter types mapping.
+    pub(super) function_ptr_param_types: HashMap<String, Vec<IrType>>,
 }
 
 impl Lowerer {
@@ -150,6 +154,8 @@ impl Lowerer {
             function_return_types: HashMap::new(),
             function_param_types: HashMap::new(),
             function_variadic: HashSet::new(),
+            function_ptr_return_types: HashMap::new(),
+            function_ptr_param_types: HashMap::new(),
         }
     }
 
@@ -763,13 +769,19 @@ impl Lowerer {
                     let mut values = vec![self.zero_const(base_ty); num_elems];
                     // For multi-dim arrays, flatten nested init lists
                     if array_dim_strides.len() > 1 {
-                        let mut flat = Vec::with_capacity(num_elems);
+                        // For multi-dim arrays, num_elems is outer dimension count,
+                        // but we need total scalar elements for the flattened init
+                        let innermost_stride = array_dim_strides.last().copied().unwrap_or(1).max(1);
+                        let total_scalar_elems = total_size / innermost_stride;
+                        let mut values_flat = vec![self.zero_const(base_ty); total_scalar_elems];
+                        let mut flat = Vec::with_capacity(total_scalar_elems);
                         self.flatten_global_array_init(items, array_dim_strides, base_ty, &mut flat);
                         for (i, v) in flat.into_iter().enumerate() {
-                            if i < num_elems {
-                                values[i] = v;
+                            if i < total_scalar_elems {
+                                values_flat[i] = v;
                             }
                         }
+                        return GlobalInit::Array(values_flat);
                     } else {
                         // Support designated initializers: [idx] = val
                         let mut current_idx = 0usize;
@@ -1523,21 +1535,23 @@ impl Lowerer {
             1
         };
         for item in items {
-            let start_len = values.len();
             match &item.init {
                 Initializer::List(sub_items) => {
+                    let start_len = values.len();
                     self.flatten_global_array_init(sub_items, &array_dim_strides[1..], base_ty, values);
+                    // Zero-pad sub-arrays to their full size
+                    while values.len() < start_len + sub_elem_count {
+                        values.push(self.zero_const(base_ty));
+                    }
                 }
                 Initializer::Expr(expr) => {
+                    // Scalar in a flattened initializer - just push, don't pad
                     if let Some(val) = self.eval_const_expr(expr) {
                         values.push(val);
                     } else {
                         values.push(self.zero_const(base_ty));
                     }
                 }
-            }
-            while values.len() < start_len + sub_elem_count {
-                values.push(self.zero_const(base_ty));
             }
         }
     }

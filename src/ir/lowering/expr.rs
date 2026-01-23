@@ -458,6 +458,7 @@ impl Lowerer {
     fn lower_call_arguments(&mut self, func: &Expr, args: &[Expr]) -> (Vec<Operand>, Vec<IrType>) {
         let param_types: Option<Vec<IrType>> = if let Expr::Identifier(name, _) = func {
             self.function_param_types.get(name).cloned()
+                .or_else(|| self.function_ptr_param_types.get(name).cloned())
         } else {
             None
         };
@@ -509,21 +510,23 @@ impl Lowerer {
                     let info = self.locals.get(name).unwrap().clone();
                     let ptr_val = self.fresh_value();
                     self.emit(Instruction::Load { dest: ptr_val, ptr: info.alloca, ty: IrType::Ptr });
+                    let ret_ty = self.function_ptr_return_types.get(name).copied().unwrap_or(IrType::I64);
                     self.emit(Instruction::CallIndirect {
                         dest: Some(dest), func_ptr: Operand::Value(ptr_val),
-                        args: arg_vals, arg_types, return_type: IrType::I64, is_variadic,
+                        args: arg_vals, arg_types, return_type: ret_ty, is_variadic,
                     });
-                    IrType::I64
+                    ret_ty
                 } else if is_global_fptr {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
                     let ptr_val = self.fresh_value();
                     self.emit(Instruction::Load { dest: ptr_val, ptr: addr, ty: IrType::Ptr });
+                    let ret_ty = self.function_ptr_return_types.get(name).copied().unwrap_or(IrType::I64);
                     self.emit(Instruction::CallIndirect {
                         dest: Some(dest), func_ptr: Operand::Value(ptr_val),
-                        args: arg_vals, arg_types, return_type: IrType::I64, is_variadic,
+                        args: arg_vals, arg_types, return_type: ret_ty, is_variadic,
                     });
-                    IrType::I64
+                    ret_ty
                 } else {
                     // Direct call - look up return type
                     let ret_ty = self.function_return_types.get(name).copied().unwrap_or(IrType::I64);

@@ -449,6 +449,9 @@ impl Lowerer {
                     if let Some(&ret_ty) = self.function_return_types.get(name) {
                         return ret_ty;
                     }
+                    if let Some(&ret_ty) = self.function_ptr_return_types.get(name) {
+                        return ret_ty;
+                    }
                 }
                 return IrType::I64;
             }
