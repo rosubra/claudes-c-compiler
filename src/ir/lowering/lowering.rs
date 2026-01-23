@@ -576,6 +576,9 @@ impl Lowerer {
                 } else {
                     layout.size
                 }
+            } else if !is_array && !is_pointer {
+                // For scalar globals, use the actual type size (not the 8-byte stack slot size)
+                var_ty.size()
             } else {
                 alloc_size
             };
