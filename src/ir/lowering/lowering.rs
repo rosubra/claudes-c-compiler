@@ -684,6 +684,19 @@ impl Lowerer {
                         return GlobalInit::GlobalAddr(label);
                     }
                 }
+                // Handle &(compound_literal) at file scope: create anonymous global
+                if let Expr::AddressOf(inner, _) = expr {
+                    if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                        return self.create_compound_literal_global(cl_type_spec, cl_init);
+                    }
+                }
+                // Handle (compound_literal) used as struct initializer value
+                if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
+                    if base_ty == IrType::Ptr {
+                        // Pointer: create anonymous global and return address
+                        return self.create_compound_literal_global(cl_type_spec, cl_init);
+                    }
+                }
                 // Try to evaluate as a global address expression (e.g., &x, func, arr, &arr[3], &s.field)
                 if let Some(addr_init) = self.eval_global_addr_expr(expr) {
                     return addr_init;
@@ -873,6 +886,63 @@ impl Lowerer {
                 GlobalInit::Zero
             }
         }
+    }
+
+    /// Create an anonymous global for a compound literal at file scope.
+    /// Used for: struct S *s = &(struct S){1, 2};
+    fn create_compound_literal_global(
+        &mut self,
+        type_spec: &TypeSpecifier,
+        init: &Initializer,
+    ) -> GlobalInit {
+        let label = format!(".Lcompound_lit_{}", self.next_anon_struct);
+        self.next_anon_struct += 1;
+
+        let base_ty = self.type_spec_to_ir(type_spec);
+        let struct_layout = self.get_struct_layout_for_type(type_spec);
+        let alloc_size = if let Some(ref layout) = struct_layout {
+            layout.size
+        } else {
+            self.sizeof_type(type_spec)
+        };
+
+        let align = match base_ty {
+            IrType::I8 | IrType::U8 => 1,
+            IrType::I16 | IrType::U16 => 2,
+            IrType::I32 | IrType::U32 => 4,
+            IrType::I64 | IrType::U64 | IrType::Ptr => 8,
+            IrType::F32 => 4,
+            IrType::F64 => 8,
+            IrType::Void => 1,
+        };
+        // Use struct alignment if available
+        let align = if let Some(ref layout) = struct_layout {
+            layout.align.max(align)
+        } else {
+            align
+        };
+
+        let global_init = self.lower_global_init(init, type_spec, base_ty, false, 0, alloc_size, &struct_layout, &[]);
+
+        let global_ty = if matches!(&global_init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
+            IrType::I8
+        } else if struct_layout.is_some() && matches!(global_init, GlobalInit::Array(_)) {
+            IrType::I8
+        } else {
+            base_ty
+        };
+
+        self.module.globals.push(IrGlobal {
+            name: label.clone(),
+            ty: global_ty,
+            size: alloc_size,
+            align,
+            init: global_init,
+            is_static: true, // compound literal globals are local to translation unit
+            is_extern: false,
+        });
+
+        GlobalInit::GlobalAddr(label)
     }
 
     /// Lower a struct initializer list to a GlobalInit::Array of field values.
@@ -1105,10 +1175,32 @@ impl Lowerer {
                             }
                         }
                     }
-                    _ => {
-                        // Nested list - zero fill for now (nested struct with addr not handled)
-                        for _ in 0..field_size {
-                            elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                    Initializer::List(nested_items) => {
+                        // Nested struct/array init - serialize to bytes
+                        let mut bytes = vec![0u8; field_size];
+                        if let Some(nested_layout) = self.get_struct_layout_for_ctype(&field.ty) {
+                            self.fill_struct_global_bytes(nested_items, &nested_layout, &mut bytes, 0);
+                        } else {
+                            // Simple array or scalar list
+                            let mut byte_offset = 0;
+                            let elem_ty = match &field.ty {
+                                CType::Array(inner, _) => IrType::from_ctype(inner),
+                                other => IrType::from_ctype(other),
+                            };
+                            let elem_size = elem_ty.size().max(1);
+                            for ni in nested_items {
+                                if byte_offset >= field_size { break; }
+                                if let Initializer::Expr(ref e) = ni.init {
+                                    if let Some(val) = self.eval_const_expr(e) {
+                                        let val = self.coerce_const_to_type(val, elem_ty);
+                                        self.write_const_to_bytes(&mut bytes, byte_offset, &val, elem_ty);
+                                    }
+                                }
+                                byte_offset += elem_size;
+                            }
+                        }
+                        for b in &bytes {
+                            elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
                         }
                     }
                 }

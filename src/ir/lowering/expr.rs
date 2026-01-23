@@ -246,7 +246,9 @@ impl Lowerer {
         match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let cmp_op = Self::binop_to_cmp(*op, is_unsigned);
-                self.emit(Instruction::Cmp { dest, op: cmp_op, lhs: lhs_val, rhs: rhs_val, ty: op_ty });
+                // Use common_ty for comparisons so the backend uses the correct width
+                // (e.g., U32 triggers 32-bit cmp, avoiding sign-extension mismatch)
+                self.emit(Instruction::Cmp { dest, op: cmp_op, lhs: lhs_val, rhs: rhs_val, ty: common_ty });
             }
             _ => {
                 let ir_op = Self::binop_to_ir(*op, is_unsigned);

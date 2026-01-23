@@ -1268,6 +1268,10 @@ impl Lowerer {
                     // Comparison/logical: result is int
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le
                     | BinOp::Gt | BinOp::Ge | BinOp::LogicalAnd | BinOp::LogicalOr => 4,
+                    // Shift operators: result type is promoted left operand
+                    BinOp::Shl | BinOp::Shr => {
+                        self.sizeof_expr(lhs).max(4) // integer promotion of left operand only
+                    }
                     // Arithmetic/bitwise: usual arithmetic conversions
                     _ => {
                         let ls = self.sizeof_expr(lhs);

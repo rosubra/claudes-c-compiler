@@ -861,6 +861,34 @@ impl Parser {
                     fields.push(StructFieldDecl { type_spec, name: None, bit_width: None });
                 } else {
                     loop {
+                        // Check for function pointer field: type (*name)(params)
+                        if matches!(self.peek(), TokenKind::LParen) {
+                            let save = self.pos;
+                            self.advance(); // consume '('
+                            if matches!(self.peek(), TokenKind::Star) {
+                                self.advance(); // consume '*'
+                                self.skip_cv_qualifiers();
+                                let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+                                    self.advance();
+                                    Some(n)
+                                } else {
+                                    None
+                                };
+                                self.skip_array_dimensions();
+                                self.expect(&TokenKind::RParen);
+                                // Skip the parameter list
+                                self.skip_balanced_parens();
+                                // Function pointer is treated as a pointer type
+                                let field_type = TypeSpecifier::Pointer(Box::new(type_spec.clone()));
+                                fields.push(StructFieldDecl { type_spec: field_type, name, bit_width: None });
+                                if !self.consume_if(&TokenKind::Comma) {
+                                    break;
+                                }
+                                continue;
+                            } else {
+                                self.pos = save; // restore, not a function pointer
+                            }
+                        }
                         // Parse pointer declarators: wrap type_spec for each *
                         let mut field_type = type_spec.clone();
                         while self.consume_if(&TokenKind::Star) {
