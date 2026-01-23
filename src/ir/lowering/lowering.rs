@@ -1162,7 +1162,18 @@ impl Lowerer {
             if let Some(item) = field_inits[fi] {
                 match &item.init {
                     Initializer::Expr(expr) => {
-                        if let Some(val) = self.eval_const_expr(expr) {
+                        if let Expr::StringLiteral(s, _) = expr {
+                            // String literal initializing a char array field
+                            let s_bytes = s.as_bytes();
+                            for (i, &b) in s_bytes.iter().enumerate() {
+                                if i >= field_size { break; }
+                                elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
+                            }
+                            // null terminator + remaining zero fill
+                            for _ in s_bytes.len()..field_size {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                            }
+                        } else if let Some(val) = self.eval_const_expr(expr) {
                             // Scalar constant - emit as bytes
                             self.push_const_as_bytes(&mut elements, &val, field_size);
                         } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
@@ -1362,9 +1373,25 @@ impl Lowerer {
 
             match &item.init {
                 Initializer::Expr(expr) => {
-                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                    let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                    self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                    if let Expr::StringLiteral(s, _) = expr {
+                        // String literal initializing a char array field
+                        if let CType::Array(_, Some(arr_size)) = &field_layout.ty {
+                            let s_bytes = s.as_bytes();
+                            for (i, &b) in s_bytes.iter().enumerate() {
+                                if i >= *arr_size { break; }
+                                if field_offset + i < bytes.len() {
+                                    bytes[field_offset + i] = b;
+                                }
+                            }
+                            if s_bytes.len() < *arr_size && field_offset + s_bytes.len() < bytes.len() {
+                                bytes[field_offset + s_bytes.len()] = 0;
+                            }
+                        }
+                    } else {
+                        let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                        let field_ir_ty = IrType::from_ctype(&field_layout.ty);
+                        self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                    }
                 }
                 Initializer::List(sub_items) => {
                     // Nested struct/union: recurse if the field is a struct type
