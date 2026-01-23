@@ -94,8 +94,8 @@ impl Lowerer {
             return Operand::Const(IrConst::I64(val));
         }
 
-        // Local variables: arrays/structs decay to address, scalars are loaded
-        // Check locals BEFORE static_local_names so inner-scope locals shadow statics.
+        // Local variables: arrays/structs decay to address, scalars are loaded.
+        // Check locals first so that inner-scope locals shadow outer static locals.
         if let Some(info) = self.locals.get(name).cloned() {
             if info.is_array || info.is_struct {
                 return Operand::Value(info.alloca);
@@ -106,8 +106,7 @@ impl Lowerer {
         }
 
         // Static local variables: resolve through static_local_names to their
-        // mangled global name. Emit GlobalAddr at point of use so it works
-        // regardless of control flow (goto can skip the declaration).
+        // mangled global name. Checked after locals so inner-scope locals can shadow.
         if let Some(mangled) = self.static_local_names.get(name).cloned() {
             if let Some(ginfo) = self.globals.get(&mangled).cloned() {
                 let addr = self.fresh_value();
@@ -1301,6 +1300,13 @@ impl Lowerer {
             None
         };
 
+        // Get _Bool parameter flags for normalization
+        let param_bool_flags: Option<Vec<bool>> = if let Expr::Identifier(name, _) = func {
+            self.function_param_bool_flags.get(name).cloned()
+        } else {
+            None
+        };
+
         // Pre-determine variadic status for argument promotion decisions
         let pre_call_variadic = if let Expr::Identifier(name, _) = func {
             self.is_function_variadic(name)
@@ -1313,12 +1319,21 @@ impl Lowerer {
             let val = self.lower_expr(a);
             let arg_ty = self.get_expr_type(a);
 
+            // Check if this parameter is _Bool and needs normalization to 0/1
+            let is_bool_param = param_bool_flags.as_ref()
+                .map_or(false, |flags| i < flags.len() && flags[i]);
+
             // Cast to declared parameter type if known
             if let Some(ref ptypes) = param_types {
                 if i < ptypes.len() {
                     let param_ty = ptypes[i];
                     arg_types.push(param_ty);
-                    return self.emit_implicit_cast(val, arg_ty, param_ty);
+                    let cast_val = self.emit_implicit_cast(val, arg_ty, param_ty);
+                    // For _Bool parameters, normalize to 0/1 after cast
+                    if is_bool_param {
+                        return self.emit_bool_normalize(cast_val);
+                    }
+                    return cast_val;
                 }
             }
             // Default promotion: float -> double for variadic args or when param types are known.

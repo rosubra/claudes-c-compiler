@@ -131,12 +131,16 @@ impl Lowerer {
                 Some(result)
             }
             Expr::Identifier(name, _) => {
-                // Look up enum constants
+                // Look up enum constants first
                 if let Some(&val) = self.enum_constants.get(name) {
-                    Some(IrConst::I64(val))
-                } else {
-                    None
+                    return Some(IrConst::I64(val));
                 }
+                // Look up const-qualified local variable values
+                // (e.g., const int len = 5000; int arr[len];)
+                if let Some(&val) = self.const_local_values.get(name) {
+                    return Some(IrConst::I64(val));
+                }
+                None
             }
             Expr::Sizeof(arg, _) => {
                 let size = match arg.as_ref() {

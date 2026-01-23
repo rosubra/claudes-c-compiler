@@ -17,6 +17,8 @@ pub struct Parser {
     parsing_extern: bool,
     /// Set to true when parse_type_specifier encounters an `inline` keyword.
     parsing_inline: bool,
+    /// Set to true when parse_type_specifier encounters a `const` qualifier.
+    parsing_const: bool,
 }
 
 impl Parser {
@@ -29,6 +31,7 @@ impl Parser {
             parsing_static: false,
             parsing_extern: false,
             parsing_inline: false,
+            parsing_const: false,
         }
     }
 
@@ -222,6 +225,7 @@ impl Parser {
                 is_static: false,
                 is_extern: false,
                 is_typedef: false,
+                is_const: false,
                 span: Span::dummy(),
             }));
         }
@@ -231,6 +235,7 @@ impl Parser {
         self.parsing_static = false;
         self.parsing_extern = false;
         self.parsing_inline = false;
+        self.parsing_const = false;
 
         // Try to parse a type + name, then determine if it's a function def or declaration
         let start = self.peek_span();
@@ -246,6 +251,7 @@ impl Parser {
                 is_static: self.parsing_static,
                 is_extern: self.parsing_extern,
                 is_typedef: self.parsing_typedef,
+                is_const: self.parsing_const,
                 span: start,
             }));
         }
@@ -257,7 +263,8 @@ impl Parser {
                 TokenKind::Typedef => { self.advance(); self.parsing_typedef = true; }
                 TokenKind::Static => { self.advance(); self.parsing_static = true; }
                 TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
-                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+                TokenKind::Const => { self.advance(); self.parsing_const = true; }
+                TokenKind::Volatile | TokenKind::Restrict
                 | TokenKind::Inline | TokenKind::Register | TokenKind::Auto => { self.advance(); }
                 TokenKind::Alignas => {
                     self.advance();
@@ -440,6 +447,7 @@ impl Parser {
                 is_static: self.parsing_static,
                 is_extern: self.parsing_extern,
                 is_typedef,
+                is_const: self.parsing_const,
                 span: start,
             }))
         }
@@ -544,8 +552,12 @@ impl Parser {
         // Collect qualifiers, storage classes, and type specifiers in a loop
         loop {
             match self.peek().clone() {
-                // Qualifiers (skip)
-                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+                // Qualifiers
+                TokenKind::Const => {
+                    self.advance();
+                    self.parsing_const = true;
+                }
+                TokenKind::Volatile | TokenKind::Restrict
                 | TokenKind::Register | TokenKind::Noreturn
                 | TokenKind::Auto => {
                     self.advance();
@@ -1421,6 +1433,7 @@ impl Parser {
         self.parsing_extern = false;
         self.parsing_typedef = false;
         self.parsing_inline = false;
+        self.parsing_const = false;
         let type_spec = self.parse_type_specifier()?;
 
         // Handle storage-class specifiers and alignment specifiers that appear after the type.
@@ -1429,7 +1442,8 @@ impl Parser {
                 TokenKind::Typedef => { self.advance(); self.parsing_typedef = true; }
                 TokenKind::Static => { self.advance(); self.parsing_static = true; }
                 TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
-                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+                TokenKind::Const => { self.advance(); self.parsing_const = true; }
+                TokenKind::Volatile | TokenKind::Restrict
                 | TokenKind::Inline | TokenKind::Register | TokenKind::Auto => { self.advance(); }
                 TokenKind::Alignas => {
                     self.advance();
@@ -1454,7 +1468,7 @@ impl Parser {
         // Handle case where type is followed by semicolon (struct/enum/union def)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, span: start });
         }
 
         loop {
@@ -1489,7 +1503,7 @@ impl Parser {
         }
 
         self.expect(&TokenKind::Semicolon);
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, span: start })
     }
 
     fn parse_initializer(&mut self) -> Initializer {

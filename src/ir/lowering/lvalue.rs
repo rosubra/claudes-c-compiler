@@ -9,7 +9,7 @@ impl Lowerer {
     pub(super) fn lower_lvalue(&mut self, expr: &Expr) -> Option<LValue> {
         match expr {
             Expr::Identifier(name, _) => {
-                // Check locals first so inner-scope locals shadow statics
+                // Check locals first so inner-scope locals shadow outer static locals
                 if let Some(info) = self.locals.get(name).cloned() {
                     return Some(LValue::Variable(info.alloca));
                 }

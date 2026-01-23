@@ -5,9 +5,10 @@ use super::lowering::{Lowerer, LocalInfo, GlobalInfo};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
-        // Save current locals and static_local_names for block scope restoration
+        // Save current locals, static local names, and const values for block scope restoration
         let saved_locals = self.locals.clone();
-        let saved_static_names = self.static_local_names.clone();
+        let saved_static_local_names = self.static_local_names.clone();
+        let saved_const_local_values = self.const_local_values.clone();
 
         for item in &compound.items {
             match item {
@@ -20,9 +21,10 @@ impl Lowerer {
             }
         }
 
-        // Restore outer scope (removes block-scoped declarations)
+        // Restore outer scope locals, static local names, and const values
         self.locals = saved_locals;
-        self.static_local_names = saved_static_names;
+        self.static_local_names = saved_static_local_names;
+        self.const_local_values = saved_const_local_values;
     }
 
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
@@ -108,8 +110,12 @@ impl Lowerer {
                     let param_tys: Vec<IrType> = params.iter().map(|p| {
                         self.type_spec_to_ir(&p.type_spec)
                     }).collect();
+                    let param_bool_flags: Vec<bool> = params.iter().map(|p| {
+                        matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+                    }).collect();
                     if !variadic || !param_tys.is_empty() {
                         self.function_param_types.insert(declarator.name.clone(), param_tys);
+                        self.function_param_bool_flags.insert(declarator.name.clone(), param_bool_flags);
                     }
                     if variadic {
                         self.function_variadic.insert(declarator.name.clone());
@@ -343,6 +349,15 @@ impl Lowerer {
                                 });
                             }
                         } else {
+                            // Track const-qualified integer variable values for compile-time
+                            // array size evaluation (e.g., const int len = 5000; int arr[len];)
+                            if decl.is_const && !is_pointer && !is_array && !is_struct {
+                                if let Some(const_val) = self.eval_const_expr(expr) {
+                                    if let Some(ival) = self.const_to_i64(&const_val) {
+                                        self.const_local_values.insert(declarator.name.clone(), ival);
+                                    }
+                                }
+                            }
                             let val = self.lower_expr(expr);
                             // Insert implicit cast for type mismatches
                             // (e.g., float f = 'a', int x = 3.14, char c = 99.0)
@@ -792,6 +807,8 @@ impl Lowerer {
             Stmt::For(init, cond, inc, body, _span) => {
                 // Save locals for for-init scope (C99: for-init decl has its own scope)
                 let saved_locals = self.locals.clone();
+                let saved_static_local_names = self.static_local_names.clone();
+                let saved_const_local_values = self.const_local_values.clone();
 
                 // Init
                 if let Some(init) = init {
@@ -842,8 +859,10 @@ impl Lowerer {
 
                 self.start_block(end_label);
 
-                // Restore locals to exit for-init scope
+                // Restore locals, static local names, and const values to exit for-init scope
                 self.locals = saved_locals;
+                self.static_local_names = saved_static_local_names;
+                self.const_local_values = saved_const_local_values;
             }
             Stmt::DoWhile(body, cond, _span) => {
                 let body_label = self.fresh_label("do_body");
@@ -1235,7 +1254,7 @@ impl Lowerer {
                     }
                 }
                 _ => {
-                    // Scalar field
+                    // Scalar field (possibly a bitfield)
                     let field_ty = IrType::from_ctype(&field.ty);
                     let (val, expr_ty) = match &item.init {
                         Initializer::Expr(e) => {
@@ -1265,7 +1284,12 @@ impl Lowerer {
                         offset: Operand::Const(IrConst::I64(field_offset as i64)),
                         ty: field_ty,
                     });
-                    self.emit(Instruction::Store { val, ptr: addr, ty: field_ty });
+                    // Bitfield fields need read-modify-write instead of plain store
+                    if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
+                        self.store_bitfield(addr, field_ty, bit_offset, bit_width, val);
+                    } else {
+                        self.emit(Instruction::Store { val, ptr: addr, ty: field_ty });
+                    }
                     item_idx += 1;
                 }
             }

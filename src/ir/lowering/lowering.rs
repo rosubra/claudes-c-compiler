@@ -108,6 +108,9 @@ pub struct Lowerer {
     pub(super) struct_layouts: HashMap<String, StructLayout>,
     /// Enum constant values collected from enum definitions.
     pub(super) enum_constants: HashMap<String, i64>,
+    /// Const-qualified local variable values for compile-time evaluation.
+    /// Maps variable name -> constant value (for `const int len = 5000;` etc.)
+    pub(super) const_local_values: HashMap<String, i64>,
     /// User-defined goto labels mapped to unique IR labels (scoped per function).
     pub(super) user_labels: HashMap<String, String>,
     /// Typedef mappings (name -> underlying TypeSpecifier).
@@ -116,6 +119,8 @@ pub struct Lowerer {
     pub(super) function_return_types: HashMap<String, IrType>,
     /// Function name -> parameter types mapping for inserting implicit argument casts.
     pub(super) function_param_types: HashMap<String, Vec<IrType>>,
+    /// Function name -> flags indicating which parameters are _Bool (need normalization to 0/1).
+    pub(super) function_param_bool_flags: HashMap<String, Vec<bool>>,
     /// Function name -> is_variadic flag for calling convention handling.
     pub(super) function_variadic: HashSet<String>,
     /// Function pointer variable name -> return type mapping.
@@ -163,10 +168,12 @@ impl Lowerer {
             switch_expr_types: Vec::new(),
             struct_layouts: HashMap::new(),
             enum_constants: HashMap::new(),
+            const_local_values: HashMap::new(),
             user_labels: HashMap::new(),
             typedefs: HashMap::new(),
             function_return_types: HashMap::new(),
             function_param_types: HashMap::new(),
+            function_param_bool_flags: HashMap::new(),
             function_variadic: HashSet::new(),
             function_ptr_return_types: HashMap::new(),
             function_ptr_param_types: HashMap::new(),
@@ -238,8 +245,12 @@ impl Lowerer {
                 let param_tys: Vec<IrType> = func.params.iter().map(|p| {
                     self.type_spec_to_ir(&p.type_spec)
                 }).collect();
+                let param_bool_flags: Vec<bool> = func.params.iter().map(|p| {
+                    matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+                }).collect();
                 if !func.variadic || !param_tys.is_empty() {
                     self.function_param_types.insert(func.name.clone(), param_tys);
+                    self.function_param_bool_flags.insert(func.name.clone(), param_bool_flags);
                 }
                 if func.variadic {
                     self.function_variadic.insert(func.name.clone());
@@ -296,8 +307,12 @@ impl Lowerer {
                         let param_tys: Vec<IrType> = params.iter().map(|p| {
                             self.type_spec_to_ir(&p.type_spec)
                         }).collect();
+                        let param_bool_flags: Vec<bool> = params.iter().map(|p| {
+                            matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+                        }).collect();
                         if !variadic || !param_tys.is_empty() {
                             self.function_param_types.insert(declarator.name.clone(), param_tys);
+                            self.function_param_bool_flags.insert(declarator.name.clone(), param_bool_flags);
                         }
                         if *variadic {
                             self.function_variadic.insert(declarator.name.clone());
@@ -365,6 +380,7 @@ impl Lowerer {
         self.current_blocks.clear();
         self.locals.clear();
         self.static_local_names.clear();
+        self.const_local_values.clear();
         self.break_labels.clear();
         self.continue_labels.clear();
         self.user_labels.clear();

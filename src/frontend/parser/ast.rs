@@ -42,6 +42,7 @@ pub struct Declaration {
     pub is_static: bool,
     pub is_extern: bool,
     pub is_typedef: bool,
+    pub is_const: bool,
     pub span: Span,
 }
 
