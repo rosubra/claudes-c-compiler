@@ -1,0 +1,18 @@
+Task: Implement floating-point codegen for all backends
+Status: In Progress
+
+Problem:
+- Float constants (F32/F64) are zeroed out instead of loaded properly
+- All arithmetic is lowered as IrType::I64 even for float operations
+- No float-to-int or int-to-float cast support in any backend
+- Float function args/returns don't use float registers (d0-d7, xmm0-xmm7, fa0-fa7)
+- Float comparisons not implemented
+
+Fix:
+- Add is_float() helper to IrType
+- Fix IR lowering to propagate F32/F64 types for float operations
+- Implement float constant loading (via data section or bit manipulation)
+- Implement float arithmetic (fadd/fsub/fmul/fdiv on float regs)
+- Implement float-int casts (fcvtzs/scvtf, cvttsd2si/cvtsi2sd, fcvt.d.w/fcvt.w.d)
+- Implement float calling convention (d0-d7, xmm0-xmm7, fa0-fa7)
+- Implement float comparisons (fcmp, ucomisd, etc.)
