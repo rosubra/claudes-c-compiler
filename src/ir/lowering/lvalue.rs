@@ -300,23 +300,28 @@ impl Lowerer {
         self.get_array_elem_size(base)
     }
 
-    /// Get the element size for a struct/union member that is an array.
+    /// Get the element size for a struct/union member that is an array or pointer.
     /// For s.field where field is `char[8]`, returns 1 (sizeof(char)).
     /// For s.arr where arr is `int[10]`, returns 4 (sizeof(int)).
+    /// For s.ptr where ptr is `struct S *`, returns sizeof(struct S).
     fn get_member_array_elem_size(&self, base: &Expr) -> Option<usize> {
         match base {
             Expr::MemberAccess(base_expr, field_name, _) => {
                 if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
-                    if let CType::Array(elem_ty, _) = &ctype {
-                        return Some(elem_ty.size());
+                    match &ctype {
+                        CType::Array(elem_ty, _) => return Some(elem_ty.size()),
+                        CType::Pointer(pointee_ty) => return Some(pointee_ty.size()),
+                        _ => {}
                     }
                 }
                 None
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
-                    if let CType::Array(elem_ty, _) = &ctype {
-                        return Some(elem_ty.size());
+                    match &ctype {
+                        CType::Array(elem_ty, _) => return Some(elem_ty.size()),
+                        CType::Pointer(pointee_ty) => return Some(pointee_ty.size()),
+                        _ => {}
                     }
                 }
                 None
