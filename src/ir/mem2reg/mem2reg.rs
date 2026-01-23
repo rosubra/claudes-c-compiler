@@ -791,6 +791,7 @@ fn ir_type_size(ty: IrType) -> usize {
         IrType::I16 | IrType::U16 => 2,
         IrType::I32 | IrType::U32 | IrType::F32 => 4,
         IrType::I64 | IrType::U64 | IrType::F64 | IrType::Ptr => 8,
+        IrType::F128 => 16,
         IrType::Void => 0,
     }
 }
