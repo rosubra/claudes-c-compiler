@@ -1,0 +1,23 @@
+Struct/union feature improvements needed:
+
+1. Struct copy/assignment (s1 = s2): Need to emit memcpy-style code
+   for struct-to-struct assignment. Currently only field-by-field access works.
+
+2. Struct passing to functions: The ABI requires structs larger than 16 bytes
+   to be passed by pointer (hidden first argument). Small structs need to be
+   passed in registers per the SysV AMD64 ABI classification rules.
+
+3. Struct return values: Functions returning structs need the hidden first
+   parameter (sret) ABI handling.
+
+4. Designated initializers: struct Config c = { .width = 100, .height = 200 };
+   Need to match designators to field offsets and initialize accordingly.
+
+5. Nested struct initialization: struct { struct inner { int x; } s; } outer = { { 42 } };
+
+6. Anonymous structs/unions as members.
+
+7. Bitfield access (partially working but needs proper mask/shift).
+
+8. Array members in structs (e.g., struct { int arr[10]; }).
+   Need proper layout and GEP for arr[i] within the struct.
