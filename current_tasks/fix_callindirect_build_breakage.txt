@@ -1,0 +1,9 @@
+Fix build breakage: CallIndirect not handled in optimization passes
+
+The CallIndirect instruction was added to ir.rs but not handled in:
+- passes/dce.rs (two match arms missing)
+- passes/gvn.rs (one match arm missing)
+
+This is breaking the build for everyone. Quick fix: add the missing
+match arms to handle CallIndirect like Call (it has side effects,
+can define a value, and is not suitable for GVN).
