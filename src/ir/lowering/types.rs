@@ -737,6 +737,9 @@ impl Lowerer {
         }
         match expr {
             Expr::Identifier(name, _) => {
+                if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
+                    return IrType::Ptr;
+                }
                 if self.enum_constants.contains_key(name) {
                     return IrType::I32;
                 }
@@ -1420,8 +1423,27 @@ impl Lowerer {
                 return (total_size, 8, true, false, vec![]);
             }
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
-            let elem_size = self.sizeof_type(ts);
-            return (8, elem_size, false, true, vec![]);
+            // Compute strides from the Array dims in the derived list
+            let array_dims: Vec<usize> = derived.iter().filter_map(|d| {
+                if let DerivedDeclarator::Array(size_expr) = d {
+                    let dim = size_expr.as_ref().and_then(|e| {
+                        self.expr_as_array_size(e).map(|n| n as usize)
+                    });
+                    Some(dim.unwrap_or(1))
+                } else {
+                    None
+                }
+            }).collect();
+            let base_elem_size = self.sizeof_type(ts);
+            let full_array_size: usize = array_dims.iter().product::<usize>() * base_elem_size;
+            // strides[0] = full pointed-to array size, strides[i] = product of dims[i..] * base
+            let mut strides = vec![full_array_size];
+            for i in 0..array_dims.len() {
+                let stride: usize = array_dims[i+1..].iter().product::<usize>().max(1) * base_elem_size;
+                strides.push(stride);
+            }
+            let elem_size = full_array_size;
+            return (8, elem_size, false, true, strides);
         }
 
         // Check for array declarators - collect all dimensions
@@ -1630,7 +1652,6 @@ impl Lowerer {
                     result = CType::Array(Box::new(result), size);
                 }
                 DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _) => {
-                    // Function declarator - treat as pointer to function
                     result = CType::Pointer(Box::new(result));
                 }
             }

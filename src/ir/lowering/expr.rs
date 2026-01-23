@@ -69,6 +69,11 @@ impl Lowerer {
     }
 
     fn lower_identifier(&mut self, name: &str) -> Operand {
+        // Predefined identifiers: __func__, __FUNCTION__, __PRETTY_FUNCTION__
+        if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
+            return self.lower_string_literal(&self.current_function_name.clone());
+        }
+
         // Enum constants are compile-time integer values
         if let Some(&val) = self.enum_constants.get(name) {
             return Operand::Const(IrConst::I64(val));
@@ -1312,6 +1317,9 @@ impl Lowerer {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> IrType {
         match expr {
             Expr::Identifier(name, _) => {
+                if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
+                    return IrType::Ptr;
+                }
                 if self.enum_constants.contains_key(name) { return IrType::I32; }
                 if let Some(info) = self.locals.get(name) { return info.ty; }
                 if let Some(ginfo) = self.globals.get(name) { return ginfo.ty; }

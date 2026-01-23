@@ -1014,21 +1014,30 @@ impl Parser {
                 // Skip array brackets inside: (*name[n])
                 self.skip_array_dimensions();
                 self.expect(&TokenKind::RParen);
-                derived.push(DerivedDeclarator::Pointer);
                 // Parse the function parameter list or array that follows
                 if matches!(self.peek(), TokenKind::LParen) {
+                    // Function pointer: (*name)(params)
+                    derived.push(DerivedDeclarator::Pointer);
                     let (params, variadic) = self.parse_param_list();
                     derived.push(DerivedDeclarator::FunctionPointer(params, variadic));
-                }
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance();
-                    let size = if matches!(self.peek(), TokenKind::RBracket) {
-                        None
-                    } else {
-                        Some(Box::new(self.parse_expr()))
-                    };
-                    self.expect(&TokenKind::RBracket);
-                    derived.push(DerivedDeclarator::Array(size));
+                } else if matches!(self.peek(), TokenKind::LBracket) {
+                    // Pointer to array: (*name)[N]
+                    // Array dims come BEFORE Pointer so apply_derived_declarators
+                    // builds Pointer(Array(base, N)) correctly.
+                    while matches!(self.peek(), TokenKind::LBracket) {
+                        self.advance();
+                        let size = if matches!(self.peek(), TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()))
+                        };
+                        self.expect(&TokenKind::RBracket);
+                        derived.push(DerivedDeclarator::Array(size));
+                    }
+                    derived.push(DerivedDeclarator::Pointer);
+                } else {
+                    // Just (*name) - plain pointer
+                    derived.push(DerivedDeclarator::Pointer);
                 }
                 self.skip_gcc_extensions();
                 return (inner_name, derived);
@@ -1147,12 +1156,23 @@ impl Parser {
             self.skip_gcc_extensions();
             if let Some(mut type_spec) = self.parse_type_specifier() {
                 // Parse parameter declarator (handles pointers, function pointers, arrays)
-                let (name, pointer_depth, array_dims, is_func_ptr) = self.parse_param_declarator_full();
+                let (name, pointer_depth, array_dims, is_func_ptr, ptr_to_array_dims) = self.parse_param_declarator_full();
                 self.skip_gcc_extensions();
 
                 // Wrap type with pointer levels from declarator
                 // e.g., `int *p` -> base=Int, pointer_depth=1 -> Pointer(Int)
                 for _ in 0..pointer_depth {
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                }
+
+                // Pointer-to-array parameters: int (*p)[N][M]
+                // Build Array wrapping from innermost, then wrap in Pointer
+                // e.g., int (*p)[3] -> Pointer(Array(Int, 3))
+                // e.g., int (*p)[2][3] -> Pointer(Array(Array(Int, 3), 2))
+                if !ptr_to_array_dims.is_empty() {
+                    for dim in ptr_to_array_dims.iter().rev() {
+                        type_spec = TypeSpecifier::Array(Box::new(type_spec), dim.clone());
+                    }
                     type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
                 }
 
@@ -1197,10 +1217,10 @@ impl Parser {
     /// - Abstract (unnamed): `int *`, `void (*)(int)`
     /// - Parenthesized: `int (x)`
     /// Returns the name if one was found.
-    /// Parse a parameter declarator. Returns (name, pointer_depth, array_dims, is_func_ptr).
+    /// Parse a parameter declarator. Returns (name, pointer_depth, array_dims, is_func_ptr, ptr_to_array_dims).
     /// array_dims: list of array dimension sizes (outermost first). Empty = not an array.
     /// The outermost dimension decays to pointer; inner dimensions wrap the type as Array.
-    fn parse_param_declarator_full(&mut self) -> (Option<String>, u32, Vec<Option<Box<Expr>>>, bool) {
+    fn parse_param_declarator_full(&mut self) -> (Option<String>, u32, Vec<Option<Box<Expr>>>, bool, Vec<Option<Box<Expr>>>) {
         // Parse leading pointer(s)
         let mut pointer_depth: u32 = 0;
         while self.consume_if(&TokenKind::Star) {
@@ -1209,6 +1229,7 @@ impl Parser {
         }
         let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
         let mut is_func_ptr = false;
+        let mut ptr_to_array_dims: Vec<Option<Box<Expr>>> = Vec::new();
 
         // Check for parenthesized declarator: (*name) or (*)
         let name = if matches!(self.peek(), TokenKind::LParen) {
@@ -1220,8 +1241,8 @@ impl Parser {
             self.advance(); // consume '('
 
             if self.consume_if(&TokenKind::Star) {
-                // Function pointer: (*name) or (*)
-                is_func_ptr = true;
+                // (*name) pattern: could be function pointer (*name)(params)
+                // or pointer-to-array (*name)[N]
                 self.skip_cv_qualifiers();
                 let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                     self.advance();
@@ -1229,12 +1250,30 @@ impl Parser {
                 } else {
                     None
                 };
-                // Skip array dimensions in function pointer declarators
+                // Skip array dimensions inside parens (e.g., (*name[N]) for array of func ptrs)
                 self.skip_array_dimensions();
                 self.expect(&TokenKind::RParen);
-                // Skip the function parameter list: (params)
                 if matches!(self.peek(), TokenKind::LParen) {
+                    // Function pointer: (*name)(params) - skip param list
+                    is_func_ptr = true;
                     self.skip_balanced_parens();
+                } else if matches!(self.peek(), TokenKind::LBracket) {
+                    // Pointer-to-array: (*p)[N][M]...
+                    // Collect dims into ptr_to_array_dims (NOT regular array_dims)
+                    while matches!(self.peek(), TokenKind::LBracket) {
+                        self.advance(); // consume '['
+                        if matches!(self.peek(), TokenKind::RBracket) {
+                            ptr_to_array_dims.push(None);
+                            self.advance();
+                        } else {
+                            let dim_expr = self.parse_expr();
+                            ptr_to_array_dims.push(Some(Box::new(dim_expr)));
+                            self.expect(&TokenKind::RBracket);
+                        }
+                    }
+                } else {
+                    // Just (*name) - plain pointer
+                    pointer_depth += 1;
                 }
                 name
             } else if self.consume_if(&TokenKind::Caret) {
@@ -1298,7 +1337,7 @@ impl Parser {
             self.skip_balanced_parens();
         }
 
-        (name, pointer_depth, array_dims, is_func_ptr)
+        (name, pointer_depth, array_dims, is_func_ptr, ptr_to_array_dims)
     }
 
     fn parse_compound_stmt(&mut self) -> CompoundStmt {
