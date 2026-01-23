@@ -1,0 +1,23 @@
+Task: Fix long double passing in variadic function calls and va_arg retrieval
+Status: IN PROGRESS
+
+Problem:
+Long double values (16 bytes) are not correctly passed to variadic functions
+like printf. The compiler passes them as 8-byte doubles, causing printf("%Lf", x)
+to always print 0.0 or NaN. This affects all three architectures.
+
+Root causes:
+1. When calling variadic functions, long double args are pushed as 8-byte F64
+   values instead of 16-byte stack values
+2. resolve_va_arg_type() for long double falls through to I64 (8 bytes)
+   instead of handling 16 bytes correctly
+3. ARM64: long double should be 128-bit quad precision on stack (16-byte aligned)
+4. x86-64: long double should be 80-bit extended precision on stack (16-byte aligned)
+5. RISC-V: long double should be 128-bit quad on stack (16-byte aligned)
+
+Fix approach:
+- Add IrType::F128 or use a special marker for 16-byte float type in variadic passing
+- Fix variadic call argument pushing for long double in all 3 backends
+- Fix va_arg retrieval for long double in all 3 backends
+- Ensure long double values are properly converted to/from the correct format
+  when passed through the stack
