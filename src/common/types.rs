@@ -438,11 +438,11 @@ impl IrType {
         self.is_signed() || self.is_unsigned()
     }
 
-    /// Whether this is a floating-point type (F32 or F64, used in registers).
-    /// Note: F128 (long double) is NOT included here because it doesn't fit in
-    /// a single FP register on most architectures and needs special handling.
+    /// Whether this is a floating-point type (F32, F64, or F128).
+    /// F128 (long double) is included because at computation level it is treated
+    /// as F64 (stored in D registers), with 16-byte storage for ABI correctness.
     pub fn is_float(&self) -> bool {
-        matches!(self, IrType::F32 | IrType::F64)
+        matches!(self, IrType::F32 | IrType::F64 | IrType::F128)
     }
 
     /// Whether this is a long double type (F128).

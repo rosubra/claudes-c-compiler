@@ -325,14 +325,12 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
             out.emit(&format!("    {} {}", ptr_dir.as_str(), v.to_bits()));
         }
         IrConst::LongDouble(v) => {
-            // Emit as IEEE 754 binary128 (quad-precision) for AArch64/RISC-V.
-            // For x86-64 we also use this format since our long double is stored as
-            // the f64 value's quad-precision encoding (16 bytes).
-            let bytes = crate::ir::ir::f64_to_f128_bytes(*v);
-            let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-            let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            out.emit(&format!("    {} {}", ptr_dir.as_str(), lo));
-            out.emit(&format!("    {} {}", ptr_dir.as_str(), hi));
+            // Store as f64 bit pattern in the lower 8 bytes, with 8 bytes zero padding.
+            // The ARM64/RISC-V codegen loads long doubles as f64 values (F128 is treated
+            // as F64 at computation level), so the data must match the load format.
+            // For function call arguments, f64->f128 conversion is handled by __extenddftf2.
+            out.emit(&format!("    {} {}", ptr_dir.as_str(), v.to_bits()));
+            out.emit(&format!("    {} 0", ptr_dir.as_str()));
         }
         IrConst::Zero => {
             let size = ty.size();
