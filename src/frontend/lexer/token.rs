@@ -8,8 +8,9 @@ pub enum TokenKind {
     UIntLiteral(u64),      // u/U suffix or value > i64::MAX
     LongLiteral(i64),      // l/L or ll/LL suffix (signed long/long long)
     ULongLiteral(u64),     // ul/UL suffix (unsigned long/long long)
-    FloatLiteral(f64),     // no suffix (double) or l/L suffix (long double, treated as double)
-    FloatLiteralF32(f64),  // f/F suffix (float, 32-bit)
+    FloatLiteral(f64),             // no suffix (double)
+    FloatLiteralF32(f64),          // f/F suffix (float, 32-bit)
+    FloatLiteralLongDouble(f64),   // l/L suffix (long double)
     StringLiteral(String),
     CharLiteral(char),
 

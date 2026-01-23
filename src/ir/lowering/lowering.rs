@@ -634,7 +634,9 @@ impl Lowerer {
                 if !self.globals.contains_key(&declarator.name) {
                     let base_ty = self.type_spec_to_ir(&decl.type_spec);
                     let (_, elem_size, is_array, is_pointer, array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
-                    let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
+                    let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
+                        matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
+                    let var_ty = if is_pointer || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
                     let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
                     let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
                     let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
@@ -674,7 +676,15 @@ impl Lowerer {
 
             let base_ty = self.type_spec_to_ir(&decl.type_spec);
             let (mut alloc_size, elem_size, is_array, is_pointer, mut array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
-            let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
+            // For array-of-pointers or array-of-function-pointers, element type is Ptr
+            let is_array_of_pointers = is_array && {
+                let ptr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
+                let arr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
+                matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
+            };
+            let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
+                matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
+            let var_ty = if is_pointer || is_array_of_pointers || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
 
             // For unsized arrays (int a[] = {...}), compute actual size from initializer
             let is_unsized_array = is_array && declarator.derived.iter().any(|d| {
@@ -715,8 +725,9 @@ impl Lowerer {
                     layout.size
                 }
             } else if !is_array && !is_pointer {
-                // For scalar globals, use the actual type size (not the 8-byte stack slot size)
-                var_ty.size()
+                // For scalar globals, use the actual C type size (handles long double = 16 bytes)
+                let c_size = self.sizeof_type(&decl.type_spec);
+                c_size.max(var_ty.size())
             } else {
                 alloc_size
             };
@@ -745,7 +756,11 @@ impl Lowerer {
                 c_type,
             });
 
-            let align = var_ty.align();
+            // Use C type alignment for long double (16) instead of IrType::F64 alignment (8)
+            let align = {
+                let c_align = self.alignof_type(&decl.type_spec);
+                if c_align > 0 { c_align.max(var_ty.align()) } else { var_ty.align() }
+            };
 
             let is_static = decl.is_static;
 
@@ -785,12 +800,27 @@ impl Lowerer {
         struct_layout: &Option<StructLayout>,
         array_dim_strides: &[usize],
     ) -> GlobalInit {
+        // Check if the target type is long double (need to emit as x87 80-bit)
+        let is_long_double_target = self.is_type_spec_long_double(_type_spec);
+
         match init {
             Initializer::Expr(expr) => {
                 // Try to evaluate as a constant
                 if let Some(val) = self.eval_const_expr(expr) {
                     // Convert integer constants to float if target type is float/double
                     let val = self.coerce_const_to_type(val, base_ty);
+                    // If target is long double, promote F64 to LongDouble for proper encoding
+                    let val = if is_long_double_target {
+                        match val {
+                            IrConst::F64(v) => IrConst::LongDouble(v),
+                            IrConst::F32(v) => IrConst::LongDouble(v as f64),
+                            IrConst::I64(v) => IrConst::LongDouble(v as f64),
+                            IrConst::I32(v) => IrConst::LongDouble(v as f64),
+                            other => other, // LongDouble already, or other type
+                        }
+                    } else {
+                        val
+                    };
                     return GlobalInit::Scalar(val);
                 }
                 // String literal initializer

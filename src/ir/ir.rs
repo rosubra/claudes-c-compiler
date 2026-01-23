@@ -216,7 +216,65 @@ pub enum IrConst {
     I64(i64),
     F32(f32),
     F64(f64),
+    /// Long double: stored as f64 value, emitted as x87 80-bit extended precision (16 bytes with padding).
+    /// On ARM64/RISC-V, emitted as IEEE 754 quad precision approximation (16 bytes).
+    LongDouble(f64),
     Zero,
+}
+
+/// Convert an f64 value to x87 80-bit extended precision encoding (10 bytes, little-endian).
+/// x87 format: 1 sign bit, 15 exponent bits (bias 16383), 64 mantissa bits (explicit integer bit).
+/// Currently unused (long double stored as IEEE 754 double + padding), but retained for
+/// future x87 FPU codegen support.
+#[allow(dead_code)]
+pub fn f64_to_x87_bytes(val: f64) -> [u8; 10] {
+    let bits = val.to_bits();
+    let sign = (bits >> 63) & 1;
+    let exp11 = ((bits >> 52) & 0x7FF) as i64;
+    let mantissa52 = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    if exp11 == 0 && mantissa52 == 0 {
+        // Zero
+        let mut bytes = [0u8; 10];
+        if sign == 1 {
+            bytes[9] = 0x80;
+        }
+        return bytes;
+    }
+
+    if exp11 == 0x7FF {
+        // Infinity or NaN
+        if mantissa52 == 0 {
+            // Infinity
+            let mut bytes = [0u8; 10];
+            bytes[7] = 0x80; // integer bit set, mantissa = 0
+            let exp15: u16 = 0x7FFF;
+            bytes[8] = (exp15 & 0xFF) as u8;
+            bytes[9] = ((exp15 >> 8) as u8) | ((sign as u8) << 7);
+            return bytes;
+        } else {
+            // NaN
+            let mut bytes = [0xFFu8; 10];
+            bytes[8] = 0xFF;
+            bytes[9] = 0x7F | ((sign as u8) << 7);
+            return bytes;
+        }
+    }
+
+    // Normal number
+    // f64 exponent bias is 1023, x87 exponent bias is 16383
+    let exp15 = (exp11 - 1023 + 16383) as u16;
+    // f64 has 52-bit mantissa (implicit 1.), x87 has 64-bit mantissa (explicit 1.)
+    // Shift mantissa: 52 bits -> 63 bits (bottom), then set bit 63 (integer bit)
+    let mantissa64 = (1u64 << 63) | (mantissa52 << 11);
+
+    let mut bytes = [0u8; 10];
+    // Bytes 0..7: mantissa (64 bits, little-endian)
+    bytes[..8].copy_from_slice(&mantissa64.to_le_bytes());
+    // Bytes 8..9: exponent (15 bits) + sign (1 bit)
+    bytes[8] = (exp15 & 0xFF) as u8;
+    bytes[9] = ((exp15 >> 8) as u8) | ((sign as u8) << 7);
+    bytes
 }
 
 impl IrConst {
@@ -228,7 +286,7 @@ impl IrConst {
             IrConst::I32(v) => Some(*v as i64),
             IrConst::I64(v) => Some(*v),
             IrConst::Zero => Some(0),
-            IrConst::F32(_) | IrConst::F64(_) => None,
+            IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_) => None,
         }
     }
 
@@ -240,7 +298,7 @@ impl IrConst {
             IrConst::I32(v) => Some(*v as u64),
             IrConst::I64(v) => Some(*v as u64),
             IrConst::Zero => Some(0),
-            IrConst::F32(_) | IrConst::F64(_) => None,
+            IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_) => None,
         }
     }
 
@@ -263,6 +321,11 @@ impl IrConst {
             }
             IrConst::F64(v) => {
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+            IrConst::LongDouble(v) => {
+                // Store as IEEE 754 double (8 bytes) + 8 bytes zero padding = 16 bytes.
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+                out.extend_from_slice(&[0u8; 8]); // padding to 16 bytes
             }
             _ => {
                 let le_bytes = self.to_i64().unwrap_or(0).to_le_bytes();
@@ -293,6 +356,8 @@ impl IrConst {
             (IrConst::I64(_), IrType::I64 | IrType::U64 | IrType::Ptr) => return self.clone(),
             (IrConst::F32(_), IrType::F32) => return self.clone(),
             (IrConst::F64(_), IrType::F64) => return self.clone(),
+            // LongDouble stays as LongDouble when target is F64 (since long double maps to F64 at IR level)
+            (IrConst::LongDouble(_), IrType::F64) => return self.clone(),
             _ => {}
         }
         // Convert integer types
@@ -311,6 +376,13 @@ impl IrConst {
             (IrConst::F32(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
             (IrConst::F32(v), IrType::I32 | IrType::U32) => IrConst::I32(*v as i32),
             (IrConst::F32(v), IrType::I64 | IrType::U64) => IrConst::I64(*v as i64),
+            // LongDouble conversions
+            (IrConst::LongDouble(v), IrType::F64) => IrConst::F64(*v),
+            (IrConst::LongDouble(v), IrType::F32) => IrConst::F32(*v as f32),
+            (IrConst::LongDouble(v), IrType::I8 | IrType::U8) => IrConst::I8(*v as i8),
+            (IrConst::LongDouble(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
+            (IrConst::LongDouble(v), IrType::I32 | IrType::U32) => IrConst::I32(*v as i32),
+            (IrConst::LongDouble(v), IrType::I64 | IrType::U64) => IrConst::I64(*v as i64),
             _ => self.clone(),
         }
     }

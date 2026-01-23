@@ -238,6 +238,7 @@ fn const_to_key(c: &IrConst) -> ConstKey {
         IrConst::I64(v) => ConstKey::I64(*v),
         IrConst::F32(v) => ConstKey::F32(v.to_bits()),
         IrConst::F64(v) => ConstKey::F64(v.to_bits()),
+        IrConst::LongDouble(v) => ConstKey::F64(v.to_bits()), // treat as F64 for GVN purposes
         IrConst::Zero => ConstKey::Zero,
     }
 }

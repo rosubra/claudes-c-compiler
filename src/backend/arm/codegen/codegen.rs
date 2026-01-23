@@ -253,6 +253,24 @@ impl ArmCodegen {
                             }
                         }
                     }
+                    // LongDouble at computation level is treated as F64
+                    IrConst::LongDouble(v) => {
+                        let bits = v.to_bits();
+                        if bits == 0 {
+                            self.state.emit("    mov x0, #0");
+                        } else {
+                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
+                            if (bits >> 16) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
+                            }
+                            if (bits >> 32) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
+                            }
+                            if (bits >> 48) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
+                            }
+                        }
+                    }
                     IrConst::Zero => self.state.emit("    mov x0, #0"),
                 }
             }

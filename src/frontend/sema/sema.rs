@@ -420,6 +420,7 @@ impl SemanticAnalyzer {
             | Expr::ULongLiteral(_, _)
             | Expr::FloatLiteral(_, _)
             | Expr::FloatLiteralF32(_, _)
+            | Expr::FloatLiteralLongDouble(_, _)
             | Expr::StringLiteral(_, _)
             | Expr::CharLiteral(_, _) => {}
         }

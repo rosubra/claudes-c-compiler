@@ -1096,12 +1096,26 @@ impl Parser {
                 } else {
                     None
                 };
-                // Skip array brackets inside: (*name[n])
-                self.skip_array_dimensions();
+                // Parse array brackets inside: (*name[n]) for array of function pointers
+                let mut inner_array_dims: Vec<Option<Box<Expr>>> = Vec::new();
+                while matches!(self.peek(), TokenKind::LBracket) {
+                    self.advance(); // consume '['
+                    let size = if matches!(self.peek(), TokenKind::RBracket) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr()))
+                    };
+                    self.expect(&TokenKind::RBracket);
+                    inner_array_dims.push(size);
+                }
                 self.expect(&TokenKind::RParen);
                 // Parse the function parameter list or array that follows
                 if matches!(self.peek(), TokenKind::LParen) {
-                    // Function pointer: (*name)(params)
+                    // Function pointer (possibly array): (*name[N])(params)
+                    // Emit Array dims first, then Pointer, then FunctionPointer
+                    for dim in inner_array_dims {
+                        derived.push(DerivedDeclarator::Array(dim));
+                    }
                     derived.push(DerivedDeclarator::Pointer);
                     let (params, variadic) = self.parse_param_list();
                     derived.push(DerivedDeclarator::FunctionPointer(params, variadic));
@@ -2216,6 +2230,11 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 Expr::FloatLiteralF32(val, span)
+            }
+            TokenKind::FloatLiteralLongDouble(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::FloatLiteralLongDouble(val, span)
             }
             TokenKind::StringLiteral(ref s) => {
                 let mut result = s.clone();

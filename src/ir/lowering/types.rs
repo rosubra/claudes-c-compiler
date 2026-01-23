@@ -23,6 +23,9 @@ impl Lowerer {
             Expr::FloatLiteralF32(val, _) => {
                 Some(IrConst::F32(*val as f32))
             }
+            Expr::FloatLiteralLongDouble(val, _) => {
+                Some(IrConst::LongDouble(*val))
+            }
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
                 // Unary plus: identity, just evaluate the inner expression
                 self.eval_const_expr(inner)
@@ -37,6 +40,7 @@ impl Lowerer {
                         IrConst::I16(v) => Some(IrConst::I32(-(v as i32))),
                         IrConst::F64(v) => Some(IrConst::F64(-v)),
                         IrConst::F32(v) => Some(IrConst::F32(-v)),
+                        IrConst::LongDouble(v) => Some(IrConst::LongDouble(-v)),
                         _ => None,
                     }
                 } else {
@@ -563,6 +567,7 @@ impl Lowerer {
         match c {
             IrConst::F64(v) => Some(*v),
             IrConst::F32(v) => Some(*v as f64),
+            IrConst::LongDouble(v) => Some(*v),
             IrConst::I64(v) => Some(*v as f64),
             IrConst::I32(v) => Some(*v as f64),
             IrConst::I16(v) => Some(*v as f64),
@@ -624,6 +629,21 @@ impl Lowerer {
     /// Coerce an IrConst to match a target IrType. Delegates to IrConst::coerce_to().
     pub(super) fn coerce_const_to_type(&self, val: IrConst, target_ty: IrType) -> IrConst {
         val.coerce_to(target_ty)
+    }
+
+    /// Check if a TypeSpecifier resolves to long double.
+    pub(super) fn is_type_spec_long_double(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::LongDouble => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(resolved) = self.typedefs.get(name) {
+                    self.is_type_spec_long_double(resolved)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Get the zero constant for a given IR type.
@@ -726,6 +746,7 @@ impl Lowerer {
             Expr::UIntLiteral(_, _) | Expr::ULongLiteral(_, _) => return IrType::U64,
             Expr::FloatLiteral(_, _) => return IrType::F64,
             Expr::FloatLiteralF32(_, _) => return IrType::F32,
+            Expr::FloatLiteralLongDouble(_, _) => return IrType::F64, // long double uses F64 at IR level
             Expr::StringLiteral(_, _) => return IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => return self.type_spec_to_ir(target_type),
             Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _)
@@ -1351,6 +1372,8 @@ impl Lowerer {
             Expr::FloatLiteral(_, _) => 8,
             // Float literal with f suffix: type float (4 bytes)
             Expr::FloatLiteralF32(_, _) => 4,
+            // Float literal with L suffix: type long double (16 bytes)
+            Expr::FloatLiteralLongDouble(_, _) => 16,
             // Char literal: type int in C (4 bytes)
             Expr::CharLiteral(_, _) => 4,
             // String literal: array of char, size = length + 1 (null terminator)
@@ -1603,15 +1626,19 @@ impl Lowerer {
             // Check order: if Pointer comes before Array in derived list,
             // this is an array of pointers (e.g., int *arr[3]).
             // If Array comes before Pointer (e.g., int (*p)[5]), it's pointer to array.
+            // Exception: if FunctionPointer is present (e.g., int (*ops[2])(int,int)),
+            // it's an array of function pointers regardless of Pointer/Array order.
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
             let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
+            let has_func_ptr = derived.iter().any(|d| matches!(d,
+                DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
 
             // If pointer is from resolved type spec (not in derived), and array is in derived,
             // this is an array of typedef'd pointers (e.g., typedef int *intptr; intptr arr[3];
             // or typedef int (*fn_t)(int); fn_t ops[2];)
             let pointer_from_type_spec = ptr_pos.is_none() && matches!(ts, TypeSpecifier::Pointer(_));
 
-            if pointer_from_type_spec || matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap) {
+            if has_func_ptr || pointer_from_type_spec || matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap) {
                 // Array of pointers: int *arr[3] or typedef'd_ptr arr[3]
                 // Each element is a pointer (8 bytes)
                 let array_dims: Vec<Option<usize>> = derived.iter().filter_map(|d| {
@@ -1678,7 +1705,15 @@ impl Lowerer {
         }).collect();
 
         if !array_dims.is_empty() {
-            let base_elem_size = self.sizeof_type(ts).max(1);
+            // If derived declarators include Function/FunctionPointer,
+            // the element type is a function pointer (8 bytes), not the return type.
+            let has_func_ptr = derived.iter().any(|d| matches!(d,
+                DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _)));
+            let base_elem_size = if has_func_ptr {
+                8 // function pointer size
+            } else {
+                self.sizeof_type(ts).max(1)
+            };
 
             // Also account for array dimensions in the type specifier itself
             // e.g., if type is Array(Array(Int, 3), 2) from the parser
@@ -2051,6 +2086,7 @@ impl Lowerer {
             Expr::CharLiteral(_, _) => Some(CType::Int), // char literals have type int in C
             Expr::FloatLiteral(_, _) => Some(CType::Double),
             Expr::FloatLiteralF32(_, _) => Some(CType::Float),
+            Expr::FloatLiteralLongDouble(_, _) => Some(CType::LongDouble),
             Expr::StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Char))),
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {

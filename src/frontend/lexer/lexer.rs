@@ -265,20 +265,21 @@ impl Lexer {
 
         if is_float {
             // Check float suffix: f/F means float (32-bit), l/L means long double, none means double
-            let is_f32 = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
+            // Track: 0 = double, 1 = float, 2 = long double
+            let float_kind = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
                 self.pos += 1;
                 // Also consume trailing 'i' for imaginary (GCC extension: 3.0fi)
                 if self.pos < self.input.len() && self.input[self.pos] == b'i' {
                     self.pos += 1;
                 }
-                true
+                1 // float (f32)
             } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
                 self.pos += 1;
                 // Also consume trailing 'i' for imaginary (GCC extension: 3.0Li)
                 if self.pos < self.input.len() && self.input[self.pos] == b'i' {
                     self.pos += 1;
                 }
-                false // long double treated as double for now
+                2 // long double
             } else if self.pos < self.input.len() && self.input[self.pos] == b'i' {
                 // GCC extension: imaginary suffix 'i' (3.0i)
                 self.pos += 1;
@@ -288,16 +289,16 @@ impl Lexer {
                 } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
                     self.pos += 1;
                 }
-                false
+                0 // double (imaginary)
             } else {
-                false
+                0 // double
             };
             let value: f64 = text.parse().unwrap_or(0.0);
             let span = Span::new(start as u32, self.pos as u32, self.file_id);
-            if is_f32 {
-                Token::new(TokenKind::FloatLiteralF32(value as f64), span)
-            } else {
-                Token::new(TokenKind::FloatLiteral(value), span)
+            match float_kind {
+                1 => Token::new(TokenKind::FloatLiteralF32(value as f64), span),
+                2 => Token::new(TokenKind::FloatLiteralLongDouble(value), span),
+                _ => Token::new(TokenKind::FloatLiteral(value), span),
             }
         } else {
             let uvalue: u64 = text.parse().unwrap_or(0);

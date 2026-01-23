@@ -176,8 +176,9 @@ pub enum Expr {
     UIntLiteral(u64, Span),
     LongLiteral(i64, Span),
     ULongLiteral(u64, Span),
-    FloatLiteral(f64, Span),    // double literal (no suffix or L suffix)
-    FloatLiteralF32(f64, Span), // float literal (f/F suffix)
+    FloatLiteral(f64, Span),            // double literal (no suffix)
+    FloatLiteralF32(f64, Span),         // float literal (f/F suffix)
+    FloatLiteralLongDouble(f64, Span),  // long double literal (l/L suffix)
     StringLiteral(String, Span),
     CharLiteral(char, Span),
     Identifier(String, Span),
@@ -273,7 +274,7 @@ impl Expr {
         match self {
             Expr::IntLiteral(_, s) | Expr::UIntLiteral(_, s)
             | Expr::LongLiteral(_, s) | Expr::ULongLiteral(_, s)
-            | Expr::FloatLiteral(_, s) | Expr::FloatLiteralF32(_, s)
+            | Expr::FloatLiteral(_, s) | Expr::FloatLiteralF32(_, s) | Expr::FloatLiteralLongDouble(_, s)
             | Expr::StringLiteral(_, s)
             | Expr::CharLiteral(_, s) | Expr::Identifier(_, s)
             | Expr::BinaryOp(_, _, _, s) | Expr::UnaryOp(_, _, s) | Expr::PostfixOp(_, _, s)

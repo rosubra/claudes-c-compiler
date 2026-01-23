@@ -132,14 +132,16 @@ impl Lowerer {
             let has_derived_ptr = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
             let is_bool_type = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool)
                 && !has_derived_ptr && !is_array;
-            // For array-of-pointers (int *arr[N]), the element type is Ptr, not the base type.
-            // Detect: Pointer before Array in derived declarators.
+            // For array-of-pointers (int *arr[N]) or array-of-function-pointers
+            // (int (*ops[N])(int,int)), the element type is Ptr, not the base type.
             let is_array_of_pointers = is_array && {
                 let ptr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
                 let arr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
                 matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
             };
-            let var_ty = if is_pointer || is_array_of_pointers { IrType::Ptr } else { base_ty };
+            let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
+                matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
+            let var_ty = if is_pointer || is_array_of_pointers || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
 
             // For unsized arrays (int a[] = {...}), compute actual size from initializer
             let is_unsized_array = is_array && declarator.derived.iter().any(|d| {
@@ -1192,22 +1194,86 @@ impl Lowerer {
                                 }
                             }
                             // Braced array init
-                            for (ai, sub_item) in sub_items.iter().enumerate() {
-                                if ai >= *arr_size { break; }
-                                let elem_offset = field_offset + ai * elem_size;
-                                if let Initializer::Expr(e) = &sub_item.init {
-                                    let expr_ty = self.get_expr_type(e);
-                                    let val = self.lower_expr(e);
-                                    let elem_ir_ty = IrType::from_ctype(elem_ty);
-                                    let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
-                                    let addr = self.fresh_value();
-                                    self.emit(Instruction::GetElementPtr {
-                                        dest: addr,
-                                        base: base_alloca,
-                                        offset: Operand::Const(IrConst::I64(elem_offset as i64)),
-                                        ty: elem_ir_ty,
-                                    });
-                                    self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                            if let CType::Struct(ref st) = elem_ty.as_ref() {
+                                // Array of structs: each sub_item inits one struct element
+                                let sub_layout = StructLayout::for_struct(&st.fields);
+                                let mut ai = 0;
+                                let mut si = 0;
+                                while si < sub_items.len() && ai < *arr_size {
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    match &sub_items[si].init {
+                                        Initializer::List(struct_items) => {
+                                            self.emit_struct_init(struct_items, base_alloca, &sub_layout, elem_offset);
+                                            si += 1;
+                                            ai += 1;
+                                        }
+                                        Initializer::Expr(e) => {
+                                            if self.expr_is_struct_value(e) {
+                                                let src_addr = self.get_struct_base_addr(e);
+                                                let dest_addr = self.fresh_value();
+                                                self.emit(Instruction::GetElementPtr {
+                                                    dest: dest_addr,
+                                                    base: base_alloca,
+                                                    offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                                    ty: IrType::Ptr,
+                                                });
+                                                self.emit(Instruction::Memcpy {
+                                                    dest: dest_addr,
+                                                    src: src_addr,
+                                                    size: sub_layout.size,
+                                                });
+                                                si += 1;
+                                                ai += 1;
+                                            } else {
+                                                // Flat scalars filling struct fields across array elements
+                                                let consumed = self.emit_struct_init(&sub_items[si..], base_alloca, &sub_layout, elem_offset);
+                                                si += consumed;
+                                                ai += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for (ai, sub_item) in sub_items.iter().enumerate() {
+                                    if ai >= *arr_size { break; }
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    if let Initializer::Expr(e) = &sub_item.init {
+                                        let expr_ty = self.get_expr_type(e);
+                                        let val = self.lower_expr(e);
+                                        let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                        let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                                        let addr = self.fresh_value();
+                                        self.emit(Instruction::GetElementPtr {
+                                            dest: addr,
+                                            base: base_alloca,
+                                            offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                            ty: elem_ir_ty,
+                                        });
+                                        self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                                    } else if let Initializer::List(inner_items) = &sub_item.init {
+                                        // Handle braced sub-init for array elements (e.g., int arr[2][3] = {{1,2,3},{4,5,6}})
+                                        if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty.as_ref() {
+                                            let inner_elem_ir_ty = IrType::from_ctype(inner_elem_ty);
+                                            let inner_elem_size = inner_elem_ty.size();
+                                            for (ii, inner_item) in inner_items.iter().enumerate() {
+                                                if ii >= *inner_size { break; }
+                                                if let Initializer::Expr(e) = &inner_item.init {
+                                                    let expr_ty = self.get_expr_type(e);
+                                                    let val = self.lower_expr(e);
+                                                    let val = self.emit_implicit_cast(val, expr_ty, inner_elem_ir_ty);
+                                                    let inner_offset = elem_offset + ii * inner_elem_size;
+                                                    let addr = self.fresh_value();
+                                                    self.emit(Instruction::GetElementPtr {
+                                                        dest: addr,
+                                                        base: base_alloca,
+                                                        offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                                                        ty: inner_elem_ir_ty,
+                                                    });
+                                                    self.emit(Instruction::Store { val, ptr: addr, ty: inner_elem_ir_ty });
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             item_idx += 1;
@@ -1222,34 +1288,48 @@ impl Lowerer {
                                     continue;
                                 }
                             }
-                            // Flat init: consume up to arr_size items from the init list
-                            // to fill the array elements (e.g., struct { int a[3]; int b; } x = {1,2,3,4};)
-                            let elem_ir_ty = IrType::from_ctype(elem_ty);
-                            let mut consumed = 0usize;
-                            while consumed < *arr_size && (item_idx + consumed) < items.len() {
-                                let cur_item = &items[item_idx + consumed];
-                                // Stop if we hit a designator (which targets a different field)
-                                if !cur_item.designators.is_empty() { break; }
-                                if let Initializer::Expr(expr) = &cur_item.init {
-                                    let expr_ty = self.get_expr_type(expr);
-                                    let val = self.lower_expr(expr);
-                                    let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
-                                    let elem_offset = field_offset + consumed * elem_size;
-                                    let addr = self.fresh_value();
-                                    self.emit(Instruction::GetElementPtr {
-                                        dest: addr,
-                                        base: base_alloca,
-                                        offset: Operand::Const(IrConst::I64(elem_offset as i64)),
-                                        ty: elem_ir_ty,
-                                    });
-                                    self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
-                                    consumed += 1;
-                                } else {
-                                    // Hit a nested List - stop flat consumption
-                                    break;
+                            if let CType::Struct(ref st) = elem_ty.as_ref() {
+                                // Flat init for array of structs: consume items for each
+                                // struct element's fields across the array
+                                let sub_layout = StructLayout::for_struct(&st.fields);
+                                let mut total_consumed = 0usize;
+                                for ai in 0..*arr_size {
+                                    if item_idx + total_consumed >= items.len() { break; }
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    let consumed = self.emit_struct_init(&items[item_idx + total_consumed..], base_alloca, &sub_layout, elem_offset);
+                                    total_consumed += consumed;
                                 }
+                                item_idx += total_consumed.max(1);
+                            } else {
+                                // Flat init: consume up to arr_size items from the init list
+                                // to fill the array elements (e.g., struct { int a[3]; int b; } x = {1,2,3,4};)
+                                let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                let mut consumed = 0usize;
+                                while consumed < *arr_size && (item_idx + consumed) < items.len() {
+                                    let cur_item = &items[item_idx + consumed];
+                                    // Stop if we hit a designator (which targets a different field)
+                                    if !cur_item.designators.is_empty() { break; }
+                                    if let Initializer::Expr(expr) = &cur_item.init {
+                                        let expr_ty = self.get_expr_type(expr);
+                                        let val = self.lower_expr(expr);
+                                        let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                                        let elem_offset = field_offset + consumed * elem_size;
+                                        let addr = self.fresh_value();
+                                        self.emit(Instruction::GetElementPtr {
+                                            dest: addr,
+                                            base: base_alloca,
+                                            offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                            ty: elem_ir_ty,
+                                        });
+                                        self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                                        consumed += 1;
+                                    } else {
+                                        // Hit a nested List - stop flat consumption
+                                        break;
+                                    }
+                                }
+                                item_idx += consumed.max(1);
                             }
-                            item_idx += consumed.max(1);
                         }
                     }
                 }

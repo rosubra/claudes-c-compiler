@@ -60,6 +60,15 @@ impl X86Codegen {
                             self.state.emit(&format!("    movabsq ${}, %rax", bits as i64));
                         }
                     }
+                    // LongDouble at computation level is treated as F64
+                    IrConst::LongDouble(v) => {
+                        let bits = v.to_bits();
+                        if bits == 0 {
+                            self.state.emit("    xorq %rax, %rax");
+                        } else {
+                            self.state.emit(&format!("    movabsq ${}, %rax", bits as i64));
+                        }
+                    }
                     IrConst::Zero => self.state.emit("    xorq %rax, %rax"),
                 }
             }

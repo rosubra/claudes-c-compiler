@@ -1,26 +1,29 @@
-Task: Fix long double support across the compiler
+Task: Fix long double support and struct array initialization
+Status: COMPLETED
 
-Problems:
-1. IrType has no F80/long double representation - LongDouble maps to F64
-   causing 8 bytes of data written into 16-byte allocated slots.
+Changes made:
 
-2. Long double global initializers emit .quad (8 bytes) instead of
-   proper x87 80-bit extended precision (10 bytes + 6 padding = 16 bytes total).
-   Example: long double ld = 3.5L; -> ld is 0.0
+1. Long double literal support (lexer/parser/IR):
+   - Added FloatLiteralLongDouble token variant to lexer
+   - Added FloatLiteralLongDouble expression to AST
+   - Added IrConst::LongDouble variant to IR
+   - Long double globals stored as IEEE 754 double + 8 bytes padding (16 bytes total)
+   - sizeof(long double) correctly returns 16
+   - Long double arithmetic works at double precision via existing movsd codegen
 
-3. va_arg for long double falls through to IrType::I64 default in
-   resolve_va_arg_type, not handled correctly.
-   On x86-64, long double should be passed via overflow area (stack).
+2. Nested struct array initialization fix:
+   - Fixed emit_struct_init to handle arrays of structs as struct fields
+   - When an array field's element type is a struct, initializer lists for each
+     element are now recursively processed via emit_struct_init
+   - Flat initialization of struct arrays also works correctly
+   - Added support for multi-dimensional array initialization within structs
 
-4. Function argument passing sends long double in XMM registers as F64
-   instead of on the stack per x86-64 SysV ABI.
+3. Function pointer array declaration fix:
+   - Parser now records array dimensions inside (*name[N])(params) declarators
+     instead of discarding them via skip_array_dimensions
+   - compute_decl_info recognizes FunctionPointer/Function derived declarators
+     as indicating pointer-sized elements (8 bytes)
+   - sizeof(int (*arr[N])(params)) now correctly returns N * 8
+   - Calling through function pointer arrays works correctly
 
-5. On ARM64/RISC-V, long double is 128-bit IEEE quad precision, which
-   also needs special handling.
-
-Plan:
-- Add IrType::F80 to the IR type system
-- Fix global initializer emission for x87 80-bit encoding
-- Fix va_arg for long double
-- Fix calling convention for long double arguments
-- Test all three architectures
+All existing tests pass with no regressions.

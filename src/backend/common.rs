@@ -221,6 +221,7 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
                     IrConst::I32(_) => IrType::I32,
                     IrConst::F32(_) => IrType::F32,
                     IrConst::F64(_) => IrType::F64,
+                    IrConst::LongDouble(_) => IrType::F64, // LongDouble emits its own 16 bytes
                     _ => g.ty,
                 };
                 emit_const_data(out, val, elem_ty, ptr_dir);
@@ -322,6 +323,13 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
         }
         IrConst::F64(v) => {
             out.emit(&format!("    {} {}", ptr_dir.as_str(), v.to_bits()));
+        }
+        IrConst::LongDouble(v) => {
+            // Store as IEEE 754 double (8 bytes) + 8 bytes zero padding = 16 bytes.
+            // This allows the existing movsd-based codegen to load the value correctly.
+            // True x87 80-bit precision would require fldt/fstpt codegen support.
+            out.emit(&format!("    {} {}", ptr_dir.as_str(), v.to_bits()));
+            out.emit(&format!("    {} 0", ptr_dir.as_str()));
         }
         IrConst::Zero => {
             let size = ty.size();

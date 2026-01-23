@@ -118,6 +118,11 @@ impl RiscvCodegen {
                         let bits = v.to_bits();
                         self.state.emit(&format!("    li t0, {}", bits as i64));
                     }
+                    // LongDouble at computation level is treated as F64
+                    IrConst::LongDouble(v) => {
+                        let bits = v.to_bits();
+                        self.state.emit(&format!("    li t0, {}", bits as i64));
+                    }
                     IrConst::Zero => self.state.emit("    li t0, 0"),
                 }
             }
