@@ -355,6 +355,53 @@ impl Lowerer {
             Expr::UnaryOp(UnaryOp::PreInc | UnaryOp::PreDec, inner, _) => {
                 self.get_pointed_struct_layout(inner)
             }
+            Expr::Cast(type_spec, _inner, _) => {
+                // (struct Foo *)expr - unwrap pointer to get struct layout
+                let resolved = self.resolve_type_spec(type_spec);
+                match resolved {
+                    TypeSpecifier::Pointer(inner_ts) => {
+                        self.get_struct_layout_for_type(&inner_ts)
+                    }
+                    _ => None,
+                }
+            }
+            Expr::AddressOf(inner, _) => {
+                // &expr - result is a pointer to expr's type
+                // If expr is a struct, we get the struct layout
+                self.get_layout_for_expr(inner)
+            }
+            Expr::Deref(inner, _) => {
+                // *expr where expr is a pointer-to-pointer-to-struct,
+                // result is a pointer to struct
+                self.get_pointed_struct_layout(inner)
+                    .or_else(|| {
+                        // Try: the deref result might itself be a pointer to struct
+                        // e.g., *pp where pp is struct Foo **
+                        None
+                    })
+            }
+            Expr::FunctionCall(func, _, _) => {
+                // Function returning a pointer to struct
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if let Some(ctype) = self.function_return_ctypes.get(name) {
+                        match ctype {
+                            CType::Pointer(inner) => {
+                                match inner.as_ref() {
+                                    CType::Struct(st) => return Some(StructLayout::for_struct(&st.fields)),
+                                    CType::Union(st) => return Some(StructLayout::for_union(&st.fields)),
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                None
+            }
+            Expr::ArraySubscript(base, _, _) => {
+                // arr[i] where arr is an array of struct pointers or similar
+                self.get_pointed_struct_layout(base)
+            }
             _ => None,
         }
     }

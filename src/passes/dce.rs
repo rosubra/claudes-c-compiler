@@ -190,6 +190,10 @@ fn collect_operand_uses(op: &Operand, used: &mut HashSet<u32>) {
 /// Check if an instruction has side effects (must not be removed).
 fn has_side_effects(inst: &Instruction) -> bool {
     matches!(inst,
+        // Alloca must never be removed: codegen uses positional indexing
+        // (find_param_alloca) to map function parameters to their stack slots.
+        // Removing unused parameter allocas shifts indices and causes miscompilation.
+        Instruction::Alloca { .. } |
         Instruction::Store { .. } |
         Instruction::Call { .. } |
         Instruction::CallIndirect { .. } |
