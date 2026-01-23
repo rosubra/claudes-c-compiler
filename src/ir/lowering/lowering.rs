@@ -1868,21 +1868,33 @@ impl Lowerer {
     /// Get the element size for pointer arithmetic on a variable.
     /// For `int *p`, returns 4. For `char *s`, returns 1.
     pub(super) fn get_pointer_elem_size(&self, expr: &Expr) -> usize {
+        // Use CType-based resolution first for accurate multi-level pointer handling.
+        // For int **pp, CType is Pointer(Pointer(Int)), so pointee is Pointer(Int) with size 8.
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            match &ctype {
+                CType::Pointer(pointee) => return pointee.size().max(1),
+                CType::Array(elem, _) => return elem.size().max(1),
+                _ => {}
+            }
+        }
         if let Expr::Identifier(name, _) = expr {
             if let Some(info) = self.locals.get(name) {
-                if info.elem_size > 0 {
-                    return info.elem_size;
-                }
+                // Prefer pointee_type over elem_size for pointers, as elem_size may
+                // reflect the base type (e.g., sizeof(int)=4 for int **pp) rather
+                // than the actual pointed-to type (e.g., sizeof(int*)=8).
                 if let Some(pt) = info.pointee_type {
                     return pt.size();
                 }
+                if info.elem_size > 0 {
+                    return info.elem_size;
+                }
             }
             if let Some(ginfo) = self.globals.get(name) {
-                if ginfo.elem_size > 0 {
-                    return ginfo.elem_size;
-                }
                 if let Some(pt) = ginfo.pointee_type {
                     return pt.size();
+                }
+                if ginfo.elem_size > 0 {
+                    return ginfo.elem_size;
                 }
             }
         }

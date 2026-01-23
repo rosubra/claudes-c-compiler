@@ -419,6 +419,10 @@ impl Lowerer {
                                     self.zero_init_alloca(alloca, alloc_size);
                                 }
 
+                                // For arrays of pointers, the element type is Ptr (8 bytes),
+                                // not the base type spec (which would be e.g. I32 for int *arr[N]).
+                                let elem_store_ty = if is_array_of_pointers { IrType::I64 } else { base_ty };
+
                                 let mut current_idx = 0usize;
                                 for item in items.iter() {
                                     // Check for index designator
@@ -439,8 +443,8 @@ impl Lowerer {
                                         }
                                         let val = self.lower_expr(e);
                                         let expr_ty = self.get_expr_type(e);
-                                        let val = self.emit_implicit_cast(val, expr_ty, base_ty);
-                                        self.emit_array_element_store(alloca, val, current_idx * elem_size, base_ty);
+                                        let val = self.emit_implicit_cast(val, expr_ty, elem_store_ty);
+                                        self.emit_array_element_store(alloca, val, current_idx * elem_size, elem_store_ty);
                                     }
                                     current_idx += 1;
                                 }

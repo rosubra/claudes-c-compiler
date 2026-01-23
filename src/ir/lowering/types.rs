@@ -1611,13 +1611,14 @@ impl Lowerer {
 
     /// Build a full CType from a TypeSpecifier and DerivedDeclarator chain.
     /// For `int **p`, type_spec=Int, derived=[Pointer, Pointer] -> Pointer(Pointer(Int)).
+    /// For `int *arr[3]`, type_spec=Int, derived=[Pointer, Array(3)] -> Array(Pointer(Int), 3).
     pub(super) fn build_full_ctype(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
         let resolved = self.resolve_type_spec(type_spec);
         let base = self.type_spec_to_ctype(resolved);
         let mut result = base;
-        // Derived declarators are in reverse order: `int *p[]` has [Pointer, Array]
-        // but semantically it's Array of Pointer to Int, so process in reverse.
-        for d in derived.iter().rev() {
+        // Derived declarators are in innermost-first order: `int *arr[3]` has [Pointer, Array(3)].
+        // Process forward: first Pointer wraps Int -> Pointer(Int), then Array wraps -> Array(Pointer(Int), 3).
+        for d in derived.iter() {
             match d {
                 DerivedDeclarator::Pointer => {
                     result = CType::Pointer(Box::new(result));
