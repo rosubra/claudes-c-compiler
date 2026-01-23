@@ -109,7 +109,7 @@ impl Lexer {
     }
 
     fn lex_number(&mut self, start: usize) -> Token {
-        // Handle hex
+        // Handle hex (integers and hex float literals)
         if self.pos + 1 < self.input.len() && self.input[self.pos] == b'0'
             && (self.input[self.pos + 1] == b'x' || self.input[self.pos + 1] == b'X')
         {
@@ -118,6 +118,89 @@ impl Lexer {
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
                 self.pos += 1;
             }
+
+            // Check for hex float: 0x<digits>.<digits>p<exp> or 0x<digits>p<exp>
+            let has_dot = self.pos < self.input.len() && self.input[self.pos] == b'.';
+            let after_dot_has_p = if has_dot {
+                // Look ahead past fractional hex digits for 'p'/'P'
+                let mut look = self.pos + 1;
+                while look < self.input.len() && self.input[look].is_ascii_hexdigit() {
+                    look += 1;
+                }
+                look < self.input.len() && (self.input[look] == b'p' || self.input[look] == b'P')
+            } else {
+                false
+            };
+            let has_p = self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P');
+
+            if has_dot && after_dot_has_p || has_p {
+                // Hex float literal: 0x<int_hex>.<frac_hex>p<+/->exp
+                let int_hex = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
+
+                let frac_hex = if has_dot {
+                    self.pos += 1; // skip '.'
+                    let frac_start = self.pos;
+                    while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
+                        self.pos += 1;
+                    }
+                    std::str::from_utf8(&self.input[frac_start..self.pos]).unwrap_or("")
+                } else {
+                    ""
+                };
+
+                // Parse 'p'/'P' exponent (mandatory for hex floats)
+                let exp: i64 = if self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P') {
+                    self.pos += 1;
+                    let exp_neg = if self.pos < self.input.len() && self.input[self.pos] == b'-' {
+                        self.pos += 1;
+                        true
+                    } else {
+                        if self.pos < self.input.len() && self.input[self.pos] == b'+' {
+                            self.pos += 1;
+                        }
+                        false
+                    };
+                    let exp_start = self.pos;
+                    while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+                        self.pos += 1;
+                    }
+                    let exp_str = std::str::from_utf8(&self.input[exp_start..self.pos]).unwrap_or("0");
+                    let e: i64 = exp_str.parse().unwrap_or(0);
+                    if exp_neg { -e } else { e }
+                } else {
+                    0
+                };
+
+                // Convert hex float to f64: value = (int_part + frac_part) * 2^exp
+                let int_val = u64::from_str_radix(int_hex, 16).unwrap_or(0) as f64;
+                let frac_val: f64 = if !frac_hex.is_empty() {
+                    let frac_int = u64::from_str_radix(frac_hex, 16).unwrap_or(0) as f64;
+                    frac_int / (16.0_f64).powi(frac_hex.len() as i32)
+                } else {
+                    0.0
+                };
+                let value = (int_val + frac_val) * (2.0_f64).powi(exp as i32);
+
+                // Check float suffix
+                let is_f32 = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
+                    self.pos += 1;
+                    true
+                } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
+                    self.pos += 1;
+                    false
+                } else {
+                    false
+                };
+
+                let span = Span::new(start as u32, self.pos as u32, self.file_id);
+                return if is_f32 {
+                    Token::new(TokenKind::FloatLiteralF32(value), span)
+                } else {
+                    Token::new(TokenKind::FloatLiteral(value), span)
+                };
+            }
+
+            // Regular hex integer
             let hex_str = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
             let value = u64::from_str_radix(hex_str, 16).unwrap_or(0);
             let (is_unsigned, is_long) = self.parse_int_suffix();
