@@ -377,129 +377,97 @@ impl ArmCodegen {
     }
 
     /// Emit a type cast instruction sequence for AArch64.
+    /// Emit AArch64 instructions for a type cast, using shared cast classification.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
-        if from_ty == to_ty { return; }
+        match classify_cast(from_ty, to_ty) {
+            CastKind::Noop => {}
 
-        // F128 (long double) is stored as F64 bit pattern in x0.
-        // Treat F128 <-> F64 as no-op, and F128 <-> other as F64 <-> other.
-        if from_ty == IrType::F128 || to_ty == IrType::F128 {
-            let effective_from = if from_ty == IrType::F128 { IrType::F64 } else { from_ty };
-            let effective_to = if to_ty == IrType::F128 { IrType::F64 } else { to_ty };
-            if effective_from == effective_to {
-                return; // F128 <-> F64 is a no-op
-            }
-            return self.emit_cast_instrs(effective_from, effective_to);
-        }
-
-        // Ptr is equivalent to I64/U64 on AArch64 (both 8 bytes, no conversion needed)
-        // Treat Ptr <-> I64/U64 and Ptr <-> Ptr as no-ops
-        if (from_ty == IrType::Ptr || to_ty == IrType::Ptr) && !from_ty.is_float() && !to_ty.is_float() {
-            // Ptr -> integer smaller than 64-bit: truncate
-            // Integer smaller than 64-bit -> Ptr: zero/sign-extend
-            // Ptr <-> I64/U64: no-op (same size)
-            let effective_from = if from_ty == IrType::Ptr { IrType::U64 } else { from_ty };
-            let effective_to = if to_ty == IrType::Ptr { IrType::U64 } else { to_ty };
-            if effective_from == effective_to || (effective_from.size() == 8 && effective_to.size() == 8) {
-                return;
-            }
-            // Delegate to integer cast logic below with effective types
-            return self.emit_cast_instrs(effective_from, effective_to);
-        }
-
-        // Float-to-int cast
-        if from_ty.is_float() && !to_ty.is_float() {
-            let is_unsigned_dest = to_ty.is_unsigned() || to_ty == IrType::Ptr;
-            if from_ty == IrType::F32 {
-                // F32 bits in w0 -> convert to int
-                self.state.emit("    fmov s0, w0");
-                if is_unsigned_dest {
-                    self.state.emit("    fcvtzu x0, s0");
+            CastKind::FloatToSigned { from_f64 } => {
+                if from_f64 {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fcvtzs x0, d0");
                 } else {
+                    self.state.emit("    fmov s0, w0");
                     self.state.emit("    fcvtzs x0, s0");
                 }
-            } else {
-                // F64 bits in x0 -> convert to int
-                self.state.emit("    fmov d0, x0");
-                if is_unsigned_dest {
+            }
+
+            CastKind::FloatToUnsigned { from_f64, .. } => {
+                if from_f64 {
+                    self.state.emit("    fmov d0, x0");
                     self.state.emit("    fcvtzu x0, d0");
                 } else {
-                    self.state.emit("    fcvtzs x0, d0");
+                    self.state.emit("    fmov s0, w0");
+                    self.state.emit("    fcvtzu x0, s0");
                 }
             }
-            return;
-        }
 
-        // Int-to-float cast
-        if !from_ty.is_float() && to_ty.is_float() {
-            let is_unsigned_src = from_ty.is_unsigned();
-            if to_ty == IrType::F32 {
-                if is_unsigned_src {
-                    self.state.emit("    ucvtf s0, x0");
+            CastKind::SignedToFloat { to_f64 } => {
+                if to_f64 {
+                    self.state.emit("    scvtf d0, x0");
+                    self.state.emit("    fmov x0, d0");
                 } else {
                     self.state.emit("    scvtf s0, x0");
+                    self.state.emit("    fmov w0, s0");
                 }
-                self.state.emit("    fmov w0, s0");
-            } else {
-                if is_unsigned_src {
+            }
+
+            CastKind::UnsignedToFloat { to_f64, .. } => {
+                if to_f64 {
                     self.state.emit("    ucvtf d0, x0");
+                    self.state.emit("    fmov x0, d0");
                 } else {
-                    self.state.emit("    scvtf d0, x0");
+                    self.state.emit("    ucvtf s0, x0");
+                    self.state.emit("    fmov w0, s0");
                 }
-                self.state.emit("    fmov x0, d0");
             }
-            return;
-        }
 
-        // Float-to-float cast (F32 <-> F64)
-        if from_ty.is_float() && to_ty.is_float() {
-            if from_ty == IrType::F32 && to_ty == IrType::F64 {
-                self.state.emit("    fmov s0, w0");
-                self.state.emit("    fcvt d0, s0");
-                self.state.emit("    fmov x0, d0");
-            } else {
-                self.state.emit("    fmov d0, x0");
-                self.state.emit("    fcvt s0, d0");
-                self.state.emit("    fmov w0, s0");
+            CastKind::FloatToFloat { widen } => {
+                if widen {
+                    self.state.emit("    fmov s0, w0");
+                    self.state.emit("    fcvt d0, s0");
+                    self.state.emit("    fmov x0, d0");
+                } else {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fcvt s0, d0");
+                    self.state.emit("    fmov w0, s0");
+                }
             }
-            return;
-        }
 
-        if from_ty.size() == to_ty.size() {
-            return;
-        }
+            CastKind::SignedToUnsignedSameSize { .. } => {
+                // On AArch64, same-size signed->unsigned is a noop (no sign-extension issue)
+            }
 
-        let from_size = from_ty.size();
-        let to_size = to_ty.size();
+            CastKind::IntWiden { from_ty, .. } => {
+                if from_ty.is_unsigned() {
+                    match from_ty {
+                        IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                        IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                        IrType::U32 => self.state.emit("    mov w0, w0"),
+                        _ => {}
+                    }
+                } else {
+                    match from_ty {
+                        IrType::I8 => self.state.emit("    sxtb x0, w0"),
+                        IrType::I16 => self.state.emit("    sxth x0, w0"),
+                        IrType::I32 => self.state.emit("    sxtw x0, w0"),
+                        _ => {}
+                    }
+                }
+            }
 
-        if to_size > from_size {
-            if from_ty.is_unsigned() {
-                match from_ty {
+            CastKind::IntNarrow { to_ty } => {
+                match to_ty {
+                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
                     IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::I16 => self.state.emit("    sxth x0, w0"),
                     IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
                     IrType::U32 => self.state.emit("    mov w0, w0"),
                     _ => {}
                 }
-            } else {
-                match from_ty {
-                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
-                    IrType::I16 => self.state.emit("    sxth x0, w0"),
-                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
-                    _ => {}
-                }
-            }
-        } else if to_size < from_size {
-            // Narrowing: truncate and sign/zero-extend back to 64-bit
-            match to_ty {
-                IrType::I8 => self.state.emit("    sxtb x0, w0"),
-                IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
-                IrType::I16 => self.state.emit("    sxth x0, w0"),
-                IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
-                IrType::I32 => self.state.emit("    sxtw x0, w0"),
-                IrType::U32 => self.state.emit("    mov w0, w0"),
-                _ => {}
             }
         }
-        // Same size: pointer <-> integer conversions (no-op on AArch64)
     }
 }
 
@@ -705,35 +673,27 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty.is_float() {
+            let float_op = classify_float_binop(op).unwrap_or(FloatOp::Add);
+            let mnemonic = match float_op {
+                FloatOp::Add => "fadd",
+                FloatOp::Sub => "fsub",
+                FloatOp::Mul => "fmul",
+                FloatOp::Div => "fdiv",
+            };
             self.operand_to_x0(lhs);
             self.state.emit("    mov x1, x0");
             self.operand_to_x0(rhs);
             self.state.emit("    mov x2, x0");
             if ty == IrType::F32 {
-                // F32: bit pattern in low 32 bits of x-reg, use s-registers
                 self.state.emit("    fmov s0, w1");
                 self.state.emit("    fmov s1, w2");
-                match op {
-                    IrBinOp::Add => self.state.emit("    fadd s0, s0, s1"),
-                    IrBinOp::Sub => self.state.emit("    fsub s0, s0, s1"),
-                    IrBinOp::Mul => self.state.emit("    fmul s0, s0, s1"),
-                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv s0, s0, s1"),
-                    _ => self.state.emit("    fadd s0, s0, s1"),
-                }
+                self.state.emit(&format!("    {} s0, s0, s1", mnemonic));
                 self.state.emit("    fmov w0, s0");
-                // Zero-extend to 64-bit so upper bits are clean
-                self.state.emit("    mov w0, w0");
+                self.state.emit("    mov w0, w0"); // zero-extend
             } else {
-                // F64: full 64-bit bit pattern in x-reg, use d-registers
                 self.state.emit("    fmov d0, x1");
                 self.state.emit("    fmov d1, x2");
-                match op {
-                    IrBinOp::Add => self.state.emit("    fadd d0, d0, d1"),
-                    IrBinOp::Sub => self.state.emit("    fsub d0, d0, d1"),
-                    IrBinOp::Mul => self.state.emit("    fmul d0, d0, d1"),
-                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv d0, d0, d1"),
-                    _ => self.state.emit("    fadd d0, d0, d1"),
-                }
+                self.state.emit(&format!("    {} d0, d0, d1", mnemonic));
                 self.state.emit("    fmov x0, d0");
             }
             self.store_x0_to(dest);

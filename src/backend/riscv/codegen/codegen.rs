@@ -187,139 +187,121 @@ impl RiscvCodegen {
     }
 
     /// Emit a type cast instruction sequence for RISC-V 64.
+    /// Emit RISC-V instructions for a type cast, using shared cast classification.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
-        if from_ty == to_ty { return; }
+        match classify_cast(from_ty, to_ty) {
+            CastKind::Noop => {}
 
-        // Ptr is equivalent to I64/U64 on RISC-V 64 (both 8 bytes, no conversion needed)
-        if (from_ty == IrType::Ptr || to_ty == IrType::Ptr) && !from_ty.is_float() && !to_ty.is_float() {
-            let effective_from = if from_ty == IrType::Ptr { IrType::U64 } else { from_ty };
-            let effective_to = if to_ty == IrType::Ptr { IrType::U64 } else { to_ty };
-            if effective_from == effective_to || (effective_from.size() == 8 && effective_to.size() == 8) {
-                return;
-            }
-            return self.emit_cast_instrs(effective_from, effective_to);
-        }
-
-        // Float-to-int cast
-        if from_ty.is_float() && !to_ty.is_float() {
-            let is_unsigned_dest = to_ty.is_unsigned() || to_ty == IrType::Ptr;
-            if from_ty == IrType::F64 {
-                self.state.emit("    fmv.d.x ft0, t0");
-                if is_unsigned_dest {
-                    self.state.emit("    fcvt.lu.d t0, ft0, rtz");
-                } else {
+            CastKind::FloatToSigned { from_f64 } => {
+                if from_f64 {
+                    self.state.emit("    fmv.d.x ft0, t0");
                     self.state.emit("    fcvt.l.d t0, ft0, rtz");
-                }
-            } else {
-                self.state.emit("    fmv.w.x ft0, t0");
-                if is_unsigned_dest {
-                    self.state.emit("    fcvt.lu.s t0, ft0, rtz");
                 } else {
+                    self.state.emit("    fmv.w.x ft0, t0");
                     self.state.emit("    fcvt.l.s t0, ft0, rtz");
                 }
             }
-            return;
-        }
 
-        // Int-to-float cast
-        if !from_ty.is_float() && to_ty.is_float() {
-            let is_unsigned_src = from_ty.is_unsigned();
-            if to_ty == IrType::F64 {
-                if is_unsigned_src {
-                    self.state.emit("    fcvt.d.lu ft0, t0");
+            CastKind::FloatToUnsigned { from_f64, .. } => {
+                if from_f64 {
+                    self.state.emit("    fmv.d.x ft0, t0");
+                    self.state.emit("    fcvt.lu.d t0, ft0, rtz");
                 } else {
-                    self.state.emit("    fcvt.d.l ft0, t0");
+                    self.state.emit("    fmv.w.x ft0, t0");
+                    self.state.emit("    fcvt.lu.s t0, ft0, rtz");
                 }
-                self.state.emit("    fmv.x.d t0, ft0");
-            } else {
-                if is_unsigned_src {
-                    self.state.emit("    fcvt.s.lu ft0, t0");
+            }
+
+            CastKind::SignedToFloat { to_f64 } => {
+                if to_f64 {
+                    self.state.emit("    fcvt.d.l ft0, t0");
+                    self.state.emit("    fmv.x.d t0, ft0");
                 } else {
                     self.state.emit("    fcvt.s.l ft0, t0");
+                    self.state.emit("    fmv.x.w t0, ft0");
                 }
-                self.state.emit("    fmv.x.w t0, ft0");
             }
-            return;
-        }
 
-        // Float-to-float cast
-        if from_ty.is_float() && to_ty.is_float() {
-            if from_ty == IrType::F32 && to_ty == IrType::F64 {
-                self.state.emit("    fmv.w.x ft0, t0");
-                self.state.emit("    fcvt.d.s ft0, ft0");
-                self.state.emit("    fmv.x.d t0, ft0");
-            } else if from_ty == IrType::F64 && to_ty == IrType::F32 {
-                self.state.emit("    fmv.d.x ft0, t0");
-                self.state.emit("    fcvt.s.d ft0, ft0");
-                self.state.emit("    fmv.x.w t0, ft0");
+            CastKind::UnsignedToFloat { to_f64, .. } => {
+                if to_f64 {
+                    self.state.emit("    fcvt.d.lu ft0, t0");
+                    self.state.emit("    fmv.x.d t0, ft0");
+                } else {
+                    self.state.emit("    fcvt.s.lu ft0, t0");
+                    self.state.emit("    fmv.x.w t0, ft0");
+                }
             }
-            return;
-        }
 
-        if from_ty.size() == to_ty.size() && (from_ty.is_integer() || from_ty == IrType::Ptr) && (to_ty.is_integer() || to_ty == IrType::Ptr) {
-            return;
-        }
+            CastKind::FloatToFloat { widen } => {
+                if widen {
+                    self.state.emit("    fmv.w.x ft0, t0");
+                    self.state.emit("    fcvt.d.s ft0, ft0");
+                    self.state.emit("    fmv.x.d t0, ft0");
+                } else {
+                    self.state.emit("    fmv.d.x ft0, t0");
+                    self.state.emit("    fcvt.s.d ft0, ft0");
+                    self.state.emit("    fmv.x.w t0, ft0");
+                }
+            }
 
-        // Ptr is 64-bit; treat as I64/U64 for cast purposes
-        let from_ty = if from_ty == IrType::Ptr { IrType::I64 } else { from_ty };
-        let to_ty = if to_ty == IrType::Ptr { IrType::I64 } else { to_ty };
+            CastKind::SignedToUnsignedSameSize { .. } => {
+                // On RISC-V 64, same-size signed->unsigned is a noop
+            }
 
-        let from_size = from_ty.size();
-        let to_size = to_ty.size();
+            CastKind::IntWiden { from_ty, .. } => {
+                if from_ty.is_unsigned() {
+                    match from_ty {
+                        IrType::U8 => self.state.emit("    andi t0, t0, 0xff"),
+                        IrType::U16 => {
+                            self.state.emit("    slli t0, t0, 48");
+                            self.state.emit("    srli t0, t0, 48");
+                        }
+                        IrType::U32 => {
+                            self.state.emit("    slli t0, t0, 32");
+                            self.state.emit("    srli t0, t0, 32");
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match from_ty {
+                        IrType::I8 => {
+                            self.state.emit("    slli t0, t0, 56");
+                            self.state.emit("    srai t0, t0, 56");
+                        }
+                        IrType::I16 => {
+                            self.state.emit("    slli t0, t0, 48");
+                            self.state.emit("    srai t0, t0, 48");
+                        }
+                        IrType::I32 => self.state.emit("    sext.w t0, t0"),
+                        _ => {}
+                    }
+                }
+            }
 
-        if to_size > from_size {
-            if from_ty.is_unsigned() {
-                match from_ty {
+            CastKind::IntNarrow { to_ty } => {
+                match to_ty {
+                    IrType::I8 => {
+                        self.state.emit("    slli t0, t0, 56");
+                        self.state.emit("    srai t0, t0, 56");
+                    }
                     IrType::U8 => self.state.emit("    andi t0, t0, 0xff"),
+                    IrType::I16 => {
+                        self.state.emit("    slli t0, t0, 48");
+                        self.state.emit("    srai t0, t0, 48");
+                    }
                     IrType::U16 => {
                         self.state.emit("    slli t0, t0, 48");
                         self.state.emit("    srli t0, t0, 48");
                     }
+                    IrType::I32 => self.state.emit("    sext.w t0, t0"),
                     IrType::U32 => {
                         self.state.emit("    slli t0, t0, 32");
                         self.state.emit("    srli t0, t0, 32");
                     }
                     _ => {}
                 }
-            } else {
-                match from_ty {
-                    IrType::I8 => {
-                        self.state.emit("    slli t0, t0, 56");
-                        self.state.emit("    srai t0, t0, 56");
-                    }
-                    IrType::I16 => {
-                        self.state.emit("    slli t0, t0, 48");
-                        self.state.emit("    srai t0, t0, 48");
-                    }
-                    IrType::I32 => self.state.emit("    sext.w t0, t0"),
-                    _ => {}
-                }
-            }
-        } else if to_size < from_size {
-            // Narrowing: truncate and sign/zero-extend back to 64-bit
-            match to_ty {
-                IrType::I8 => {
-                    self.state.emit("    slli t0, t0, 56");
-                    self.state.emit("    srai t0, t0, 56");
-                }
-                IrType::U8 => self.state.emit("    andi t0, t0, 0xff"),
-                IrType::I16 => {
-                    self.state.emit("    slli t0, t0, 48");
-                    self.state.emit("    srai t0, t0, 48");
-                }
-                IrType::U16 => {
-                    self.state.emit("    slli t0, t0, 48");
-                    self.state.emit("    srli t0, t0, 48");
-                }
-                IrType::I32 => self.state.emit("    sext.w t0, t0"),
-                IrType::U32 => {
-                    self.state.emit("    slli t0, t0, 32");
-                    self.state.emit("    srli t0, t0, 32");
-                }
-                _ => {}
             }
         }
-        // Same size: pointer <-> integer conversions (no-op on RISC-V 64)
     }
 }
 
@@ -471,6 +453,13 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty.is_float() {
+            let float_op = classify_float_binop(op).unwrap_or(FloatOp::Add);
+            let mnemonic = match float_op {
+                FloatOp::Add => "fadd",
+                FloatOp::Sub => "fsub",
+                FloatOp::Mul => "fmul",
+                FloatOp::Div => "fdiv",
+            };
             self.operand_to_t0(lhs);
             self.state.emit("    mv t1, t0");
             self.operand_to_t0(rhs);
@@ -478,24 +467,12 @@ impl ArchCodegen for RiscvCodegen {
             if ty == IrType::F64 {
                 self.state.emit("    fmv.d.x ft0, t1");
                 self.state.emit("    fmv.d.x ft1, t2");
-                match op {
-                    IrBinOp::Add => self.state.emit("    fadd.d ft0, ft0, ft1"),
-                    IrBinOp::Sub => self.state.emit("    fsub.d ft0, ft0, ft1"),
-                    IrBinOp::Mul => self.state.emit("    fmul.d ft0, ft0, ft1"),
-                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv.d ft0, ft0, ft1"),
-                    _ => self.state.emit("    fadd.d ft0, ft0, ft1"),
-                }
+                self.state.emit(&format!("    {}.d ft0, ft0, ft1", mnemonic));
                 self.state.emit("    fmv.x.d t0, ft0");
             } else {
                 self.state.emit("    fmv.w.x ft0, t1");
                 self.state.emit("    fmv.w.x ft1, t2");
-                match op {
-                    IrBinOp::Add => self.state.emit("    fadd.s ft0, ft0, ft1"),
-                    IrBinOp::Sub => self.state.emit("    fsub.s ft0, ft0, ft1"),
-                    IrBinOp::Mul => self.state.emit("    fmul.s ft0, ft0, ft1"),
-                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv.s ft0, ft0, ft1"),
-                    _ => self.state.emit("    fadd.s ft0, ft0, ft1"),
-                }
+                self.state.emit(&format!("    {}.s ft0, ft0, ft1", mnemonic));
                 self.state.emit("    fmv.x.w t0, ft0");
             }
             self.store_t0_to(dest);

@@ -1,23 +1,21 @@
-HIGH PRIORITY: Eliminate triplicated logic across x86/arm/riscv codegen backends
+MEDIUM PRIORITY: Remaining backend codegen deduplication opportunities
 
-The three backend codegen files (x86: 999 lines, arm: 1068 lines, riscv: 813 lines) contain
-significant structural duplication. Key opportunities:
+Items 1 and 2 have been completed:
+- CastKind enum + classify_cast() extracts shared cast classification (Ptr normalization,
+  F128 reduction, float/int/widen/narrow dispatch) into codegen_shared.rs
+- classify_float_binop() + FloatOp enum fixes the latent fadd-fallback bug and shares
+  the float operation dispatch across all three backends
 
-1. emit_cast_instrs (~415 combined lines): Identical Ptr-normalization and cast-category
-   classification (float-to-int, int-to-float, widen, narrow) across all three. Extract a
-   shared `classify_cast(from, to) -> CastKind` enum, each backend only implements emission.
-
-2. emit_binop float detection: All three begin with the same float-operand detection and
-   the same fallback for unsupported float ops (silently emitting fadd - a latent bug).
+Remaining opportunities:
 
 3. Parameter classification: emit_store_params and emit_call all independently classify
-   params as int-reg/float-reg/stack. Extract shared classify_params() helper.
+   params as int-reg/float-reg/stack. A shared classify_params() helper could reduce this,
+   but the three ABIs differ significantly (x86-64 SysV, AAPCS64, RISC-V LP64D), so the
+   benefit is lower than items 1-2.
 
-4. ARM-specific: load_large_imm helper exists (line 127) but operand_to_x0 (lines 160-247)
-   manually inlines the same movz+movk pattern 4 times. Also, va_arg/va_start bypass
-   large-offset helpers, creating bugs for large stack frames.
+4. ARM-specific: load_large_imm helper exists but operand_to_x0 manually inlines the same
+   movz+movk pattern 4 times. va_arg/va_start bypass large-offset helpers.
 
-5. emit_memcpy: ARM and RISC-V both have nearly identical loop-based memcpy implementations
-   (label creation, loop preamble, byte-by-byte copy, done label).
-
-Estimated impact: Could eliminate ~300+ lines of duplicated code and fix latent bugs.
+5. emit_memcpy: ARM and RISC-V both have nearly identical loop-based memcpy implementations.
+   Could extract a shared "emit loop-based memcpy" into the ArchCodegen trait with
+   arch-specific register names as parameters.
