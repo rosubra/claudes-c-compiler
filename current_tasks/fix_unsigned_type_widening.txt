@@ -1,0 +1,23 @@
+Task: Fix unsigned char/short widening (zero-extend vs sign-extend)
+
+Problem: When loading unsigned char or unsigned short global/local variables and
+comparing/promoting them to int, the compiler sign-extends instead of zero-extending.
+
+Example:
+  unsigned char g = -1;  // stores 0xFF = 255
+  void test(int v) {
+    if (g != v) printf("NG\n");  // g should zero-extend to 255, not sign-extend to -1
+  }
+  test(0xff);  // Should not print "NG" but does
+
+Root cause: The IR Load instruction loads with type I8 for char, but when the value
+is then used in a comparison or arithmetic with I32/I64 operands, the sign-extension
+is applied uniformly. For unsigned types (U8, U16), zero-extension should be used.
+
+Fix needed:
+- In backend codegen (x86/arm/riscv), when loading I8/I16 values that are unsigned
+  (U8/U16 types), use movzx/uxtb instead of movsx/sxtb for widening
+- Alternatively, fix in IR lowering to emit explicit ZExt/SExt instructions based
+  on the type's signedness
+
+Status: In progress
