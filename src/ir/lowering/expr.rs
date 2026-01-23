@@ -455,7 +455,7 @@ impl Lowerer {
                                 func: name.clone(),
                                 args: arg_vals,
                                 arg_types: computed_arg_types.clone(),
-                                return_type: IrType::I64,
+                                return_type: call_ret_ty,
                             });
                         }
                     }

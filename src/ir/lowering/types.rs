@@ -377,7 +377,15 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => return self.get_expr_type(rhs),
             Expr::PostfixOp(_, inner, _) => return self.get_expr_type(inner),
             Expr::AddressOf(_, _) => return IrType::Ptr,
-            Expr::FunctionCall(_, _, _) => return IrType::I64,
+            Expr::FunctionCall(func, _, _) => {
+                // Look up the return type of the called function
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if let Some(&ret_ty) = self.function_return_types.get(name) {
+                        return ret_ty;
+                    }
+                }
+                return IrType::I64;
+            }
             _ => {}
         }
         match expr {
