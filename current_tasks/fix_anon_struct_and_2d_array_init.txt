@@ -1,5 +1,5 @@
 Task: Fix anonymous struct/union init and 2D struct array init
-Status: IN PROGRESS
+Status: DONE
 
 Fixes:
 1. Anonymous struct/union positional initialization: The resolve_init_field_idx
@@ -10,3 +10,6 @@ Fixes:
    was using struct_size as the outer stride instead of elem_size (row size), causing
    only the first row to be initialized. Also, sub-array init lists (rows) were being
    treated as single struct inits rather than arrays of struct inits.
+
+Tested: Both local and global init of anonymous structs/unions, flat and braced init,
+2D struct arrays with all elements verified. All existing integration tests pass.
