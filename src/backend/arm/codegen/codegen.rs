@@ -1117,38 +1117,11 @@ impl ArchCodegen for ArmCodegen {
             fp_reg_idx += 1;
         }
 
-        // Second pass: load non-F128 FP args first (they don't clobber Q registers)
-        for &(arg_i, reg_i) in &fp_reg_assignments {
-            if arg_classes[arg_i] == 'q' { continue; } // skip F128 for now
-            let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
-            if stack_arg_space > 0 {
-                match &args[arg_i] {
-                    Operand::Value(v) => {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            let adjusted = slot.0 + stack_arg_space as i64;
-                            self.emit_load_from_sp("x0", adjusted, "ldr");
-                        } else {
-                            self.state.emit("    mov x0, #0");
-                        }
-                    }
-                    Operand::Const(_) => {
-                        self.operand_to_x0(&args[arg_i]);
-                    }
-                }
-            } else {
-                self.operand_to_x0(&args[arg_i]);
-            }
-            if arg_ty == Some(IrType::F32) {
-                self.state.emit(&format!("    fmov s{}, w0", reg_i));
-            } else {
-                self.state.emit(&format!("    fmov d{}, x0", reg_i));
-            }
-        }
-
-        // Third pass: load F128 args into Q registers.
-        // Process in reverse order so __extenddftf2 result (q0) doesn't clobber
+        // Second pass: load F128 args into Q registers FIRST.
+        // __extenddftf2 uses d0 as input and returns f128 in q0, so it clobbers d0.
+        // We must do this before loading non-F128 FP args into d0-d7.
+        // Process F128 in reverse order so __extenddftf2 result (q0) doesn't clobber
         // previously loaded Q registers. For constants, we can load directly.
-        // For variables, __extenddftf2 returns in q0, then we move to target qN.
         for &(arg_i, reg_i) in fp_reg_assignments.iter().rev() {
             if arg_classes[arg_i] != 'q' { continue; } // only F128
             match &args[arg_i] {
@@ -1192,6 +1165,35 @@ impl ArchCodegen for ArmCodegen {
                     }
                     // If reg_i == 0, result is already in q0
                 }
+            }
+        }
+
+        // Third pass: load non-F128 FP args into d0-d7/s0-s7 AFTER F128 conversion.
+        // This ensures __extenddftf2 (which clobbers d0) doesn't overwrite our FP args.
+        for &(arg_i, reg_i) in &fp_reg_assignments {
+            if arg_classes[arg_i] == 'q' { continue; } // skip F128 (already done)
+            let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
+            if stack_arg_space > 0 {
+                match &args[arg_i] {
+                    Operand::Value(v) => {
+                        if let Some(slot) = self.state.get_slot(v.0) {
+                            let adjusted = slot.0 + stack_arg_space as i64;
+                            self.emit_load_from_sp("x0", adjusted, "ldr");
+                        } else {
+                            self.state.emit("    mov x0, #0");
+                        }
+                    }
+                    Operand::Const(_) => {
+                        self.operand_to_x0(&args[arg_i]);
+                    }
+                }
+            } else {
+                self.operand_to_x0(&args[arg_i]);
+            }
+            if arg_ty == Some(IrType::F32) {
+                self.state.emit(&format!("    fmov s{}, w0", reg_i));
+            } else {
+                self.state.emit(&format!("    fmov d{}, x0", reg_i));
             }
         }
 
