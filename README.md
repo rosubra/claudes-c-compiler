@@ -13,11 +13,66 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Optimization passes (constant folding, DCE, GVN, algebraic simplification)
 - Three backend targets with correct ABI handling
 
-### Not Yet Implemented
-- Full `#include` resolution (built-in headers only)
-- Floating point arithmetic
-- Native assembler/linker (currently delegates to GCC toolchain)
-- SSA promotion (mem2reg)
+### Test Results (20% sample, ratio 5)
+- x86-64: ~35% passing
+- AArch64: ~36% passing
+- RISC-V 64: ~37% passing
+
+### What Works
+- `int main() { return N; }` for any integer N
+- `printf()` with string literal arguments (via libc linking)
+- Basic arithmetic (`+`, `-`, `*`, `/`, `%`)
+- Local variable declarations and assignments
+- `if`/`else`, `while`, `for`, `do-while` control flow
+- Function calls with up to 6/8 arguments
+- Comparison operators
+- **Type-aware code generation**: correct-sized load/store instructions for all types
+  - `char` uses byte operations (movb/strb/sb)
+  - `short` uses 16-bit operations (movw/strh/sh)
+  - `int` uses 32-bit operations (movl/str w/sw)
+  - `long`/pointers use 64-bit operations (movq/str x/sd)
+  - Sign extension on loads for smaller types
+- Array declarations with correct element sizes (4 bytes for int[], 1 for char[], etc.)
+- Array subscript read/write (`arr[i]`, `arr[i] = val`)
+- Array initializer lists (`int arr[] = {1, 2, 3}`)
+- Pointer dereference assignment (`*p = val`, `val = *p`)
+- Address-of operator (`&x`, `&arr[i]`)
+- Compound assignment on arrays/pointers (`arr[i] += val`, `*p -= val`)
+- Pre/post increment/decrement on arrays/pointers (`arr[i]++`, `++(*p)`)
+- Short-circuit evaluation for `&&` and `||`
+- Proper `sizeof` for basic types and arrays
+- 32-bit arithmetic operations for `int` type (addl/subl/imull/idivl on x86)
+- **Switch statements**: proper dispatch via if-else comparison chain
+  - Case with break, fallthrough, default
+  - Nested switch statements
+  - Constant case expressions (integer literals, char literals, arithmetic)
+- **Global variables**: declarations with initializers, arrays, zero-initialized (.bss)
+  - Global scalar initializers (`int x = 42;`)
+  - Global array initializers (`int arr[5] = {1, 2, 3, 4, 5};`)
+  - Global pointer-to-string (`char *msg = "hello";`)
+  - Read/write access to globals from any function
+  - Constant expression evaluation for initializers
+
+### Recent Additions
+- **Static local variables**: `static` locals are emitted as globals with mangled names
+  (e.g., `func.varname`), preserving values across function calls. Works with
+  scalars, arrays, and initializers. Storage class tracking in parser and AST.
+- **Typedef tracking**: parser correctly registers typedef names from `typedef` declarations
+  (both top-level and local), enabling cast expressions like `(mytype)expr` with user-defined types
+- **Built-in type names**: standard C type names (`size_t`, `int32_t`, `FILE`, etc.) pre-seeded
+  for correct parsing without full header inclusion
+- **Cast expression lowering**: emits proper IR Cast instructions for type-narrowing casts
+- **_Complex type handling**: parses and skips `_Complex`/`__complex__` type modifier
+- **Inline asm skipping**: parses and skips `asm`/`__asm__` statements and expressions
+- **GCC extension keywords**: `__volatile__`, `__const__`, `__inline__`, `__restrict__`,
+  `__signed__`, `__noreturn__` recognized as their standard equivalents
+
+### What's Not Yet Implemented
+- Full `#include` resolution (only built-in headers for now)
+- Floating point
+- Full cast semantics (truncation/sign-extension in some cases)
+- Inline assembly (parsed but skipped)
+- Native assembler/linker (currently uses gcc)
 
 ## Building
 

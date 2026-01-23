@@ -41,6 +41,84 @@ impl RiscvCodegen {
         self.out.emit(s);
     }
 
+    /// Check if an immediate fits in a 12-bit signed field.
+    fn fits_imm12(val: i64) -> bool {
+        val >= -2048 && val <= 2047
+    }
+
+    /// Emit: store `reg` to `offset(s0)`, handling large offsets.
+    /// Uses t5 as scratch for large offsets.
+    fn emit_store_to_s0(&mut self, reg: &str, offset: i64, store_instr: &str) {
+        if Self::fits_imm12(offset) {
+            self.emit(&format!("    {} {}, {}(s0)", store_instr, reg, offset));
+        } else {
+            // Large offset: compute address in t5
+            self.emit(&format!("    li t5, {}", offset));
+            self.emit("    add t5, s0, t5");
+            self.emit(&format!("    {} {}, 0(t5)", store_instr, reg));
+        }
+    }
+
+    /// Emit: load from `offset(s0)` into `reg`, handling large offsets.
+    /// Uses t5 as scratch for large offsets.
+    fn emit_load_from_s0(&mut self, reg: &str, offset: i64, load_instr: &str) {
+        if Self::fits_imm12(offset) {
+            self.emit(&format!("    {} {}, {}(s0)", load_instr, reg, offset));
+        } else {
+            // Large offset: compute address in t5
+            self.emit(&format!("    li t5, {}", offset));
+            self.emit("    add t5, s0, t5");
+            self.emit(&format!("    {} {}, 0(t5)", load_instr, reg));
+        }
+    }
+
+    /// Emit: `dest_reg = s0 + offset`, handling large offsets.
+    fn emit_addi_s0(&mut self, dest_reg: &str, offset: i64) {
+        if Self::fits_imm12(offset) {
+            self.emit(&format!("    addi {}, s0, {}", dest_reg, offset));
+        } else {
+            self.emit(&format!("    li {}, {}", dest_reg, offset));
+            self.emit(&format!("    add {}, s0, {}", dest_reg, dest_reg));
+        }
+    }
+
+    /// Emit prologue: allocate stack and save ra/s0.
+    fn emit_prologue(&mut self, frame_size: i64) {
+        if Self::fits_imm12(-frame_size) {
+            // Small frame: single addi
+            self.emit(&format!("    addi sp, sp, -{}", frame_size));
+            self.emit(&format!("    sd ra, {}(sp)", frame_size - 8));
+            self.emit(&format!("    sd s0, {}(sp)", frame_size - 16));
+            self.emit(&format!("    addi s0, sp, {}", frame_size));
+        } else {
+            // Large frame: use li + sub for stack allocation
+            // Save ra and s0 at the bottom of the frame (sp-relative, small offsets)
+            self.emit(&format!("    li t0, {}", frame_size));
+            self.emit("    sub sp, sp, t0");
+            self.emit("    sd ra, 0(sp)");
+            self.emit("    sd s0, 8(sp)");
+            // s0 = sp + frame_size (compute using add)
+            self.emit(&format!("    li t0, {}", frame_size));
+            self.emit("    add s0, sp, t0");
+        }
+    }
+
+    /// Emit epilogue: restore ra/s0 and deallocate stack.
+    fn emit_epilogue(&mut self, frame_size: i64) {
+        if Self::fits_imm12(-frame_size) {
+            // Small frame
+            self.emit(&format!("    ld ra, {}(sp)", frame_size - 8));
+            self.emit(&format!("    ld s0, {}(sp)", frame_size - 16));
+            self.emit(&format!("    addi sp, sp, {}", frame_size));
+        } else {
+            // Large frame: ra/s0 saved at bottom (sp+0 and sp+8)
+            self.emit("    ld ra, 0(sp)");
+            self.emit("    ld s0, 8(sp)");
+            self.emit(&format!("    li t0, {}", frame_size));
+            self.emit("    add sp, sp, t0");
+        }
+    }
+
     fn generate_function(&mut self, func: &IrFunction) {
         self.stack_offset = 0;
         self.value_locations.clear();
@@ -55,10 +133,7 @@ impl RiscvCodegen {
         let frame_size = ((stack_space + 15) & !15) + 16; // +16 for ra/s0
 
         // Prologue
-        self.emit(&format!("    addi sp, sp, -{}", frame_size));
-        self.emit(&format!("    sd ra, {}(sp)", frame_size - 8));
-        self.emit(&format!("    sd s0, {}(sp)", frame_size - 16));
-        self.emit(&format!("    addi s0, sp, {}", frame_size));
+        self.emit_prologue(frame_size);
 
         // Store parameters (a0-a7)
         let arg_regs = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
@@ -110,7 +185,7 @@ impl RiscvCodegen {
             if let Some(Instruction::Alloca { dest, ty, .. }) = alloca {
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
                     let store_instr = Self::store_for_type(*ty);
-                    self.emit(&format!("    {} {}, {}(s0)", store_instr, arg_regs[arg_idx], offset));
+                    self.emit_store_to_s0(arg_regs[arg_idx], offset, store_instr);
                 }
             }
         }
@@ -124,10 +199,12 @@ impl RiscvCodegen {
                 if let Some(&offset) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
                         let store_instr = Self::store_for_type(*ty);
-                        self.emit(&format!("    {} t0, {}(s0)", store_instr, offset));
+                        self.emit_store_to_s0("t0", offset, store_instr);
                     } else {
-                        self.emit("    mv t3, t0");
-                        self.emit(&format!("    ld t4, {}(s0)", offset));
+                        // ptr is a computed address (e.g., from GEP).
+                        // Load the pointer, then store through it.
+                        self.emit("    mv t3, t0"); // save value
+                        self.emit_load_from_s0("t4", offset, "ld"); // load pointer
                         let store_instr = Self::store_for_type(*ty);
                         self.emit(&format!("    {} t3, 0(t4)", store_instr));
                     }
@@ -137,14 +214,15 @@ impl RiscvCodegen {
                 if let Some(&ptr_off) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
                         let load_instr = Self::load_for_type(*ty);
-                        self.emit(&format!("    {} t0, {}(s0)", load_instr, ptr_off));
+                        self.emit_load_from_s0("t0", ptr_off, load_instr);
                     } else {
-                        self.emit(&format!("    ld t0, {}(s0)", ptr_off));
+                        // ptr is a computed address. Load the pointer, then deref.
+                        self.emit_load_from_s0("t0", ptr_off, "ld"); // load pointer
                         let load_instr = Self::load_for_type(*ty);
                         self.emit(&format!("    {} t0, 0(t0)", load_instr));
                     }
                     if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                        self.emit(&format!("    sd t0, {}(s0)", dest_off));
+                        self.emit_store_to_s0("t0", dest_off, "sd");
                     }
                 }
             }
@@ -193,7 +271,7 @@ impl RiscvCodegen {
                 }
 
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::UnaryOp { dest, op, src, .. } => {
@@ -203,7 +281,7 @@ impl RiscvCodegen {
                     IrUnaryOp::Not => self.emit("    not t0, t0"),
                 }
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::Cmp { dest, op, lhs, rhs, ty } => {
@@ -261,7 +339,7 @@ impl RiscvCodegen {
                 }
 
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::Call { dest, func, args, .. } => {
@@ -273,34 +351,36 @@ impl RiscvCodegen {
             Instruction::GlobalAddr { dest, name } => {
                 self.emit(&format!("    la t0, {}", name));
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::Copy { dest, src } => {
                 self.operand_to_t0(src);
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::Cast { dest, src, from_ty, to_ty } => {
                 self.operand_to_t0(src);
                 self.emit_cast(*from_ty, *to_ty);
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", offset));
+                    self.emit_store_to_s0("t0", offset, "sd");
                 }
             }
             Instruction::GetElementPtr { dest, base, offset, .. } => {
                 if let Some(&base_off) = self.value_locations.get(&base.0) {
                     if self.alloca_values.contains(&base.0) {
-                        self.emit(&format!("    addi t1, s0, {}", base_off));
+                        // Alloca: compute address as s0 + base_off
+                        self.emit_addi_s0("t1", base_off);
                     } else {
-                        self.emit(&format!("    ld t1, {}(s0)", base_off));
+                        // Non-alloca: load the pointer value
+                        self.emit_load_from_s0("t1", base_off, "ld");
                     }
                 }
                 self.operand_to_t0(offset);
                 self.emit("    add t0, t1, t0");
                 if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    sd t0, {}(s0)", dest_off));
+                    self.emit_store_to_s0("t0", dest_off, "sd");
                 }
             }
         }
@@ -327,7 +407,7 @@ impl RiscvCodegen {
 
         if let Some(dest) = dest {
             if let Some(&offset) = self.value_locations.get(&dest.0) {
-                self.emit(&format!("    sd a0, {}(s0)", offset));
+                self.emit_store_to_s0("a0", offset, "sd");
             }
         }
     }
@@ -339,9 +419,8 @@ impl RiscvCodegen {
                     self.operand_to_t0(val);
                     self.emit("    mv a0, t0");
                 }
-                self.emit(&format!("    ld ra, {}(sp)", frame_size - 8));
-                self.emit(&format!("    ld s0, {}(sp)", frame_size - 16));
-                self.emit(&format!("    addi sp, sp, {}", frame_size));
+                // Epilogue
+                self.emit_epilogue(frame_size);
                 self.emit("    ret");
             }
             Terminator::Branch(label) => {
@@ -462,9 +541,9 @@ impl RiscvCodegen {
             Operand::Value(v) => {
                 if let Some(&offset) = self.value_locations.get(&v.0) {
                     if self.alloca_values.contains(&v.0) {
-                        self.emit(&format!("    addi t0, s0, {}", offset));
+                        self.emit_addi_s0("t0", offset);
                     } else {
-                        self.emit(&format!("    ld t0, {}(s0)", offset));
+                        self.emit_load_from_s0("t0", offset, "ld");
                     }
                 } else {
                     self.emit("    li t0, 0");

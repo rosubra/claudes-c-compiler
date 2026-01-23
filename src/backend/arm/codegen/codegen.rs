@@ -41,6 +41,137 @@ impl ArmCodegen {
         self.out.emit(s);
     }
 
+    /// Emit a large immediate subtraction from sp. For values > 4095, uses x16 as scratch.
+    fn emit_sub_sp(&mut self, n: i64) {
+        if n == 0 {
+            return;
+        }
+        if n <= 4095 {
+            self.emit(&format!("    sub sp, sp, #{}", n));
+        } else if n <= 65535 {
+            // Use mov imm16 + sub
+            self.emit(&format!("    mov x16, #{}", n));
+            self.emit("    sub sp, sp, x16");
+        } else {
+            // Use movz + movk for larger values
+            self.emit(&format!("    movz x16, #{}",  n & 0xFFFF));
+            if (n >> 16) & 0xFFFF != 0 {
+                self.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
+            }
+            if (n >> 32) & 0xFFFF != 0 {
+                self.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
+            }
+            self.emit("    sub sp, sp, x16");
+        }
+    }
+
+    /// Emit a large immediate addition to sp. For values > 4095, uses x16 as scratch.
+    fn emit_add_sp(&mut self, n: i64) {
+        if n == 0 {
+            return;
+        }
+        if n <= 4095 {
+            self.emit(&format!("    add sp, sp, #{}", n));
+        } else if n <= 65535 {
+            self.emit(&format!("    mov x16, #{}", n));
+            self.emit("    add sp, sp, x16");
+        } else {
+            self.emit(&format!("    movz x16, #{}", n & 0xFFFF));
+            if (n >> 16) & 0xFFFF != 0 {
+                self.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
+            }
+            if (n >> 32) & 0xFFFF != 0 {
+                self.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
+            }
+            self.emit("    add sp, sp, x16");
+        }
+    }
+
+    /// Emit store to [sp, #offset], handling large offsets via x16 scratch register.
+    /// `instr` should be "str", "strb", "strh", etc.
+    fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
+        if offset >= 0 && offset <= 32760 {
+            // Within unsigned offset range for most instructions
+            self.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
+        } else {
+            // Large offset: compute address in x16
+            if offset <= 65535 {
+                self.emit(&format!("    mov x16, #{}", offset));
+            } else {
+                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
+                if (offset >> 16) & 0xFFFF != 0 {
+                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
+                }
+            }
+            self.emit("    add x16, sp, x16");
+            self.emit(&format!("    {} {}, [x16]", instr, reg));
+        }
+    }
+
+    /// Emit load from [sp, #offset], handling large offsets via x16 scratch register.
+    /// `instr` should be "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrsw", etc.
+    fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
+        if offset >= 0 && offset <= 32760 {
+            self.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
+        } else {
+            if offset <= 65535 {
+                self.emit(&format!("    mov x16, #{}", offset));
+            } else {
+                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
+                if (offset >> 16) & 0xFFFF != 0 {
+                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
+                }
+            }
+            self.emit("    add x16, sp, x16");
+            self.emit(&format!("    {} {}, [x16]", instr, reg));
+        }
+    }
+
+    /// Emit `add dest, sp, #offset` handling large offsets.
+    fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
+        if offset >= 0 && offset <= 4095 {
+            self.emit(&format!("    add {}, sp, #{}", dest, offset));
+        } else {
+            if offset <= 65535 {
+                self.emit(&format!("    mov x16, #{}", offset));
+            } else {
+                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
+                if (offset >> 16) & 0xFFFF != 0 {
+                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
+                }
+            }
+            self.emit(&format!("    add {}, sp, x16", dest));
+        }
+    }
+
+    /// Emit function prologue: allocate stack and save fp/lr.
+    /// For small frames (<=504 bytes), uses combined stp with pre-index.
+    /// For larger frames, uses separate sub + stp.
+    /// Layout: fp/lr saved at [sp, #0] and [sp, #8], locals from [sp, #16] upward.
+    fn emit_prologue(&mut self, frame_size: i64) {
+        if frame_size > 0 && frame_size <= 504 {
+            // Small frame: use pre-indexed stp (offset in [-512, 504], multiple of 8)
+            self.emit(&format!("    stp x29, x30, [sp, #-{}]!", frame_size));
+        } else {
+            // Large frame: allocate stack space, then save fp/lr at bottom of frame
+            self.emit_sub_sp(frame_size);
+            self.emit("    stp x29, x30, [sp]");
+        }
+        self.emit("    mov x29, sp");
+    }
+
+    /// Emit function epilogue: restore fp/lr and deallocate stack.
+    fn emit_epilogue(&mut self, frame_size: i64) {
+        if frame_size > 0 && frame_size <= 504 {
+            // Small frame: use post-indexed ldp
+            self.emit(&format!("    ldp x29, x30, [sp], #{}", frame_size));
+        } else {
+            // Large frame: restore fp/lr, then deallocate
+            self.emit("    ldp x29, x30, [sp]");
+            self.emit_add_sp(frame_size);
+        }
+    }
+
     fn generate_function(&mut self, func: &IrFunction) {
         self.stack_offset = 0;
         self.value_locations.clear();
@@ -55,8 +186,7 @@ impl ArmCodegen {
         let aligned_space = ((stack_space + 15) & !15) + 16; // +16 for fp/lr
 
         // Prologue: save fp, lr and allocate stack
-        self.emit(&format!("    stp x29, x30, [sp, #-{}]!", aligned_space));
-        self.emit("    mov x29, sp");
+        self.emit_prologue(aligned_space);
 
         // Store parameters (x0-x7 for first 8 args)
         let arg_regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -109,7 +239,7 @@ impl ArmCodegen {
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
                     let store_instr = Self::str_for_type(*ty);
                     let reg = Self::reg_for_type(arg_regs[arg_idx], *ty);
-                    self.emit(&format!("    {} {}, [sp, #{}]", store_instr, reg, offset));
+                    self.emit_store_to_sp(reg, offset, store_instr);
                 }
             }
         }
@@ -124,10 +254,12 @@ impl ArmCodegen {
                     if self.alloca_values.contains(&ptr.0) {
                         let store_instr = Self::str_for_type(*ty);
                         let reg = Self::reg_for_type("x0", *ty);
-                        self.emit(&format!("    {} {}, [sp, #{}]", store_instr, reg, offset));
+                        self.emit_store_to_sp(reg, offset, store_instr);
                     } else {
-                        self.emit("    mov x1, x0");
-                        self.emit(&format!("    ldr x2, [sp, #{}]", offset));
+                        // ptr is a computed address (e.g., from GEP).
+                        // Load the pointer, then store through it.
+                        self.emit("    mov x1, x0"); // save value
+                        self.emit_load_from_sp("x2", offset, "ldr"); // load pointer
                         let store_instr = Self::str_for_type(*ty);
                         let reg = Self::reg_for_type("x1", *ty);
                         self.emit(&format!("    {} {}, [x2]", store_instr, reg));
@@ -139,14 +271,16 @@ impl ArmCodegen {
                     let load_instr = Self::ldr_for_type(*ty);
                     let dest_reg = Self::load_dest_reg(*ty);
                     if self.alloca_values.contains(&ptr.0) {
-                        self.emit(&format!("    {} {}, [sp, #{}]", load_instr, dest_reg, ptr_off));
+                        self.emit_load_from_sp(dest_reg, ptr_off, load_instr);
                     } else {
-                        self.emit(&format!("    ldr x0, [sp, #{}]", ptr_off));
+                        // ptr is a computed address. Load the pointer, then deref.
+                        self.emit_load_from_sp("x0", ptr_off, "ldr"); // load pointer
+                        // Use x1 as temp to hold the address since x0 might be overwritten
                         self.emit("    mov x1, x0");
                         self.emit(&format!("    {} {}, [x1]", load_instr, dest_reg));
                     }
                     if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                        self.emit(&format!("    str x0, [sp, #{}]", dest_off));
+                        self.emit_store_to_sp("x0", dest_off, "str");
                     }
                 }
             }
@@ -224,7 +358,7 @@ impl ArmCodegen {
                 }
 
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::UnaryOp { dest, op, src, .. } => {
@@ -234,7 +368,7 @@ impl ArmCodegen {
                     IrUnaryOp::Not => self.emit("    mvn x0, x0"),
                 }
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::Cmp { dest, op, lhs, rhs, ty } => {
@@ -266,7 +400,7 @@ impl ArmCodegen {
                 self.emit(&format!("    cset x0, {}", cond));
 
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::Call { dest, func, args, .. } => {
@@ -279,34 +413,36 @@ impl ArmCodegen {
                 self.emit(&format!("    adrp x0, {}", name));
                 self.emit(&format!("    add x0, x0, :lo12:{}", name));
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::Copy { dest, src } => {
                 self.operand_to_x0(src);
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::Cast { dest, src, from_ty, to_ty } => {
                 self.operand_to_x0(src);
                 self.emit_cast(*from_ty, *to_ty);
                 if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", offset));
+                    self.emit_store_to_sp("x0", offset, "str");
                 }
             }
             Instruction::GetElementPtr { dest, base, offset, .. } => {
                 if let Some(&base_off) = self.value_locations.get(&base.0) {
                     if self.alloca_values.contains(&base.0) {
-                        self.emit(&format!("    add x1, sp, #{}", base_off));
+                        // Alloca: compute address as sp + base_off
+                        self.emit_add_sp_offset("x1", base_off);
                     } else {
-                        self.emit(&format!("    ldr x1, [sp, #{}]", base_off));
+                        // Non-alloca: load the pointer value
+                        self.emit_load_from_sp("x1", base_off, "ldr");
                     }
                 }
                 self.operand_to_x0(offset);
                 self.emit("    add x0, x1, x0");
                 if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                    self.emit(&format!("    str x0, [sp, #{}]", dest_off));
+                    self.emit_store_to_sp("x0", dest_off, "str");
                 }
             }
         }
@@ -338,7 +474,7 @@ impl ArmCodegen {
 
         if let Some(dest) = dest {
             if let Some(&offset) = self.value_locations.get(&dest.0) {
-                self.emit(&format!("    str x0, [sp, #{}]", offset));
+                self.emit_store_to_sp("x0", offset, "str");
             }
         }
     }
@@ -349,7 +485,8 @@ impl ArmCodegen {
                 if let Some(val) = val {
                     self.operand_to_x0(val);
                 }
-                self.emit(&format!("    ldp x29, x30, [sp], #{}", frame_size));
+                // Epilogue: restore fp/lr and deallocate stack
+                self.emit_epilogue(frame_size);
                 self.emit("    ret");
             }
             Terminator::Branch(label) => {
@@ -503,9 +640,9 @@ impl ArmCodegen {
             Operand::Value(v) => {
                 if let Some(&offset) = self.value_locations.get(&v.0) {
                     if self.alloca_values.contains(&v.0) {
-                        self.emit(&format!("    add x0, sp, #{}", offset));
+                        self.emit_add_sp_offset("x0", offset);
                     } else {
-                        self.emit(&format!("    ldr x0, [sp, #{}]", offset));
+                        self.emit_load_from_sp("x0", offset, "ldr");
                     }
                 } else {
                     self.emit("    mov x0, #0");
