@@ -5,8 +5,9 @@ use super::lowering::{Lowerer, LocalInfo, GlobalInfo};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
-        // Save current locals for block scope restoration
+        // Save current locals and static_local_names for block scope restoration
         let saved_locals = self.locals.clone();
+        let saved_static_names = self.static_local_names.clone();
 
         for item in &compound.items {
             match item {
@@ -19,8 +20,9 @@ impl Lowerer {
             }
         }
 
-        // Restore outer scope locals (removes block-scoped declarations)
+        // Restore outer scope (removes block-scoped declarations)
         self.locals = saved_locals;
+        self.static_local_names = saved_static_names;
     }
 
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
