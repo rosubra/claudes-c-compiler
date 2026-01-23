@@ -68,9 +68,9 @@ fn main() {
             // Verbose/diagnostic flags
             "-v" | "--verbose" => driver.verbose = true,
 
-            // Linker library flags (ignored, handled by our linker)
-            arg if arg == "-lm" || arg == "-lc" || arg == "-lpthread" || arg.starts_with("-l") => {
-                // Silently ignore linker library flags
+            // Linker library flags: -lfoo
+            arg if arg.starts_with("-l") => {
+                driver.linker_libs.push(arg[2..].to_string());
             }
 
             // Warning flags (ignored for now)
@@ -104,6 +104,17 @@ fn main() {
                 driver.add_include_path(&arg[2..]);
             }
 
+            // Library search paths: -L path or -Lpath
+            "-L" => {
+                i += 1;
+                if i < args.len() {
+                    driver.linker_paths.push(args[i].clone());
+                }
+            }
+            arg if arg.starts_with("-L") => {
+                driver.linker_paths.push(arg[2..].to_string());
+            }
+
             // Undefine macro
             "-U" => {
                 i += 1;
@@ -130,7 +141,7 @@ fn main() {
 
             // Linker flags
             "-static" => {
-                // Already handled (we always link statically for cross-compile)
+                driver.static_link = true;
             }
             "-shared" => {
                 // TODO: shared library output
@@ -142,9 +153,13 @@ fn main() {
                 // TODO: handle no-stdlib modes
             }
 
-            // Linker pass-through
+            // Linker pass-through: -Wl,flag1,flag2,...
             arg if arg.starts_with("-Wl,") => {
-                // Linker flags passed through -Wl,
+                for flag in arg[4..].split(',') {
+                    if !flag.is_empty() {
+                        driver.linker_extra_args.push(flag.to_string());
+                    }
+                }
             }
 
             // Language selection

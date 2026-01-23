@@ -69,4 +69,9 @@ impl Target {
     pub fn link(&self, object_files: &[&str], output_path: &str) -> Result<(), String> {
         common::link(&self.linker_config(), object_files, output_path)
     }
+
+    /// Link object files with additional user-provided linker args.
+    pub fn link_with_args(&self, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
+        common::link_with_args(&self.linker_config(), object_files, output_path, user_args)
+    }
 }

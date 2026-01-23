@@ -40,6 +40,14 @@ pub struct Driver {
     pub debug_info: bool,
     pub defines: Vec<CliDefine>,
     pub include_paths: Vec<String>,
+    /// Libraries to pass to the linker (from -l flags)
+    pub linker_libs: Vec<String>,
+    /// Library search paths (from -L flags)
+    pub linker_paths: Vec<String>,
+    /// Extra linker args (e.g., -Wl,... pass-through)
+    pub linker_extra_args: Vec<String>,
+    /// Whether to link statically (-static)
+    pub static_link: bool,
 }
 
 impl Driver {
@@ -55,6 +63,10 @@ impl Driver {
             debug_info: false,
             defines: Vec::new(),
             include_paths: Vec::new(),
+            linker_libs: Vec::new(),
+            linker_paths: Vec::new(),
+            linker_extra_args: Vec::new(),
+            static_link: false,
         }
     }
 
@@ -165,25 +177,44 @@ impl Driver {
     }
 
     fn run_full(&self) -> Result<(), String> {
-        let mut object_files = Vec::new();
+        let mut compiled_object_files = Vec::new();
+        let mut passthrough_objects: Vec<String> = Vec::new();
 
         for input_file in &self.input_files {
-            let asm = self.compile_to_assembly(input_file)?;
+            if Self::is_object_or_archive(input_file) {
+                // Pass .o and .a files directly to the linker
+                passthrough_objects.push(input_file.clone());
+            } else {
+                // Compile .c files to .o
+                let asm = self.compile_to_assembly(input_file)?;
 
-            let obj_path = format!("/tmp/ccc_{}_{}.o",
-                std::process::id(),
-                std::path::Path::new(input_file)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("out"));
-            self.target.assemble(&asm, &obj_path)?;
-            object_files.push(obj_path);
+                let obj_path = format!("/tmp/ccc_{}_{}.o",
+                    std::process::id(),
+                    std::path::Path::new(input_file)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("out"));
+                self.target.assemble(&asm, &obj_path)?;
+                compiled_object_files.push(obj_path);
+            }
         }
 
-        let obj_refs: Vec<&str> = object_files.iter().map(|s| s.as_str()).collect();
-        self.target.link(&obj_refs, &self.output_path)?;
+        // Combine all object files for linking
+        let mut all_objects: Vec<&str> = compiled_object_files.iter().map(|s| s.as_str()).collect();
+        for obj in &passthrough_objects {
+            all_objects.push(obj.as_str());
+        }
 
-        for obj in &object_files {
+        // Build linker args from -l, -L, -static flags
+        let linker_args = self.build_linker_args();
+
+        if linker_args.is_empty() {
+            self.target.link(&all_objects, &self.output_path)?;
+        } else {
+            self.target.link_with_args(&all_objects, &self.output_path, &linker_args)?;
+        }
+
+        for obj in &compiled_object_files {
             let _ = std::fs::remove_file(obj);
         }
 
@@ -192,6 +223,27 @@ impl Driver {
         }
 
         Ok(())
+    }
+
+    /// Check if a file is an object file or archive (pass to linker directly).
+    fn is_object_or_archive(path: &str) -> bool {
+        path.ends_with(".o") || path.ends_with(".a") || path.ends_with(".so")
+    }
+
+    /// Build linker args from collected -l, -L, and -static flags.
+    fn build_linker_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.static_link {
+            args.push("-static".to_string());
+        }
+        for path in &self.linker_paths {
+            args.push(format!("-L{}", path));
+        }
+        for lib in &self.linker_libs {
+            args.push(format!("-l{}", lib));
+        }
+        args.extend(self.linker_extra_args.clone());
+        args
     }
 
     /// Core pipeline: preprocess, lex, parse, sema, lower, optimize, codegen.

@@ -146,7 +146,7 @@ impl Parser {
             TokenKind::Register | TokenKind::Typedef | TokenKind::Inline | TokenKind::Bool |
             TokenKind::Typeof | TokenKind::Attribute | TokenKind::Extension |
             TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
-            TokenKind::Atomic | TokenKind::Auto => true,
+            TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas => true,
             TokenKind::Identifier(name) => self.typedefs.contains(name),
             _ => false,
         }
@@ -205,6 +205,10 @@ impl Parser {
 
         // Parse declarator(s)
         let (name, derived) = self.parse_declarator();
+
+        // Skip GNU asm labels and attributes after declarator:
+        // extern int foo(int) __asm__("renamed") __attribute__((noreturn));
+        self.skip_asm_and_attributes();
 
         // Check if this is a function definition (has a body or K&R param decls)
         let is_funcdef = !derived.is_empty()
@@ -277,8 +281,12 @@ impl Parser {
                 span: start,
             });
 
+            // Skip asm/attributes between declarators
+            self.skip_asm_and_attributes();
+
             while self.consume_if(&TokenKind::Comma) {
                 let (dname, dderived) = self.parse_declarator();
+                self.skip_asm_and_attributes();
                 let dinit = if self.consume_if(&TokenKind::Assign) {
                     Some(self.parse_initializer())
                 } else {
@@ -290,6 +298,7 @@ impl Parser {
                     init: dinit,
                     span: start,
                 });
+                self.skip_asm_and_attributes();
             }
 
             // Register typedef names if this was a typedef declaration
@@ -324,6 +333,42 @@ impl Parser {
                         self.skip_balanced_parens();
                     }
                 }
+                TokenKind::Asm => {
+                    // GNU asm label: __asm__("name") on declarations
+                    self.advance();
+                    self.consume_if(&TokenKind::Volatile);
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.skip_balanced_parens();
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Skip __asm__("..."), __attribute__((...)), and __extension__ after declarators.
+    /// GNU C allows: extern int foo(int) __asm__("bar") __attribute__((noreturn));
+    fn skip_asm_and_attributes(&mut self) {
+        loop {
+            match self.peek() {
+                TokenKind::Asm => {
+                    self.advance();
+                    // Skip optional volatile keyword
+                    self.consume_if(&TokenKind::Volatile);
+                    // Skip the parenthesized asm string
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.skip_balanced_parens();
+                    }
+                }
+                TokenKind::Attribute => {
+                    self.advance();
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.skip_balanced_parens();
+                    }
+                }
+                TokenKind::Extension => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
@@ -348,17 +393,41 @@ impl Parser {
         }
     }
 
+    #[allow(unused_assignments)]
     fn parse_type_specifier(&mut self) -> Option<TypeSpecifier> {
         self.skip_gcc_extensions();
 
-        // Collect qualifiers and storage classes (skip for now)
+        // Collect all type specifier tokens in any order.
+        // C allows type specifiers in any order: "long unsigned int" == "unsigned long int" == "int unsigned long"
+        // We track what we've seen with flags and resolve at the end.
+        let mut has_signed = false;
+        let mut has_unsigned = false;
+        let mut has_short = false;
+        let mut long_count: u32 = 0;
+        let mut has_int = false;
+        let mut has_char = false;
+        let mut has_void = false;
+        let mut has_float = false;
+        let mut has_double = false;
+        let mut has_bool = false;
+        let mut has_complex = false;
+        let mut has_struct = false;
+        let mut has_union = false;
+        let mut has_enum = false;
+        let mut has_typeof = false;
+        let mut typedef_name: Option<String> = None;
+        let mut any_base_specifier = false;
+
+        // Collect qualifiers, storage classes, and type specifiers in a loop
         loop {
-            match self.peek() {
+            match self.peek().clone() {
+                // Qualifiers (skip)
                 TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-                | TokenKind::Register
-                | TokenKind::Inline | TokenKind::Noreturn | TokenKind::Auto => {
+                | TokenKind::Register | TokenKind::Inline | TokenKind::Noreturn
+                | TokenKind::Auto => {
                     self.advance();
                 }
+                // Storage classes
                 TokenKind::Static => {
                     self.advance();
                     self.parsing_static = true;
@@ -371,11 +440,13 @@ impl Parser {
                     self.advance();
                     self.parsing_typedef = true;
                 }
+                // _Complex modifier
                 TokenKind::Complex => {
-                    // _Complex modifier: skip it, we'll treat complex types as their base type
-                    // TODO: properly support _Complex types
                     self.advance();
+                    has_complex = true;
+                    any_base_specifier = true;
                 }
+                // GNU extensions
                 TokenKind::Attribute => {
                     self.advance();
                     self.skip_balanced_parens();
@@ -383,9 +454,8 @@ impl Parser {
                 TokenKind::Extension => {
                     self.advance();
                 }
+                // _Atomic
                 TokenKind::Atomic => {
-                    // _Atomic qualifier: skip it for now
-                    // TODO: properly support _Atomic
                     self.advance();
                     // _Atomic can be followed by (type) for _Atomic(int)
                     if matches!(self.peek(), TokenKind::LParen) {
@@ -393,128 +463,276 @@ impl Parser {
                         return Some(TypeSpecifier::Int); // TODO: parse the actual type
                     }
                 }
+                // Alignas
+                TokenKind::Alignas => {
+                    self.advance();
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.skip_balanced_parens();
+                    }
+                }
+                // Type specifier tokens - collected in any order
+                TokenKind::Void => {
+                    self.advance();
+                    has_void = true;
+                    any_base_specifier = true;
+                    break; // void can't combine with others
+                }
+                TokenKind::Char => {
+                    self.advance();
+                    has_char = true;
+                    any_base_specifier = true;
+                    break; // char only combines with signed/unsigned
+                }
+                TokenKind::Short => {
+                    self.advance();
+                    has_short = true;
+                    any_base_specifier = true;
+                }
+                TokenKind::Int => {
+                    self.advance();
+                    has_int = true;
+                    any_base_specifier = true;
+                }
+                TokenKind::Long => {
+                    self.advance();
+                    long_count += 1;
+                    any_base_specifier = true;
+                }
+                TokenKind::Float => {
+                    self.advance();
+                    has_float = true;
+                    any_base_specifier = true;
+                    break; // float can't combine with int/long
+                }
+                TokenKind::Double => {
+                    self.advance();
+                    has_double = true;
+                    any_base_specifier = true;
+                    break; // double only combines with long
+                }
+                TokenKind::Bool => {
+                    self.advance();
+                    has_bool = true;
+                    any_base_specifier = true;
+                    break; // _Bool can't combine with others
+                }
+                TokenKind::Signed => {
+                    self.advance();
+                    has_signed = true;
+                    any_base_specifier = true;
+                }
+                TokenKind::Unsigned => {
+                    self.advance();
+                    has_unsigned = true;
+                    any_base_specifier = true;
+                }
+                TokenKind::Struct => {
+                    self.advance();
+                    has_struct = true;
+                    any_base_specifier = true;
+                    break; // struct starts a compound type
+                }
+                TokenKind::Union => {
+                    self.advance();
+                    has_union = true;
+                    any_base_specifier = true;
+                    break; // union starts a compound type
+                }
+                TokenKind::Enum => {
+                    self.advance();
+                    has_enum = true;
+                    any_base_specifier = true;
+                    break; // enum starts a compound type
+                }
+                TokenKind::Typeof => {
+                    self.advance();
+                    has_typeof = true;
+                    any_base_specifier = true;
+                    break;
+                }
+                TokenKind::Identifier(ref name) if self.typedefs.contains(name) => {
+                    // Only consume typedef name if we haven't seen any other base specifier
+                    if !any_base_specifier {
+                        typedef_name = Some(name.clone());
+                        self.advance();
+                        any_base_specifier = true;
+                        break;
+                    } else {
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
 
-        let base = match self.peek().clone() {
-            TokenKind::Void => { self.advance(); TypeSpecifier::Void }
-            TokenKind::Char => { self.advance(); TypeSpecifier::Char }
-            TokenKind::Short => { self.advance(); self.consume_if(&TokenKind::Int); TypeSpecifier::Short }
-            TokenKind::Int => { self.advance(); TypeSpecifier::Int }
-            TokenKind::Long => {
-                self.advance();
-                if self.consume_if(&TokenKind::Long) {
-                    self.consume_if(&TokenKind::Int);
-                    TypeSpecifier::LongLong
-                } else if self.consume_if(&TokenKind::Double) {
-                    TypeSpecifier::Double // long double -> double for now
-                } else {
-                    self.consume_if(&TokenKind::Int);
-                    TypeSpecifier::Long
-                }
-            }
-            TokenKind::Float => { self.advance(); TypeSpecifier::Float }
-            TokenKind::Double => { self.advance(); TypeSpecifier::Double }
-            TokenKind::Bool => { self.advance(); TypeSpecifier::Bool }
-            TokenKind::Signed => {
-                self.advance();
+        // After breaking from the loop (for char/void/float/double/bool/struct/union/enum/typeof),
+        // continue collecting additional specifiers that can follow
+        if has_char || has_short || has_int || long_count > 0 {
+            // Collect any remaining signed/unsigned/int/long/short that might follow
+            loop {
                 match self.peek() {
-                    TokenKind::Char => { self.advance(); TypeSpecifier::Char }
-                    TokenKind::Short => { self.advance(); self.consume_if(&TokenKind::Int); TypeSpecifier::Short }
+                    TokenKind::Signed => {
+                        self.advance();
+                        has_signed = true;
+                    }
+                    TokenKind::Unsigned => {
+                        self.advance();
+                        has_unsigned = true;
+                    }
+                    TokenKind::Int => {
+                        self.advance();
+                        has_int = true;
+                    }
                     TokenKind::Long => {
                         self.advance();
-                        if self.consume_if(&TokenKind::Long) {
-                            self.consume_if(&TokenKind::Int);
-                            TypeSpecifier::LongLong
-                        } else {
-                            self.consume_if(&TokenKind::Int);
-                            TypeSpecifier::Long
-                        }
+                        long_count += 1;
                     }
-                    TokenKind::Int => { self.advance(); TypeSpecifier::Int }
-                    _ => TypeSpecifier::Int // signed alone = signed int
+                    TokenKind::Short => {
+                        self.advance();
+                        has_short = true;
+                    }
+                    TokenKind::Char => {
+                        self.advance();
+                        has_char = true;
+                    }
+                    TokenKind::Complex => {
+                        self.advance();
+                        has_complex = true;
+                    }
+                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                        self.advance();
+                    }
+                    TokenKind::Static => {
+                        self.advance();
+                        self.parsing_static = true;
+                    }
+                    TokenKind::Extern => {
+                        self.advance();
+                        self.parsing_extern = true;
+                    }
+                    TokenKind::Register | TokenKind::Inline | TokenKind::Noreturn => {
+                        self.advance();
+                    }
+                    TokenKind::Attribute => {
+                        self.advance();
+                        self.skip_balanced_parens();
+                    }
+                    TokenKind::Extension => {
+                        self.advance();
+                    }
+                    _ => break,
                 }
             }
-            TokenKind::Unsigned => {
-                self.advance();
+        } else if has_double {
+            // "double" can be preceded/followed by "long"
+            loop {
                 match self.peek() {
-                    TokenKind::Char => { self.advance(); TypeSpecifier::UnsignedChar }
-                    TokenKind::Short => { self.advance(); self.consume_if(&TokenKind::Int); TypeSpecifier::UnsignedShort }
                     TokenKind::Long => {
                         self.advance();
-                        if self.consume_if(&TokenKind::Long) {
-                            self.consume_if(&TokenKind::Int);
-                            TypeSpecifier::UnsignedLongLong
-                        } else {
-                            self.consume_if(&TokenKind::Int);
-                            TypeSpecifier::UnsignedLong
-                        }
+                        long_count += 1;
                     }
-                    TokenKind::Int => { self.advance(); TypeSpecifier::UnsignedInt }
-                    _ => TypeSpecifier::UnsignedInt // unsigned alone = unsigned int
+                    TokenKind::Complex => {
+                        self.advance();
+                        has_complex = true;
+                    }
+                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                        self.advance();
+                    }
+                    _ => break,
                 }
             }
-            TokenKind::Struct => {
+        }
+
+        if !any_base_specifier {
+            return None;
+        }
+
+        // Now resolve the collected specifiers into a TypeSpecifier
+        let base = if has_void {
+            TypeSpecifier::Void
+        } else if has_bool {
+            TypeSpecifier::Bool
+        } else if has_float {
+            TypeSpecifier::Float
+        } else if has_double {
+            TypeSpecifier::Double // long double -> double for now
+        } else if has_struct {
+            self.skip_gcc_extensions();
+            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                 self.advance();
-                self.skip_gcc_extensions();
-                let name = if let TokenKind::Identifier(n) = self.peek().clone() {
-                    self.advance();
-                    Some(n)
-                } else {
-                    None
-                };
-                let fields = if matches!(self.peek(), TokenKind::LBrace) {
-                    Some(self.parse_struct_fields())
-                } else {
-                    None
-                };
-                TypeSpecifier::Struct(name, fields)
-            }
-            TokenKind::Union => {
+                Some(n)
+            } else {
+                None
+            };
+            let fields = if matches!(self.peek(), TokenKind::LBrace) {
+                Some(self.parse_struct_fields())
+            } else {
+                None
+            };
+            TypeSpecifier::Struct(name, fields)
+        } else if has_union {
+            self.skip_gcc_extensions();
+            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                 self.advance();
-                self.skip_gcc_extensions();
-                let name = if let TokenKind::Identifier(n) = self.peek().clone() {
-                    self.advance();
-                    Some(n)
-                } else {
-                    None
-                };
-                let fields = if matches!(self.peek(), TokenKind::LBrace) {
-                    Some(self.parse_struct_fields())
-                } else {
-                    None
-                };
-                TypeSpecifier::Union(name, fields)
-            }
-            TokenKind::Enum => {
+                Some(n)
+            } else {
+                None
+            };
+            let fields = if matches!(self.peek(), TokenKind::LBrace) {
+                Some(self.parse_struct_fields())
+            } else {
+                None
+            };
+            TypeSpecifier::Union(name, fields)
+        } else if has_enum {
+            self.skip_gcc_extensions();
+            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                 self.advance();
-                self.skip_gcc_extensions();
-                let name = if let TokenKind::Identifier(n) = self.peek().clone() {
-                    self.advance();
-                    Some(n)
-                } else {
-                    None
-                };
-                let variants = if matches!(self.peek(), TokenKind::LBrace) {
-                    Some(self.parse_enum_variants())
-                } else {
-                    None
-                };
-                TypeSpecifier::Enum(name, variants)
+                Some(n)
+            } else {
+                None
+            };
+            let variants = if matches!(self.peek(), TokenKind::LBrace) {
+                Some(self.parse_enum_variants())
+            } else {
+                None
+            };
+            TypeSpecifier::Enum(name, variants)
+        } else if has_typeof {
+            // TODO: proper typeof support
+            self.skip_balanced_parens();
+            TypeSpecifier::Int
+        } else if let Some(name) = typedef_name {
+            TypeSpecifier::TypedefName(name)
+        } else if has_char {
+            if has_unsigned {
+                TypeSpecifier::UnsignedChar
+            } else {
+                TypeSpecifier::Char // signed char = char
             }
-            TokenKind::Typeof => {
-                self.advance();
-                // TODO: proper typeof support
-                self.skip_balanced_parens();
-                TypeSpecifier::Int
+        } else if has_short {
+            if has_unsigned {
+                TypeSpecifier::UnsignedShort
+            } else {
+                TypeSpecifier::Short
             }
-            TokenKind::Identifier(ref name) if self.typedefs.contains(name) => {
-                let name = name.clone();
-                self.advance();
-                TypeSpecifier::TypedefName(name)
+        } else if long_count >= 2 {
+            if has_unsigned {
+                TypeSpecifier::UnsignedLongLong
+            } else {
+                TypeSpecifier::LongLong
             }
-            _ => return None,
+        } else if long_count == 1 {
+            if has_unsigned {
+                TypeSpecifier::UnsignedLong
+            } else {
+                TypeSpecifier::Long
+            }
+        } else if has_unsigned {
+            TypeSpecifier::UnsignedInt
+        } else {
+            // signed, int, or signed int all resolve to Int
+            TypeSpecifier::Int
         };
 
         // Skip any trailing type qualifiers, storage class specifiers, and attributes.
@@ -530,7 +748,6 @@ impl Parser {
                     self.advance();
                 }
                 TokenKind::Static => {
-                    // Storage class can appear after the type in C (e.g., "int static x;")
                     self.advance();
                     self.parsing_static = true;
                 }
@@ -1031,6 +1248,7 @@ impl Parser {
 
         loop {
             let (name, derived) = self.parse_declarator();
+            self.skip_asm_and_attributes();
             let init = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
             } else {
@@ -1042,6 +1260,7 @@ impl Parser {
                 init,
                 span: start,
             });
+            self.skip_asm_and_attributes();
             if !self.consume_if(&TokenKind::Comma) {
                 break;
             }

@@ -287,6 +287,14 @@ impl Preprocessor {
         self.define_simple_macro("__asm", "asm");
         self.define_simple_macro("__typeof__", "typeof");
 
+        // ELF ABI: no prefix for user labels on Linux
+        self.define_simple_macro("__USER_LABEL_PREFIX__", "");
+
+        // GNU C function declaration attributes
+        self.define_simple_macro("__LEAF", "");
+        self.define_simple_macro("__LEAF_ATTR", "");
+        self.define_simple_macro("__wur", "");
+
         // __DATE__ and __TIME__
         self.define_simple_macro("__DATE__", "\"Jan  1 2025\"");
         self.define_simple_macro("__TIME__", "\"00:00:00\"");
@@ -330,6 +338,10 @@ impl Preprocessor {
 
         let mut output = String::with_capacity(source.len());
 
+        // Buffer for accumulating multi-line macro invocations
+        let mut pending_line = String::new();
+        let mut pending_newlines: usize = 0;
+
         for (line_num, line) in source.lines().enumerate() {
             let trimmed = line.trim();
 
@@ -344,7 +356,7 @@ impl Preprocessor {
             });
 
             // Check for preprocessor directive
-            if trimmed.starts_with('#') {
+            if trimmed.starts_with('#') && pending_line.is_empty() {
                 let include_result = self.process_directive(trimmed, line_num + 1);
                 if let Some(included_content) = include_result {
                     // An #include was processed; insert the preprocessed content
@@ -361,13 +373,56 @@ impl Preprocessor {
                 output.push('\n');
             } else if self.conditionals.is_active() {
                 // Regular line - expand macros if we're in an active conditional
-                let expanded = self.macros.expand_line(line);
-                output.push_str(&expanded);
-                output.push('\n');
+                // Handle multi-line macro invocations by checking for unbalanced parens
+                if pending_line.is_empty() {
+                    if Self::has_unbalanced_parens(line) {
+                        pending_line = line.to_string();
+                        pending_newlines = 1;
+                    } else {
+                        let expanded = self.macros.expand_line(line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                    }
+                } else {
+                    // Continue accumulating lines
+                    pending_line.push('\n');
+                    pending_line.push_str(line);
+                    pending_newlines += 1;
+
+                    if !Self::has_unbalanced_parens(&pending_line) {
+                        // All parens are balanced - expand the accumulated line
+                        let expanded = self.macros.expand_line(&pending_line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                        // Emit extra newlines to preserve line numbering
+                        for _ in 1..pending_newlines {
+                            output.push('\n');
+                        }
+                        pending_line.clear();
+                        pending_newlines = 0;
+                    } else if pending_newlines > 20 {
+                        // Safety: don't accumulate forever
+                        let expanded = self.macros.expand_line(&pending_line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                        for _ in 1..pending_newlines {
+                            output.push('\n');
+                        }
+                        pending_line.clear();
+                        pending_newlines = 0;
+                    }
+                }
             } else {
                 // In an inactive conditional block - skip the line
                 output.push('\n');
             }
+        }
+
+        // Flush any remaining pending line
+        if !pending_line.is_empty() {
+            let expanded = self.macros.expand_line(&pending_line);
+            output.push_str(&expanded);
+            output.push('\n');
         }
 
         output
@@ -383,6 +438,10 @@ impl Preprocessor {
         // Save and reset conditional stack for included file
         let saved_conditionals = std::mem::replace(&mut self.conditionals, ConditionalStack::new());
 
+        // Buffer for multi-line macro invocations
+        let mut pending_line = String::new();
+        let mut pending_newlines: usize = 0;
+
         for (line_num, line) in source.lines().enumerate() {
             let trimmed = line.trim();
 
@@ -395,7 +454,7 @@ impl Preprocessor {
                 is_predefined: true,
             });
 
-            if trimmed.starts_with('#') {
+            if trimmed.starts_with('#') && pending_line.is_empty() {
                 let include_result = self.process_directive(trimmed, line_num + 1);
                 if let Some(included_content) = include_result {
                     output.push_str(&included_content);
@@ -404,12 +463,51 @@ impl Preprocessor {
                     output.push('\n');
                 }
             } else if self.conditionals.is_active() {
-                let expanded = self.macros.expand_line(line);
-                output.push_str(&expanded);
-                output.push('\n');
+                // Handle multi-line macro invocations
+                if pending_line.is_empty() {
+                    if Self::has_unbalanced_parens(line) {
+                        pending_line = line.to_string();
+                        pending_newlines = 1;
+                    } else {
+                        let expanded = self.macros.expand_line(line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                    }
+                } else {
+                    pending_line.push('\n');
+                    pending_line.push_str(line);
+                    pending_newlines += 1;
+
+                    if !Self::has_unbalanced_parens(&pending_line) {
+                        let expanded = self.macros.expand_line(&pending_line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                        for _ in 1..pending_newlines {
+                            output.push('\n');
+                        }
+                        pending_line.clear();
+                        pending_newlines = 0;
+                    } else if pending_newlines > 20 {
+                        let expanded = self.macros.expand_line(&pending_line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                        for _ in 1..pending_newlines {
+                            output.push('\n');
+                        }
+                        pending_line.clear();
+                        pending_newlines = 0;
+                    }
+                }
             } else {
                 output.push('\n');
             }
+        }
+
+        // Flush remaining
+        if !pending_line.is_empty() {
+            let expanded = self.macros.expand_line(&pending_line);
+            output.push_str(&expanded);
+            output.push('\n');
         }
 
         // Restore conditional stack
@@ -469,6 +567,54 @@ impl Preprocessor {
             // Still add it even if it doesn't exist yet (might be created)
             self.include_paths.push(pathbuf);
         }
+    }
+
+    /// Check if a line has unbalanced parentheses, indicating a multi-line
+    /// macro invocation that needs to be joined with subsequent lines.
+    /// This respects string literals and character literals.
+    fn has_unbalanced_parens(line: &str) -> bool {
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut in_char = false;
+        let bytes = line.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            if in_string {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    in_string = false;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            } else if in_char {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 2;
+                } else if bytes[i] == b'\'' {
+                    in_char = false;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            } else {
+                match bytes[i] {
+                    b'"' => { in_string = true; i += 1; }
+                    b'\'' => { in_char = true; i += 1; }
+                    b'(' => { depth += 1; i += 1; }
+                    b')' => { depth -= 1; i += 1; }
+                    b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
+                        // Line comment - stop processing
+                        break;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+        }
+
+        depth > 0
     }
 
     /// Strip C-style block comments (/* ... */), preserving newlines

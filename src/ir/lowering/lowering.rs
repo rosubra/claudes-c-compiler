@@ -697,10 +697,11 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => {
                 if let Some(info) = self.locals.get(name) {
-                    return info.ty == IrType::Ptr && !info.is_struct;
+                    // Arrays decay to pointers in expression context
+                    return (info.ty == IrType::Ptr || info.is_array) && !info.is_struct;
                 }
                 if let Some(ginfo) = self.globals.get(name) {
-                    return ginfo.ty == IrType::Ptr && !ginfo.is_struct;
+                    return (ginfo.ty == IrType::Ptr || ginfo.is_array) && !ginfo.is_struct;
                 }
                 false
             }

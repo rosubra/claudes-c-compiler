@@ -57,6 +57,11 @@ pub fn assemble(config: &AssemblerConfig, asm_text: &str, output_path: &str) -> 
 
 /// Link object files into an executable using an external toolchain.
 pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> Result<(), String> {
+    link_with_args(config, object_files, output_path, &[])
+}
+
+/// Link object files into an executable, with additional user-provided linker args.
+pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
     let mut cmd = Command::new(config.command);
     cmd.args(config.extra_args);
     cmd.arg("-o").arg(output_path);
@@ -65,8 +70,18 @@ pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> 
         cmd.arg(obj);
     }
 
-    cmd.arg("-lc");
-    cmd.arg("-lm");
+    // Add user-provided linker args (-l, -L, -static, etc.)
+    for arg in user_args {
+        cmd.arg(arg);
+    }
+
+    // Default libs (only add if not already in user_args)
+    if !user_args.iter().any(|a| a == "-lc") {
+        cmd.arg("-lc");
+    }
+    if !user_args.iter().any(|a| a == "-lm") {
+        cmd.arg("-lm");
+    }
 
     let result = cmd.output()
         .map_err(|e| format!("Failed to run linker ({}): {}", config.command, e))?;
