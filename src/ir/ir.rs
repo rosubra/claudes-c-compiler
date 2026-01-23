@@ -38,6 +38,11 @@ pub enum GlobalInit {
     String(String),
     /// Address of another global (for pointer globals like `const char *s = "hello"`).
     GlobalAddr(String),
+    /// Address of a global plus a byte offset (for `&arr[3]`, `&s.field`, etc.).
+    GlobalAddrOffset(String, i64),
+    /// Compound initializer: a sequence of initializer elements (for arrays/structs
+    /// containing address expressions, e.g., `int *ptrs[] = {&a, &b, 0}`).
+    Compound(Vec<GlobalInit>),
 }
 
 /// An IR function.

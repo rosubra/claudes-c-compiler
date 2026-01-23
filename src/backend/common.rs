@@ -223,6 +223,40 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
         GlobalInit::GlobalAddr(label) => {
             out.emit(&format!("    {} {}", ptr_dir.as_str(), label));
         }
+        GlobalInit::GlobalAddrOffset(label, offset) => {
+            if *offset >= 0 {
+                out.emit(&format!("    {} {}+{}", ptr_dir.as_str(), label, offset));
+            } else {
+                out.emit(&format!("    {} {}{}", ptr_dir.as_str(), label, offset));
+            }
+        }
+        GlobalInit::Compound(elements) => {
+            for elem in elements {
+                match elem {
+                    GlobalInit::Scalar(c) => {
+                        emit_const_data(out, c, g.ty, ptr_dir);
+                    }
+                    GlobalInit::GlobalAddr(label) => {
+                        out.emit(&format!("    {} {}", ptr_dir.as_str(), label));
+                    }
+                    GlobalInit::GlobalAddrOffset(label, offset) => {
+                        if *offset >= 0 {
+                            out.emit(&format!("    {} {}+{}", ptr_dir.as_str(), label, offset));
+                        } else {
+                            out.emit(&format!("    {} {}{}", ptr_dir.as_str(), label, offset));
+                        }
+                    }
+                    GlobalInit::Zero => {
+                        // Emit a zero-initialized element of the appropriate size
+                        out.emit(&format!("    {} 0", ptr_dir.as_str()));
+                    }
+                    _ => {
+                        // Nested compound or other - emit zero as fallback
+                        out.emit(&format!("    {} 0", ptr_dir.as_str()));
+                    }
+                }
+            }
+        }
     }
 }
 

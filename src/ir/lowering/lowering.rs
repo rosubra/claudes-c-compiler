@@ -410,9 +410,16 @@ impl Lowerer {
                 continue; // Skip anonymous declarations (e.g., struct definitions)
             }
 
-            // Skip function declarations
+            // Skip function declarations (but NOT function pointer variables).
+            // A function pointer variable has both Pointer and Function derived declarators,
+            // e.g., int (*fp)(int, int) = add; has [Pointer, Function(...)].
+            // A pure function declaration only has Function, e.g., int func(int, int);
+            // Also: if it has an initializer, it must be a variable.
             if declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _))) {
-                continue;
+                let has_pointer = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+                if !has_pointer && declarator.init.is_none() {
+                    continue;
+                }
             }
 
             // extern without initializer: track the type but don't emit a .bss entry
@@ -571,12 +578,49 @@ impl Lowerer {
                         return GlobalInit::GlobalAddr(label);
                     }
                 }
+                // Try to evaluate as a global address expression (e.g., &x, func, arr, &arr[3], &s.field)
+                if let Some(addr_init) = self.eval_global_addr_expr(expr) {
+                    return addr_init;
+                }
                 // Can't evaluate - zero init as fallback
                 GlobalInit::Zero
             }
             Initializer::List(items) => {
                 if is_array && elem_size > 0 {
                     let num_elems = total_size / elem_size;
+
+                    // Check if any element is an address expression (for pointer arrays)
+                    let has_addr_exprs = base_ty == IrType::Ptr && items.iter().any(|item| {
+                        if let Initializer::Expr(expr) = &item.init {
+                            self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some()
+                        } else {
+                            false
+                        }
+                    });
+
+                    if has_addr_exprs {
+                        // Use Compound initializer for arrays containing address expressions
+                        let mut elements = Vec::with_capacity(num_elems);
+                        for item in items {
+                            if let Initializer::Expr(expr) = &item.init {
+                                if let Some(val) = self.eval_const_expr(expr) {
+                                    elements.push(GlobalInit::Scalar(val));
+                                } else if let Some(addr) = self.eval_global_addr_expr(expr) {
+                                    elements.push(addr);
+                                } else {
+                                    elements.push(GlobalInit::Zero);
+                                }
+                            } else {
+                                elements.push(GlobalInit::Zero);
+                            }
+                        }
+                        // Zero-fill remaining
+                        while elements.len() < num_elems {
+                            elements.push(GlobalInit::Zero);
+                        }
+                        return GlobalInit::Compound(elements);
+                    }
+
                     let mut values = Vec::with_capacity(num_elems);
                     // For multi-dim arrays, flatten nested init lists
                     if array_dim_strides.len() > 1 {

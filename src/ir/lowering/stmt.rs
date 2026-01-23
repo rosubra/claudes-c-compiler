@@ -389,7 +389,7 @@ impl Lowerer {
                 Initializer::Expr(e) => {
                     // Handle string literal in char array initializer list:
                     // For char arr[2][6] = {"Hello", "World"}, each string fills a sub-array
-                    if (base_ty == IrType::I8 || base_ty == IrType::U8) {
+                    if base_ty == IrType::I8 || base_ty == IrType::U8 {
                         if let Expr::StringLiteral(s, _) = e {
                             let bytes = s.as_bytes();
                             let byte_offset_base = flat_index * elem_size;

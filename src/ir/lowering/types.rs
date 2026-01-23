@@ -64,6 +64,155 @@ impl Lowerer {
         }
     }
 
+    /// Try to evaluate an expression as a global address constant.
+    /// This handles patterns like:
+    /// - `&x` (address of a global variable)
+    /// - `func` (function name used as pointer)
+    /// - `arr` (array name decays to pointer)
+    /// - `&arr[3]` (address of array element with constant index)
+    /// - `&s.field` (address of struct field)
+    /// - `(type *)&x` (cast of address expression)
+    /// - `&x + n` or `&x - n` (pointer arithmetic on global address)
+    pub(super) fn eval_global_addr_expr(&self, expr: &Expr) -> Option<GlobalInit> {
+        match expr {
+            // &x -> GlobalAddr("x")
+            Expr::AddressOf(inner, _) => {
+                match inner.as_ref() {
+                    Expr::Identifier(name, _) => {
+                        // Address of a global variable
+                        if self.globals.contains_key(name) {
+                            return Some(GlobalInit::GlobalAddr(name.clone()));
+                        }
+                        None
+                    }
+                    // &arr[index] -> GlobalAddrOffset("arr", index * elem_size)
+                    Expr::ArraySubscript(base, index, _) => {
+                        if let Expr::Identifier(name, _) = base.as_ref() {
+                            if let Some(ginfo) = self.globals.get(name.as_str()) {
+                                if ginfo.is_array {
+                                    if let Some(idx_val) = self.eval_const_expr(index) {
+                                        if let Some(idx) = self.const_to_i64(&idx_val) {
+                                            let offset = idx * ginfo.elem_size as i64;
+                                            if offset == 0 {
+                                                return Some(GlobalInit::GlobalAddr(name.clone()));
+                                            }
+                                            return Some(GlobalInit::GlobalAddrOffset(name.clone(), offset));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    }
+                    // &s.field -> GlobalAddrOffset("s", field_offset)
+                    Expr::MemberAccess(base, field, _) => {
+                        if let Expr::Identifier(name, _) = base.as_ref() {
+                            if let Some(ginfo) = self.globals.get(name) {
+                                if let Some(ref layout) = ginfo.struct_layout {
+                                    for f in &layout.fields {
+                                        if f.name == *field {
+                                            if f.offset == 0 {
+                                                return Some(GlobalInit::GlobalAddr(name.clone()));
+                                            }
+                                            return Some(GlobalInit::GlobalAddrOffset(name.clone(), f.offset as i64));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            // Function name as pointer: void (*fp)(void) = func;
+            Expr::Identifier(name, _) => {
+                if self.known_functions.contains(name) {
+                    return Some(GlobalInit::GlobalAddr(name.clone()));
+                }
+                // Array name decays to pointer: int *p = arr;
+                if let Some(ginfo) = self.globals.get(name) {
+                    if ginfo.is_array {
+                        return Some(GlobalInit::GlobalAddr(name.clone()));
+                    }
+                }
+                None
+            }
+            // (type *)expr -> try evaluating the inner expression
+            Expr::Cast(_, inner, _) => {
+                self.eval_global_addr_expr(inner)
+            }
+            // &x + n or arr + n -> GlobalAddrOffset with byte offset
+            Expr::BinaryOp(BinOp::Add, lhs, rhs, _) => {
+                // Try lhs as address, rhs as constant offset
+                if let Some(addr) = self.eval_global_addr_base_and_offset(lhs, rhs) {
+                    return Some(addr);
+                }
+                // Try rhs as address, lhs as constant offset (commutative)
+                if let Some(addr) = self.eval_global_addr_base_and_offset(rhs, lhs) {
+                    return Some(addr);
+                }
+                None
+            }
+            // &x - n -> GlobalAddrOffset with negative byte offset
+            Expr::BinaryOp(BinOp::Sub, lhs, rhs, _) => {
+                if let Some(base_init) = self.eval_global_addr_expr(lhs) {
+                    if let Some(offset_val) = self.eval_const_expr(rhs) {
+                        if let Some(offset) = self.const_to_i64(&offset_val) {
+                            let elem_size = self.get_pointer_elem_size_from_expr(lhs);
+                            let byte_offset = -(offset * elem_size as i64);
+                            match base_init {
+                                GlobalInit::GlobalAddr(name) => {
+                                    if byte_offset == 0 {
+                                        return Some(GlobalInit::GlobalAddr(name));
+                                    }
+                                    return Some(GlobalInit::GlobalAddrOffset(name, byte_offset));
+                                }
+                                GlobalInit::GlobalAddrOffset(name, base_off) => {
+                                    let total = base_off + byte_offset;
+                                    if total == 0 {
+                                        return Some(GlobalInit::GlobalAddr(name));
+                                    }
+                                    return Some(GlobalInit::GlobalAddrOffset(name, total));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Helper for pointer arithmetic: base_expr + offset_expr where base is an address
+    fn eval_global_addr_base_and_offset(&self, base_expr: &Expr, offset_expr: &Expr) -> Option<GlobalInit> {
+        let base_init = self.eval_global_addr_expr(base_expr)?;
+        let offset_val = self.eval_const_expr(offset_expr)?;
+        let offset = self.const_to_i64(&offset_val)?;
+        let elem_size = self.get_pointer_elem_size_from_expr(base_expr);
+        let byte_offset = offset * elem_size as i64;
+        match base_init {
+            GlobalInit::GlobalAddr(name) => {
+                if byte_offset == 0 {
+                    Some(GlobalInit::GlobalAddr(name))
+                } else {
+                    Some(GlobalInit::GlobalAddrOffset(name, byte_offset))
+                }
+            }
+            GlobalInit::GlobalAddrOffset(name, base_off) => {
+                let total = base_off + byte_offset;
+                if total == 0 {
+                    Some(GlobalInit::GlobalAddr(name))
+                } else {
+                    Some(GlobalInit::GlobalAddrOffset(name, total))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Evaluate a constant binary operation.
     fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
         let l = self.const_to_i64(lhs)?;
