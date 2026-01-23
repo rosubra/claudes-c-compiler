@@ -61,7 +61,7 @@ pub struct Lowerer {
     current_blocks: Vec<BasicBlock>,
     current_instrs: Vec<Instruction>,
     current_label: String,
-    /// Name of the function currently being lowered (for static local mangling)
+    /// Name of the function currently being lowered (for static local mangling and scoping user labels)
     current_function_name: String,
     // Variable -> alloca mapping with metadata
     locals: HashMap<String, LocalInfo>,
@@ -69,6 +69,8 @@ pub struct Lowerer {
     globals: HashMap<String, GlobalInfo>,
     // Set of known function names (to distinguish globals from functions in Identifier)
     known_functions: HashSet<String>,
+    // Set of already-defined function bodies (to avoid duplicate definitions)
+    defined_functions: HashSet<String>,
     // Loop context for break/continue
     break_labels: Vec<String>,
     continue_labels: Vec<String>,
@@ -98,6 +100,7 @@ impl Lowerer {
             locals: HashMap::new(),
             globals: HashMap::new(),
             known_functions: HashSet::new(),
+            defined_functions: HashSet::new(),
             break_labels: Vec::new(),
             continue_labels: Vec::new(),
             switch_end_labels: Vec::new(),
@@ -170,6 +173,12 @@ impl Lowerer {
     }
 
     fn lower_function(&mut self, func: &FunctionDef) {
+        // Skip duplicate function definitions (can happen with static inline in headers)
+        if self.defined_functions.contains(&func.name) {
+            return;
+        }
+        self.defined_functions.insert(func.name.clone());
+
         self.next_value = 0;
         self.current_blocks.clear();
         self.locals.clear();
@@ -187,7 +196,7 @@ impl Lowerer {
         self.start_block("entry".to_string());
 
         // Allocate params as local variables
-        for param in &params {
+        for (i, param) in params.iter().enumerate() {
             if !param.name.is_empty() {
                 let alloca = self.fresh_value();
                 let ty = param.ty;
@@ -196,9 +205,22 @@ impl Lowerer {
                     ty,
                     size: ty.size(),
                 });
+
+                // Determine elem_size for pointer parameters from the original type spec.
+                // e.g., for `int *p`, elem_size should be sizeof(int) = 4.
+                let elem_size = if ty == IrType::Ptr {
+                    if let Some(orig_param) = func.params.get(i) {
+                        self.pointee_elem_size(&orig_param.type_spec)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
                 self.locals.insert(param.name.clone(), LocalInfo {
                     alloca,
-                    elem_size: 0,
+                    elem_size,
                     is_array: false,
                     ty,
                     struct_layout: None,
@@ -248,6 +270,17 @@ impl Lowerer {
                 continue;
             }
 
+            // If this global already exists (e.g., `extern int a; int a = 0;`),
+            // only emit the definition with an initializer, or skip duplicates.
+            if self.globals.contains_key(&declarator.name) {
+                if declarator.init.is_none() {
+                    // Skip re-declaration without initializer (e.g., `extern int a;`)
+                    continue;
+                }
+                // Has initializer: remove the previous zero-init global and re-emit with init
+                self.module.globals.retain(|g| g.name != declarator.name);
+            }
+
             let base_ty = self.type_spec_to_ir(&decl.type_spec);
             let (alloc_size, elem_size, is_array, is_pointer) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
             let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
@@ -264,7 +297,7 @@ impl Lowerer {
 
             // Determine initializer
             let init = if let Some(ref initializer) = declarator.init {
-                self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size)
+                self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size, &struct_layout)
             } else {
                 GlobalInit::Zero
             };
@@ -291,9 +324,17 @@ impl Lowerer {
 
             let is_static = decl.is_static;
 
+            // For struct initializers emitted as byte arrays, set element type to I8
+            // so the backend emits .byte directives for each element
+            let global_ty = if is_struct && matches!(init, GlobalInit::Array(_)) {
+                IrType::I8
+            } else {
+                var_ty
+            };
+
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),
-                ty: var_ty,
+                ty: global_ty,
                 size: actual_alloc_size,
                 align,
                 init,
@@ -311,6 +352,7 @@ impl Lowerer {
         is_array: bool,
         elem_size: usize,
         total_size: usize,
+        struct_layout: &Option<StructLayout>,
     ) -> GlobalInit {
         match init {
             Initializer::Expr(expr) => {
@@ -351,9 +393,117 @@ impl Lowerer {
                     }
                     return GlobalInit::Array(values);
                 }
-                // Non-array initializer list (struct init, etc.) - zero for now
-                // TODO: handle struct initializers
+
+                // Struct/union initializer list: emit field-by-field constants
+                if let Some(ref layout) = struct_layout {
+                    return self.lower_struct_global_init(items, layout);
+                }
+
+                // Fallback: try to emit as an array of I32 constants
+                // (handles cases like plain `{1, 2, 3}` without type info)
+                let mut values = Vec::new();
+                for item in items {
+                    if let Initializer::Expr(expr) = &item.init {
+                        if let Some(val) = self.eval_const_expr(expr) {
+                            values.push(val);
+                        } else {
+                            values.push(IrConst::I32(0));
+                        }
+                    } else {
+                        values.push(IrConst::I32(0));
+                    }
+                }
+                if !values.is_empty() {
+                    return GlobalInit::Array(values);
+                }
                 GlobalInit::Zero
+            }
+        }
+    }
+
+    /// Lower a struct initializer list to a GlobalInit::Array of field values.
+    /// Emits each field's value at its appropriate position, with padding bytes as zeros.
+    fn lower_struct_global_init(
+        &self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+    ) -> GlobalInit {
+        // Strategy: emit one IrConst per field in order, using the field's IR type.
+        // The backend will emit the appropriate .byte/.short/.long/.quad directives.
+        // We use GlobalInit::StructInit to avoid confusion with array semantics.
+        // But since we only have Array variant, we'll emit field values in order
+        // and have the backend emit them with proper sizes using field_types.
+
+        // For simplicity, emit as Array where each element corresponds to a field.
+        // The codegen will need to know the type of each field to emit proper directives.
+        // Since GlobalInit::Array emits all values with the same type, we'll use a
+        // different approach: emit raw bytes as I8 constants.
+        let total_size = layout.size;
+        let mut bytes = vec![0u8; total_size];
+
+        // Fill in field values from initializer items
+        let mut item_idx = 0;
+        for field_layout in &layout.fields {
+            if item_idx >= items.len() {
+                break;
+            }
+            let item = &items[item_idx];
+            item_idx += 1;
+
+            // Evaluate the initializer expression
+            let val = if let Initializer::Expr(expr) = &item.init {
+                self.eval_const_expr(expr).unwrap_or(IrConst::I64(0))
+            } else {
+                IrConst::I64(0)
+            };
+
+            // Convert value to bytes and place at field offset
+            let field_offset = field_layout.offset;
+            let field_ir_ty = IrType::from_ctype(&field_layout.ty);
+            self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
+        }
+
+        // Emit as array of I8 (byte) constants
+        let values: Vec<IrConst> = bytes.iter().map(|&b| IrConst::I8(b as i8)).collect();
+        GlobalInit::Array(values)
+    }
+
+    /// Write an IrConst value to a byte buffer at the given offset using the field's IR type.
+    fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
+        let int_val = match val {
+            IrConst::I8(v) => *v as i64,
+            IrConst::I16(v) => *v as i64,
+            IrConst::I32(v) => *v as i64,
+            IrConst::I64(v) => *v,
+            IrConst::Zero => 0,
+            IrConst::F32(v) => {
+                // Write float as 4 bytes
+                let bits = v.to_bits().to_le_bytes();
+                for (i, &b) in bits.iter().enumerate() {
+                    if offset + i < bytes.len() {
+                        bytes[offset + i] = b;
+                    }
+                }
+                return;
+            }
+            IrConst::F64(v) => {
+                // Write double as 8 bytes
+                let bits = v.to_bits().to_le_bytes();
+                for (i, &b) in bits.iter().enumerate() {
+                    if offset + i < bytes.len() {
+                        bytes[offset + i] = b;
+                    }
+                }
+                return;
+            }
+        };
+
+        // Write integer value in little-endian at the appropriate size
+        let le_bytes = int_val.to_le_bytes();
+        let size = ty.size();
+        for i in 0..size {
+            if offset + i < bytes.len() {
+                bytes[offset + i] = le_bytes[i];
             }
         }
     }
@@ -484,16 +634,16 @@ impl Lowerer {
 
                 // Determine initializer (evaluated at compile time for static locals)
                 let init = if let Some(ref initializer) = declarator.init {
-                    self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size)
+                    self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size, &struct_layout)
                 } else {
                     GlobalInit::Zero
                 };
 
                 let align = match var_ty {
-                    IrType::I8 => 1,
-                    IrType::I16 => 2,
-                    IrType::I32 => 4,
-                    IrType::I64 | IrType::Ptr => 8,
+                    IrType::I8 | IrType::U8 => 1,
+                    IrType::I16 | IrType::U16 => 2,
+                    IrType::I32 | IrType::U32 => 4,
+                    IrType::I64 | IrType::U64 | IrType::Ptr => 8,
                     IrType::F32 => 4,
                     IrType::F64 => 8,
                     IrType::Void => 1,
@@ -909,12 +1059,15 @@ impl Lowerer {
                 self.lower_stmt(stmt);
             }
             Stmt::Goto(label, _span) => {
-                self.terminate(Terminator::Branch(format!(".Luser_{}", label)));
+                // Include function name in label to avoid collisions across functions
+                let scoped_label = format!(".Luser_{}_{}", self.current_function_name, label);
+                self.terminate(Terminator::Branch(scoped_label));
                 let dead = self.fresh_label("post_goto");
                 self.start_block(dead);
             }
             Stmt::Label(name, stmt, _span) => {
-                let label = format!(".Luser_{}", name);
+                // Include function name in label to avoid collisions across functions
+                let label = format!(".Luser_{}_{}", self.current_function_name, name);
                 self.terminate(Terminator::Branch(label.clone()));
                 self.start_block(label);
                 self.lower_stmt(stmt);
@@ -1133,6 +1286,20 @@ impl Lowerer {
         // use 8 bytes as a safe default for pointer dereferencing.
         // TODO: use type information from sema to determine correct size
         8
+    }
+
+    /// Compute the element size for a pointer type specifier.
+    /// For `Pointer(Int)`, returns sizeof(int) = 4.
+    /// For `Pointer(Char)`, returns 1.
+    /// For `Pointer(Pointer(...))`, returns 8.
+    fn pointee_elem_size(&self, type_spec: &TypeSpecifier) -> usize {
+        match type_spec {
+            TypeSpecifier::Pointer(inner) => self.sizeof_type(inner),
+            // Array parameters decay to pointers; elem_size is the element type size
+            TypeSpecifier::Array(inner, _) => self.sizeof_type(inner),
+            // Not a pointer type
+            _ => 0,
+        }
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Operand {
@@ -1929,7 +2096,10 @@ impl Lowerer {
         // Check for pointer declarators
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
         if has_pointer {
-            return (8, 0, false, true);
+            // Compute element size for pointer arithmetic: sizeof(pointed-to type)
+            // For `int *p`, elem_size = sizeof(int) = 4
+            let elem_size = self.sizeof_type(ts);
+            return (8, elem_size, false, true);
         }
 
         // Check for array declarators

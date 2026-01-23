@@ -678,7 +678,13 @@ impl X86Codegen {
                 if let Some(loc) = self.value_locations.get(&v.0).cloned() {
                     match loc {
                         ValueLocation::Stack(offset) => {
-                            self.emit_line(&format!("    movq {}(%rbp), %rax", offset));
+                            // For alloca values, the "value" IS the address of the stack slot.
+                            // Use leaq to get the address rather than movq which loads from it.
+                            if self.alloca_values.contains(&v.0) {
+                                self.emit_line(&format!("    leaq {}(%rbp), %rax", offset));
+                            } else {
+                                self.emit_line(&format!("    movq {}(%rbp), %rax", offset));
+                            }
                         }
                         ValueLocation::Register(ref reg) => {
                             self.emit_line(&format!("    movq %{}, %rax", reg));

@@ -520,7 +520,13 @@ impl RiscvCodegen {
             }
             Operand::Value(v) => {
                 if let Some(&offset) = self.value_locations.get(&v.0) {
-                    self.emit(&format!("    ld t0, {}(s0)", offset));
+                    // For alloca values, the "value" IS the address of the stack slot.
+                    // Use addi to compute address rather than ld which loads from it.
+                    if self.alloca_values.contains(&v.0) {
+                        self.emit(&format!("    addi t0, s0, {}", offset));
+                    } else {
+                        self.emit(&format!("    ld t0, {}(s0)", offset));
+                    }
                 } else {
                     self.emit("    li t0, 0");
                 }

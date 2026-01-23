@@ -820,10 +820,27 @@ impl Parser {
 
             let span = self.peek_span();
             self.skip_gcc_extensions();
-            if let Some(type_spec) = self.parse_type_specifier() {
+            if let Some(mut type_spec) = self.parse_type_specifier() {
                 // Parse parameter declarator (handles pointers, function pointers, arrays)
-                let name = self.parse_param_declarator();
+                let (name, pointer_depth, is_array, is_func_ptr) = self.parse_param_declarator_full();
                 self.skip_gcc_extensions();
+
+                // Wrap type with pointer levels from declarator
+                // e.g., `int *p` -> base=Int, pointer_depth=1 -> Pointer(Int)
+                for _ in 0..pointer_depth {
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                }
+
+                // Array parameters decay to pointers (e.g., `int arr[]` -> `int *`)
+                if is_array {
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                }
+
+                // Function pointers: treat as Pointer (e.g., `void (*fp)(int)` -> Ptr)
+                if is_func_ptr {
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                }
+
                 params.push(ParamDecl { type_spec, name, span });
             } else {
                 break;
@@ -846,9 +863,13 @@ impl Parser {
     /// - Abstract (unnamed): `int *`, `void (*)(int)`
     /// - Parenthesized: `int (x)`
     /// Returns the name if one was found.
-    fn parse_param_declarator(&mut self) -> Option<String> {
+    /// Parse a parameter declarator. Returns (name, pointer_depth, is_array, is_func_ptr).
+    /// The caller must wrap the base type_spec with Pointer() for each pointer level.
+    fn parse_param_declarator_full(&mut self) -> (Option<String>, u32, bool, bool) {
         // Parse leading pointer(s)
+        let mut pointer_depth: u32 = 0;
         while self.consume_if(&TokenKind::Star) {
+            pointer_depth += 1;
             loop {
                 match self.peek() {
                     TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
@@ -858,6 +879,8 @@ impl Parser {
                 }
             }
         }
+        let mut is_array = false;
+        let mut is_func_ptr = false;
 
         // Check for parenthesized declarator: (*name) or (*)
         let name = if matches!(self.peek(), TokenKind::LParen) {
@@ -870,6 +893,7 @@ impl Parser {
 
             if self.consume_if(&TokenKind::Star) {
                 // Function pointer: (*name) or (*)
+                is_func_ptr = true;
                 // Skip qualifiers
                 loop {
                     match self.peek() {
@@ -946,8 +970,9 @@ impl Parser {
             None
         };
 
-        // Skip array dimensions
+        // Skip array dimensions (and track that this is an array type -> pointer decay)
         while matches!(self.peek(), TokenKind::LBracket) {
+            is_array = true;
             self.advance();
             while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
                 self.advance();
@@ -960,7 +985,7 @@ impl Parser {
             self.skip_balanced_parens();
         }
 
-        name
+        (name, pointer_depth, is_array, is_func_ptr)
     }
 
     fn parse_compound_stmt(&mut self) -> CompoundStmt {

@@ -586,7 +586,13 @@ impl ArmCodegen {
             }
             Operand::Value(v) => {
                 if let Some(&offset) = self.value_locations.get(&v.0) {
-                    self.emit(&format!("    ldr x0, [sp, #{}]", offset));
+                    // For alloca values, the "value" IS the address of the stack slot.
+                    // Use add to compute address rather than ldr which loads from it.
+                    if self.alloca_values.contains(&v.0) {
+                        self.emit(&format!("    add x0, sp, #{}", offset));
+                    } else {
+                        self.emit(&format!("    ldr x0, [sp, #{}]", offset));
+                    }
                 } else {
                     self.emit("    mov x0, #0");
                 }
