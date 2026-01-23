@@ -931,13 +931,17 @@ impl ArchCodegen for X86Codegen {
                 self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
             }
         }
-        // gp_offset = num_named_int_params * 8 (skip named params in reg save area)
-        let gp_offset = self.num_named_int_params * 8;
+        // gp_offset = min(num_named_int_params, 6) * 8 (skip named params in reg save area)
+        // Cap at 48 (6 registers * 8 bytes) since only 6 GP regs are saved
+        let gp_offset = self.num_named_int_params.min(6) * 8;
         self.state.emit(&format!("    movl ${}, (%rax)", gp_offset));
         // fp_offset = 48 + 0 (no FP register saving yet, force overflow for FP)
         self.state.emit("    movl $176, 4(%rax)");
-        // overflow_arg_area = rbp + 16 (where stack-passed args start, after saved rbp + ret addr)
-        self.state.emit("    leaq 16(%rbp), %rcx");
+        // overflow_arg_area = rbp + 16 + num_stack_named_params * 8
+        // Stack-passed named params are those beyond the 6 register params
+        let num_stack_named = if self.num_named_int_params > 6 { self.num_named_int_params - 6 } else { 0 };
+        let overflow_offset = 16 + num_stack_named * 8;
+        self.state.emit(&format!("    leaq {}(%rbp), %rcx", overflow_offset));
         self.state.emit("    movq %rcx, 8(%rax)");
         // reg_save_area = address of the saved registers in the prologue
         let reg_save = self.reg_save_area_offset;

@@ -14,9 +14,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~68.6% passing (2051/2991)
-- AArch64: ~71.5% passing (2051/2869)
-- RISC-V 64: ~65.1% passing (1862/2861)
+- x86-64: ~69.6% passing (2081/2991)
+- AArch64: ~73.5% passing (2108/2869)
+- RISC-V 64: ~65.2% passing (1866/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -54,6 +54,17 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Flat struct/array initialization fix**: Fixed struct initialization with flat (non-braced)
+  initializer lists when the struct contains array fields. Now correctly consumes multiple
+  items from the init list for array fields (e.g., `struct { int a[10]; int b; } x = {1,2,...,10,11}`).
+  Also fixed global struct init for the same case.
+- **Multi-dimensional array init fix**: Fixed boundary snapping for bare expressions in
+  multi-dimensional array initializers. Previously, bare scalar values at multi-dim levels
+  were incorrectly snapped to sub-array boundaries, causing values to be placed in wrong positions.
+- **va_arg register save area (all architectures)**: Fixed variadic function argument passing
+  on all three backends. Variadic functions now save register-passed arguments to a register
+  save area so `va_arg` can access them. Previously, variadic args passed in registers were
+  inaccessible because `va_start` only pointed to the stack overflow area.
 - **CType::Bool and _Bool normalization**: Added `CType::Bool` variant to distinguish `_Bool` from
   `unsigned char` at the type level. Stores to `_Bool` lvalues through pointer dereference,
   array subscript, struct/union member access, compound assignment, and increment/decrement

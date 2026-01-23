@@ -1244,16 +1244,22 @@ impl Lowerer {
                                     }
                                 }
                             } else {
-                                // Array of scalars: consume one item per element
-                                for ai in 0..*arr_size {
-                                    if item_idx >= items.len() { break; }
-                                    let elem_offset = field_offset + ai * elem_size;
-                                    if let Initializer::Expr(e) = &items[item_idx].init {
+                                // Array of scalars: consume up to arr_size items
+                                let mut consumed = 0usize;
+                                while consumed < *arr_size && (item_idx + consumed) < items.len() {
+                                    let cur_item = &items[item_idx + consumed];
+                                    // Stop if we hit a designator (targeting a different field)
+                                    if !cur_item.designators.is_empty() { break; }
+                                    if let Initializer::Expr(e) = &cur_item.init {
                                         let val = self.eval_const_expr(e).unwrap_or(IrConst::I64(0));
+                                        let elem_offset = field_offset + consumed * elem_size;
                                         self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                        consumed += 1;
+                                    } else {
+                                        break;
                                     }
-                                    item_idx += 1;
                                 }
+                                item_idx += consumed.max(1);
                             }
                             // Don't increment item_idx here; it was already advanced in the loop
                             current_field_idx = field_idx + 1;

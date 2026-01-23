@@ -10,6 +10,11 @@ pub struct ArmCodegen {
     /// Frame size for the current function (needed for epilogue in terminators).
     current_frame_size: i64,
     current_return_type: IrType,
+    /// For variadic functions: offset from SP where the register save area starts.
+    /// This is where x0-x7 are saved so va_arg can access them.
+    va_save_area_offset: i64,
+    /// Number of named (non-variadic) integer params for current variadic function.
+    va_named_gp_count: usize,
 }
 
 impl ArmCodegen {
@@ -18,6 +23,8 @@ impl ArmCodegen {
             state: CodegenState::new(),
             current_frame_size: 0,
             current_return_type: IrType::I64,
+            va_save_area_offset: 0,
+            va_named_gp_count: 0,
         }
     }
 
@@ -110,6 +117,18 @@ impl ArmCodegen {
             self.load_large_imm("x16", offset);
             self.state.emit("    add x16, sp, x16");
             self.state.emit(&format!("    {} {}, [x16]", instr, reg));
+        }
+    }
+
+    /// Emit `stp reg1, reg2, [sp, #offset]` handling large offsets.
+    fn emit_stp_to_sp(&mut self, reg1: &str, reg2: &str, offset: i64) {
+        // stp supports signed offsets in [-512, 504] range (multiples of 8)
+        if offset >= -512 && offset <= 504 {
+            self.state.emit(&format!("    stp {}, {}, [sp, #{}]", reg1, reg2, offset));
+        } else {
+            self.load_large_imm("x16", offset);
+            self.state.emit("    add x16, sp, x16");
+            self.state.emit(&format!("    stp {}, {}, [x16]", reg1, reg2));
         }
     }
 
@@ -438,12 +457,31 @@ impl ArchCodegen for ArmCodegen {
     fn function_type_directive(&self) -> &'static str { "%function" }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
+        let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
             // ARM uses positive offsets from sp, starting at 16 (after fp/lr)
             let slot = space;
             let new_space = space + ((alloc_size + 7) & !7).max(8);
             (slot, new_space)
-        })
+        });
+
+        // For variadic functions, reserve space for the register save area (x0-x7 = 64 bytes)
+        if func.is_variadic {
+            // Align to 8 bytes
+            space = (space + 7) & !7;
+            self.va_save_area_offset = space;
+            space += 64; // 8 registers * 8 bytes
+
+            // Count named integer params to know where variadic args start
+            let mut named_gp = 0usize;
+            for param in &func.params {
+                if !param.ty.is_float() {
+                    named_gp += 1;
+                }
+            }
+            self.va_named_gp_count = named_gp.min(8);
+        }
+
+        space
     }
 
     fn aligned_frame_size(&self, raw_space: i64) -> i64 {
@@ -462,6 +500,18 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_store_params(&mut self, func: &IrFunction) {
         let frame_size = self.current_frame_size;
+
+        // For variadic functions: save all integer register args (x0-x7) to the
+        // register save area first, before any other processing. This allows va_arg
+        // to access any register-passed variadic arguments.
+        if func.is_variadic {
+            let save_base = self.va_save_area_offset;
+            // Save x0-x7 using stp pairs for efficiency
+            for i in (0..8).step_by(2) {
+                let offset = save_base + (i as i64) * 8;
+                self.emit_stp_to_sp(&format!("x{}", i), &format!("x{}", i + 1), offset);
+            }
+        }
 
         // Classify each param: int reg, float reg, or stack-passed
         let mut int_reg_idx = 0usize;
@@ -985,9 +1035,14 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_va_start(&mut self, va_list_ptr: &Value) {
-        // AArch64 simplified va_start: set __stack = sp + frame adjustment
-        // For variadic functions, stack args start at sp + frame_size (caller's stack area)
-        // Since we use rbp (x29), stack args start at x29 + 16 (saved x29 + saved lr)
+        // AArch64 va_start: set __stack to point at the first variadic argument.
+        //
+        // For variadic functions, we save x0-x7 to a register save area on the stack.
+        // The variadic args start after the named GP register params.
+        // If all named params fit in registers (< 8 GP params), variadic args are
+        // in the register save area at offset named_gp_count * 8.
+        // If named params overflow to stack (>= 8 GP params), variadic args are
+        // on the caller's stack frame at x29 + 16.
         if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
                 self.state.emit(&format!("    add x0, x29, #{}", slot.0));
@@ -995,13 +1050,17 @@ impl ArchCodegen for ArmCodegen {
                 self.state.emit(&format!("    ldr x0, [x29, #{}]", slot.0));
             }
         }
-        // __stack = x29 + 16 (stack args area)
-        self.state.emit("    add x1, x29, #16");
+
+        if self.va_named_gp_count < 8 {
+            // Variadic args start in the register save area, after named params
+            let vararg_offset = self.va_save_area_offset + (self.va_named_gp_count as i64) * 8;
+            self.emit_add_sp_offset("x1", vararg_offset);
+        } else {
+            // All registers used by named params; variadic args are on the caller's stack
+            // They're at x29 + 16 (past saved fp/lr)
+            self.state.emit("    add x1, x29, #16");
+        }
         self.state.emit("    str x1, [x0]");
-        // Set __gr_offs = 0 (force overflow path): offset 24
-        self.state.emit("    str wzr, [x0, #24]");
-        // Set __vr_offs = 0 (force overflow path): offset 28
-        self.state.emit("    str wzr, [x0, #28]");
     }
 
     fn emit_va_end(&mut self, _va_list_ptr: &Value) {

@@ -638,6 +638,15 @@ impl Lowerer {
                             }
                         }
                     }
+                    // Advance to next sub-array boundary after a braced sub-list
+                    // This handles partial initialization: {{1,2},{3}} for int a[2][3]
+                    // After {1,2} we advance to index 3 (next row), after {3} to index 6
+                    if array_dim_strides.len() > 1 {
+                        let boundary = start_index + sub_elem_count;
+                        if *flat_index < boundary {
+                            *flat_index = boundary;
+                        }
+                    }
                 }
                 Initializer::Expr(e) => {
                     // String literal fills a sub-array in char arrays
@@ -645,20 +654,13 @@ impl Lowerer {
                         if let Expr::StringLiteral(s, _) = e {
                             self.emit_string_to_alloca(alloca, s, *flat_index * elem_size);
                             *flat_index += sub_elem_count;
-                            // Skip boundary adjustment since we already advanced by sub_elem_count
                             continue;
                         }
                     }
+                    // Bare expression: store at current flat index, no boundary snap
                     let val = self.lower_and_cast_init_expr(e, base_ty);
                     self.emit_array_element_store(alloca, val, *flat_index * elem_size, base_ty);
                     *flat_index += 1;
-                }
-            }
-            // Advance to next sub-array boundary if multi-dim
-            if array_dim_strides.len() > 1 {
-                let boundary = start_index + sub_elem_count;
-                if *flat_index < boundary {
-                    *flat_index = boundary;
                 }
             }
         }
@@ -1171,18 +1173,34 @@ impl Lowerer {
                                     continue;
                                 }
                             }
-                            // Other single expression for array
-                            let val = self.lower_expr(e);
-                            let field_ty = IrType::from_ctype(&field.ty);
-                            let addr = self.fresh_value();
-                            self.emit(Instruction::GetElementPtr {
-                                dest: addr,
-                                base: base_alloca,
-                                offset: Operand::Const(IrConst::I64(field_offset as i64)),
-                                ty: field_ty,
-                            });
-                            self.emit(Instruction::Store { val, ptr: addr, ty: field_ty });
-                            item_idx += 1;
+                            // Flat init: consume up to arr_size items from the init list
+                            // to fill the array elements (e.g., struct { int a[3]; int b; } x = {1,2,3,4};)
+                            let elem_ir_ty = IrType::from_ctype(elem_ty);
+                            let mut consumed = 0usize;
+                            while consumed < *arr_size && (item_idx + consumed) < items.len() {
+                                let cur_item = &items[item_idx + consumed];
+                                // Stop if we hit a designator (which targets a different field)
+                                if !cur_item.designators.is_empty() { break; }
+                                if let Initializer::Expr(expr) = &cur_item.init {
+                                    let expr_ty = self.get_expr_type(expr);
+                                    let val = self.lower_expr(expr);
+                                    let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                                    let elem_offset = field_offset + consumed * elem_size;
+                                    let addr = self.fresh_value();
+                                    self.emit(Instruction::GetElementPtr {
+                                        dest: addr,
+                                        base: base_alloca,
+                                        offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                        ty: elem_ir_ty,
+                                    });
+                                    self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                                    consumed += 1;
+                                } else {
+                                    // Hit a nested List - stop flat consumption
+                                    break;
+                                }
+                            }
+                            item_idx += consumed.max(1);
                         }
                     }
                 }
