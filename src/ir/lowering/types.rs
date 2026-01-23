@@ -1368,24 +1368,28 @@ impl Lowerer {
             // If Array comes before Pointer (e.g., int (*p)[5]), it's pointer to array.
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
             let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
-            if let (Some(pp), Some(ap)) = (ptr_pos, arr_pos) {
-                if pp < ap {
-                    // Array of pointers: int *arr[3]
-                    // Each element is a pointer (8 bytes)
-                    let array_dims: Vec<Option<usize>> = derived.iter().filter_map(|d| {
-                        if let DerivedDeclarator::Array(size_expr) = d {
-                            let dim = size_expr.as_ref().and_then(|e| {
-                                self.expr_as_array_size(e).map(|n| n as usize)
-                            });
-                            Some(dim)
-                        } else {
-                            None
-                        }
-                    }).collect();
-                    let total_elems: usize = array_dims.iter().map(|d| d.unwrap_or(256)).product();
-                    let total_size = total_elems * 8; // each element is a pointer
-                    return (total_size, 8, true, false, vec![]);
-                }
+
+            // If pointer is from resolved type spec (not in derived), and array is in derived,
+            // this is an array of typedef'd pointers (e.g., typedef int *intptr; intptr arr[3];
+            // or typedef int (*fn_t)(int); fn_t ops[2];)
+            let pointer_from_type_spec = ptr_pos.is_none() && matches!(ts, TypeSpecifier::Pointer(_));
+
+            if pointer_from_type_spec || matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap) {
+                // Array of pointers: int *arr[3] or typedef'd_ptr arr[3]
+                // Each element is a pointer (8 bytes)
+                let array_dims: Vec<Option<usize>> = derived.iter().filter_map(|d| {
+                    if let DerivedDeclarator::Array(size_expr) = d {
+                        let dim = size_expr.as_ref().and_then(|e| {
+                            self.expr_as_array_size(e).map(|n| n as usize)
+                        });
+                        Some(dim)
+                    } else {
+                        None
+                    }
+                }).collect();
+                let total_elems: usize = array_dims.iter().map(|d| d.unwrap_or(256)).product();
+                let total_size = total_elems * 8; // each element is a pointer
+                return (total_size, 8, true, false, vec![]);
             }
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
             let elem_size = self.sizeof_type(ts);
