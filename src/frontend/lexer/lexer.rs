@@ -298,25 +298,25 @@ impl Lexer {
             let mut is_imaginary = false;
             let float_kind = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
                 self.pos += 1;
-                // Consume trailing 'i' for imaginary (GCC extension: 3.0fi)
-                if self.pos < self.input.len() && self.input[self.pos] == b'i' {
+                // Consume trailing 'i'/'I' for imaginary (GCC extension: 3.0fi, 3.0fI)
+                if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
                     self.pos += 1;
                     is_imaginary = true;
                 }
                 1 // float (f32)
             } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
                 self.pos += 1;
-                // Consume trailing 'i' for imaginary (GCC extension: 3.0Li)
-                if self.pos < self.input.len() && self.input[self.pos] == b'i' {
+                // Consume trailing 'i'/'I' for imaginary (GCC extension: 3.0Li, 3.0LI)
+                if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
                     self.pos += 1;
                     is_imaginary = true;
                 }
                 2 // long double
-            } else if self.pos < self.input.len() && self.input[self.pos] == b'i' {
-                // GCC extension: imaginary suffix 'i' (3.0i)
+            } else if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
+                // GCC extension: imaginary suffix 'i'/'I' (3.0i, 3.0I)
                 self.pos += 1;
                 is_imaginary = true;
-                // Check for additional f/F/l/L after i (e.g., 3.0if, 3.0iF)
+                // Check for additional f/F/l/L after i/I (e.g., 3.0if, 3.0IF)
                 if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
                     self.pos += 1;
                     1 // float imaginary
@@ -329,8 +329,8 @@ impl Lexer {
             } else {
                 0 // double
             };
-            // Also consume trailing 'j' suffix (C99/GCC alternative for imaginary)
-            if !is_imaginary && self.pos < self.input.len() && self.input[self.pos] == b'j' {
+            // Also consume trailing 'j'/'J' suffix (C99/GCC alternative for imaginary)
+            if !is_imaginary && self.pos < self.input.len() && (self.input[self.pos] == b'j' || self.input[self.pos] == b'J') {
                 self.pos += 1;
                 is_imaginary = true;
             }
@@ -367,13 +367,13 @@ impl Lexer {
     /// is_imaginary is true for trailing 'i' suffix (GCC extension: 5i).
     fn parse_int_suffix(&mut self) -> (bool, bool, bool) {
         let mut is_imaginary = false;
-        // First check for standalone 'i' imaginary suffix (GCC extension: 5i)
-        // Must check this before the main loop since 'i' alone means imaginary, not a regular suffix
-        if self.pos < self.input.len() && self.input[self.pos] == b'i' {
+        // First check for standalone 'i'/'I' imaginary suffix (GCC extension: 5i, 5I)
+        // Must check this before the main loop since 'i'/'I' alone means imaginary, not a regular suffix
+        if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
             // Check it's not the start of an identifier (like 'int')
             let next = if self.pos + 1 < self.input.len() { self.input[self.pos + 1] } else { 0 };
             if !next.is_ascii_alphanumeric() && next != b'_' {
-                self.pos += 1; // consume 'i' as imaginary suffix
+                self.pos += 1; // consume 'i'/'I' as imaginary suffix
                 return (false, false, true);
             }
         }
@@ -395,8 +395,8 @@ impl Lexer {
                 break;
             }
         }
-        // Consume trailing 'i' or 'j' for GCC imaginary suffix (e.g., 5li, 5ui, 5ULi)
-        if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'j') {
+        // Consume trailing 'i'/'I'/'j'/'J' for GCC imaginary suffix (e.g., 5li, 5ui, 5ULi, 5I)
+        if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I' || self.input[self.pos] == b'j' || self.input[self.pos] == b'J') {
             let next = if self.pos + 1 < self.input.len() { self.input[self.pos + 1] } else { 0 };
             if !next.is_ascii_alphanumeric() && next != b'_' {
                 self.pos += 1;

@@ -1004,8 +1004,22 @@ impl Parser {
                     _ => break,
                 }
             }
+        } else if has_float {
+            // "float" can be followed by "_Complex"
+            loop {
+                match self.peek() {
+                    TokenKind::Complex => {
+                        self.advance();
+                        has_complex = true;
+                    }
+                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
         } else if has_double {
-            // "double" can be preceded/followed by "long"
+            // "double" can be preceded/followed by "long" and "_Complex"
             loop {
                 match self.peek() {
                     TokenKind::Long => {
@@ -1029,7 +1043,7 @@ impl Parser {
         }
 
         // Now resolve the collected specifiers into a TypeSpecifier
-        let base = if has_void {
+        let mut base = if has_void {
             TypeSpecifier::Void
         } else if has_bool {
             TypeSpecifier::Bool
@@ -1182,14 +1196,14 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::Complex => {
-                    // _Complex after base type (e.g., "double _Complex")
-                    // Update the base type to its complex variant
+                    // _Complex after base type (e.g., "double _Complex", "int _Complex")
+                    // Convert the already-resolved base type to its complex variant
                     self.advance();
                     base = match base {
                         TypeSpecifier::Float => TypeSpecifier::ComplexFloat,
                         TypeSpecifier::Double => TypeSpecifier::ComplexDouble,
                         TypeSpecifier::LongDouble => TypeSpecifier::ComplexLongDouble,
-                        // standalone _Complex defaults to _Complex double
+                        // GCC extension: "int _Complex" etc. treated as _Complex double
                         _ => TypeSpecifier::ComplexDouble,
                     };
                 }

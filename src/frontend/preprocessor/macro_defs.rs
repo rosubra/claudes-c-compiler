@@ -192,6 +192,29 @@ impl MacroTable {
                 continue;
             }
 
+            // Skip numeric literals (pp-numbers): digits, '.', followed by alphanumeric suffix
+            // This prevents macro expansion of suffixes like 'I' in '205.0I'
+            if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
+                // Copy the entire pp-number token: digits, '.', 'e'/'E'/'p'/'P' with optional sign,
+                // hex prefix '0x'/'0X', and alphanumeric suffixes (f, F, l, L, u, U, i, I, j, J, ll, LL)
+                while i < len {
+                    if chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_' {
+                        result.push(chars[i]);
+                        i += 1;
+                    } else if (chars[i] == '+' || chars[i] == '-')
+                        && i > 0
+                        && (chars[i - 1] == 'e' || chars[i - 1] == 'E' || chars[i - 1] == 'p' || chars[i - 1] == 'P')
+                    {
+                        // Exponent sign: 1.0e+5, 0x1p-3
+                        result.push(chars[i]);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+
             // Regular character
             result.push(chars[i]);
             i += 1;

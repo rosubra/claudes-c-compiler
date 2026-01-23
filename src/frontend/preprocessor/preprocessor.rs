@@ -729,6 +729,16 @@ impl Preprocessor {
         // Get directive keyword
         let (keyword, rest) = split_first_word(&after_hash);
 
+        // Handle #include<file> and #include"file" (no space between include and path)
+        // This handles the common C pattern: #include<stdio.h>
+        let (keyword, rest) = if keyword.starts_with("include<") || keyword.starts_with("include\"") {
+            ("include", &after_hash["include".len()..])
+        } else if keyword.starts_with("include_next<") || keyword.starts_with("include_next\"") {
+            ("include_next", &after_hash["include_next".len()..])
+        } else {
+            (keyword, rest)
+        };
+
         // Some directives are processed even in inactive conditional blocks
         match keyword {
             "ifdef" | "ifndef" | "if" => {

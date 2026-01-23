@@ -291,10 +291,23 @@ impl Lowerer {
             let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
 
             // Detect complex type variables
+            let resolved_ts = self.resolve_type_spec(&decl.type_spec);
             let is_complex = !is_pointer && !is_array && matches!(
-                self.resolve_type_spec(&decl.type_spec),
+                resolved_ts,
                 TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
             );
+
+            // Detect arrays of complex elements
+            let complex_elem_ctype: Option<CType> = if is_array && !is_pointer {
+                match &resolved_ts {
+                    TypeSpecifier::ComplexFloat => Some(CType::ComplexFloat),
+                    TypeSpecifier::ComplexDouble => Some(CType::ComplexDouble),
+                    TypeSpecifier::ComplexLongDouble => Some(CType::ComplexLongDouble),
+                    _ => None,
+                }
+            } else {
+                None
+            };
 
             // For struct variables, use the struct's actual size;
             // but for arrays of structs, use the full array allocation size.
@@ -466,10 +479,27 @@ impl Lowerer {
                             }
                         } else if is_complex {
                             // Complex variable initialization: _Complex double z = expr;
-                            // The expression returns a pointer to a stack-allocated {real, imag} pair.
-                            // We memcpy from that pointer to our alloca.
+                            // The expression might be:
+                            // 1. Already complex (returns ptr to {real, imag} pair) -> memcpy
+                            // 2. A real/integer scalar -> convert to complex first
+                            let expr_ctype = self.expr_ctype(expr);
                             let val = self.lower_expr(expr);
-                            let src = self.operand_to_value(val);
+                            let resolved_ts = self.resolve_type_spec(&decl.type_spec);
+                            let complex_ctype = self.type_spec_to_ctype(&resolved_ts);
+                            let src = if expr_ctype.is_complex() {
+                                // Already complex - might need conversion between complex types
+                                if expr_ctype != complex_ctype {
+                                    let val_v = self.operand_to_value(val);
+                                    let converted = self.complex_to_complex(val_v, &expr_ctype, &complex_ctype);
+                                    self.operand_to_value(converted)
+                                } else {
+                                    self.operand_to_value(val)
+                                }
+                            } else {
+                                // Real/integer scalar: convert to complex {val, 0}
+                                let converted = self.real_to_complex(val, &expr_ctype, &complex_ctype);
+                                self.operand_to_value(converted)
+                            };
                             self.emit(Instruction::Memcpy {
                                 dest: alloca,
                                 src,
@@ -620,6 +650,56 @@ impl Lowerer {
                                     if field_designator_name.is_none() {
                                         current_idx += 1;
                                     }
+                                }
+                            } else if let Some(ref cplx_ctype) = complex_elem_ctype {
+                                // Array of complex elements: each element is a {real, imag} pair
+                                // Use Memcpy for each element from the expression result
+                                self.zero_init_alloca(alloca, alloc_size);
+                                let mut current_idx = 0usize;
+                                for item in items.iter() {
+                                    if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                                        if let Some(idx_val) = self.eval_const_expr_for_designator(idx_expr) {
+                                            current_idx = idx_val;
+                                        }
+                                    }
+                                    let init_expr = match &item.init {
+                                        Initializer::Expr(e) => Some(e),
+                                        Initializer::List(sub_items) => {
+                                            Self::unwrap_nested_init_expr(sub_items)
+                                        }
+                                    };
+                                    if let Some(e) = init_expr {
+                                        let expr_ctype = self.expr_ctype(e);
+                                        let val = self.lower_expr(e);
+                                        // Convert to the target complex type if needed
+                                        let src = if expr_ctype.is_complex() {
+                                            if expr_ctype != *cplx_ctype {
+                                                let val_v = self.operand_to_value(val);
+                                                let converted = self.complex_to_complex(val_v, &expr_ctype, cplx_ctype);
+                                                self.operand_to_value(converted)
+                                            } else {
+                                                self.operand_to_value(val)
+                                            }
+                                        } else {
+                                            // Real scalar -> complex {val, 0}
+                                            let converted = self.real_to_complex(val, &expr_ctype, cplx_ctype);
+                                            self.operand_to_value(converted)
+                                        };
+                                        // Compute target address for this element
+                                        let elem_addr = self.fresh_value();
+                                        self.emit(Instruction::GetElementPtr {
+                                            dest: elem_addr,
+                                            base: alloca,
+                                            offset: Operand::Const(IrConst::I64((current_idx * elem_size) as i64)),
+                                            ty: IrType::I8,
+                                        });
+                                        self.emit(Instruction::Memcpy {
+                                            dest: elem_addr,
+                                            src,
+                                            size: elem_size,
+                                        });
+                                    }
+                                    current_idx += 1;
                                 }
                             } else {
                                 // 1D array: supports designated initializers [idx] = val
