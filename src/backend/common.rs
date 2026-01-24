@@ -182,6 +182,16 @@ pub fn emit_data_sections(out: &mut AsmOutput, module: &IrModule, ptr_dir: PtrDi
     emit_globals(out, &module.globals, ptr_dir);
 }
 
+/// Compute effective alignment for a global, promoting to 16 when size >= 16.
+/// This matches GCC/Clang behavior on x86-64 and aarch64, enabling aligned SSE/NEON access.
+fn effective_align(g: &IrGlobal) -> usize {
+    if g.size >= 16 && g.align < 16 {
+        16
+    } else {
+        g.align
+    }
+}
+
 /// Emit global variable definitions split into .data and .bss sections.
 fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective) {
     let mut has_data = false;
@@ -213,7 +223,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         if !g.is_common || !matches!(g.init, GlobalInit::Zero) {
             continue;
         }
-        out.emit(&format!(".comm {},{},{}", g.name, g.size, g.align));
+        out.emit(&format!(".comm {},{},{}", g.name, g.size, effective_align(g)));
     }
 
     // Zero-initialized globals -> .bss
@@ -234,7 +244,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         if !g.is_static {
             out.emit(&format!(".globl {}", g.name));
         }
-        out.emit(&format!(".align {}", g.align));
+        out.emit(&format!(".align {}", effective_align(g)));
         out.emit(&format!(".type {}, @object", g.name));
         out.emit(&format!(".size {}, {}", g.name, g.size));
         out.emit(&format!("{}:", g.name));
@@ -250,7 +260,7 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
     if !g.is_static {
         out.emit(&format!(".globl {}", g.name));
     }
-    out.emit(&format!(".align {}", g.align));
+    out.emit(&format!(".align {}", effective_align(g)));
     out.emit(&format!(".type {}, @object", g.name));
     out.emit(&format!(".size {}, {}", g.name, g.size));
     out.emit(&format!("{}:", g.name));
