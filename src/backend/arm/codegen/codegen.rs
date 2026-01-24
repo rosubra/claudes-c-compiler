@@ -2283,14 +2283,14 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
+    fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
         // Load ptr into x1, val into x2
         self.operand_to_x0(ptr);
         self.state.emit("    mov x1, x0"); // x1 = ptr
         self.operand_to_x0(val);
         self.state.emit("    mov x2, x0"); // x2 = val
 
-        let (ldxr, stxr, reg_prefix) = Self::exclusive_instrs(ty);
+        let (ldxr, stxr, reg_prefix) = Self::exclusive_instrs(ty, ordering);
         let val_reg = format!("{}2", reg_prefix);
         let old_reg = format!("{}0", reg_prefix);
         let tmp_reg = format!("{}3", reg_prefix);
@@ -2330,7 +2330,7 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_atomic_cmpxchg(&mut self, dest: &Value, ptr: &Operand, expected: &Operand, desired: &Operand, ty: IrType, _success_ordering: AtomicOrdering, _failure_ordering: AtomicOrdering, returns_bool: bool) {
+    fn emit_atomic_cmpxchg(&mut self, dest: &Value, ptr: &Operand, expected: &Operand, desired: &Operand, ty: IrType, success_ordering: AtomicOrdering, _failure_ordering: AtomicOrdering, returns_bool: bool) {
         // x1 = ptr, x2 = expected, x3 = desired
         self.operand_to_x0(ptr);
         self.state.emit("    mov x1, x0");
@@ -2340,7 +2340,7 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    mov x2, x0");
         // x2 = expected
 
-        let (ldxr, stxr, reg_prefix) = Self::exclusive_instrs(ty);
+        let (ldxr, stxr, reg_prefix) = Self::exclusive_instrs(ty, success_ordering);
         let old_reg = format!("{}0", reg_prefix);
         let desired_reg = format!("{}3", reg_prefix);
         let expected_reg = format!("{}2", reg_prefix);
@@ -2374,19 +2374,26 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, _ordering: AtomicOrdering) {
+    fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, ordering: AtomicOrdering) {
         self.operand_to_x0(ptr);
-        // Use ldar for acquire semantics (safe for all orderings)
-        let instr = match ty {
-            IrType::I8 | IrType::U8 => "ldarb",
-            IrType::I16 | IrType::U16 => "ldarh",
-            IrType::I32 | IrType::U32 => "ldar",
-            _ => "ldar",
+        // Relaxed: plain load (aligned loads are naturally atomic on AArch64)
+        // Acquire/SeqCst: use ldar (load-acquire) for ordering
+        let need_acquire = matches!(ordering, AtomicOrdering::Acquire | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst);
+        let instr = match (ty, need_acquire) {
+            (IrType::I8 | IrType::U8, true) => "ldarb",
+            (IrType::I8 | IrType::U8, false) => "ldrb",
+            (IrType::I16 | IrType::U16, true) => "ldarh",
+            (IrType::I16 | IrType::U16, false) => "ldrh",
+            (IrType::I32 | IrType::U32, true) => "ldar",
+            (IrType::I32 | IrType::U32, false) => "ldr",
+            (_, true) => "ldar",
+            (_, false) => "ldr",
         };
         let dest_reg = match ty {
             IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 | IrType::U32 => "w0",
             _ => "x0",
         };
+        // ldar/ldr with register indirect both use [x0] form
         self.state.emit(&format!("    {} {}, [x0]", instr, dest_reg));
         // Sign-extend if needed
         match ty {
@@ -2398,16 +2405,22 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
+    fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
         self.operand_to_x0(val);
         self.state.emit("    mov x1, x0"); // x1 = val
         self.operand_to_x0(ptr);
-        // Use stlr for release semantics
-        let instr = match ty {
-            IrType::I8 | IrType::U8 => "stlrb",
-            IrType::I16 | IrType::U16 => "stlrh",
-            IrType::I32 | IrType::U32 => "stlr",
-            _ => "stlr",
+        // Relaxed: plain store (aligned stores are naturally atomic on AArch64)
+        // Release/SeqCst: use stlr (store-release) for ordering
+        let need_release = matches!(ordering, AtomicOrdering::Release | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst);
+        let instr = match (ty, need_release) {
+            (IrType::I8 | IrType::U8, true) => "stlrb",
+            (IrType::I8 | IrType::U8, false) => "strb",
+            (IrType::I16 | IrType::U16, true) => "stlrh",
+            (IrType::I16 | IrType::U16, false) => "strh",
+            (IrType::I32 | IrType::U32, true) => "stlr",
+            (IrType::I32 | IrType::U32, false) => "str",
+            (_, true) => "stlr",
+            (_, false) => "str",
         };
         let val_reg = match ty {
             IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 | IrType::U32 => "w1",
@@ -2416,8 +2429,18 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit(&format!("    {} {}, [x0]", instr, val_reg));
     }
 
-    fn emit_fence(&mut self, _ordering: AtomicOrdering) {
-        self.state.emit("    dmb ish");
+    fn emit_fence(&mut self, ordering: AtomicOrdering) {
+        // AArch64 fence instructions:
+        // - Relaxed: no fence needed
+        // - Acquire: dmb ishld (load-load and load-store ordering)
+        // - Release: dmb ishst (store-store ordering)
+        // - AcqRel/SeqCst: dmb ish (full inner-shareable barrier)
+        match ordering {
+            AtomicOrdering::Relaxed => {} // no-op
+            AtomicOrdering::Acquire => self.state.emit("    dmb ishld"),
+            AtomicOrdering::Release => self.state.emit("    dmb ishst"),
+            AtomicOrdering::AcqRel | AtomicOrdering::SeqCst => self.state.emit("    dmb ish"),
+        }
     }
 
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {

@@ -114,13 +114,36 @@ impl ArmCodegen {
         }
     }
 
-    /// Get the exclusive load/store instructions and register prefix for a type.
-    pub(super) fn exclusive_instrs(ty: IrType) -> (&'static str, &'static str, &'static str) {
+    /// Get the exclusive load/store instructions and register prefix for a type,
+    /// with appropriate acquire/release semantics based on ordering.
+    /// - Relaxed: ldxr/stxr (no ordering)
+    /// - Acquire: ldaxr/stxr (acquire on load)
+    /// - Release: ldxr/stlxr (release on store)
+    /// - AcqRel/SeqCst: ldaxr/stlxr (acquire on load, release on store)
+    pub(super) fn exclusive_instrs(ty: IrType, ordering: AtomicOrdering) -> (&'static str, &'static str, &'static str) {
+        let need_acquire = matches!(ordering, AtomicOrdering::Acquire | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst);
+        let need_release = matches!(ordering, AtomicOrdering::Release | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst);
         match ty {
-            IrType::I8 | IrType::U8 => ("ldxrb", "stxrb", "w"),
-            IrType::I16 | IrType::U16 => ("ldxrh", "stxrh", "w"),
-            IrType::I32 | IrType::U32 => ("ldxr", "stxr", "w"),
-            _ => ("ldxr", "stxr", "x"),
+            IrType::I8 | IrType::U8 => (
+                if need_acquire { "ldaxrb" } else { "ldxrb" },
+                if need_release { "stlxrb" } else { "stxrb" },
+                "w",
+            ),
+            IrType::I16 | IrType::U16 => (
+                if need_acquire { "ldaxrh" } else { "ldxrh" },
+                if need_release { "stlxrh" } else { "stxrh" },
+                "w",
+            ),
+            IrType::I32 | IrType::U32 => (
+                if need_acquire { "ldaxr" } else { "ldxr" },
+                if need_release { "stlxr" } else { "stxr" },
+                "w",
+            ),
+            _ => (
+                if need_acquire { "ldaxr" } else { "ldxr" },
+                if need_release { "stlxr" } else { "stxr" },
+                "x",
+            ),
         }
     }
 

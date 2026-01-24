@@ -1995,8 +1995,9 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
-    fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
-        // On x86, aligned stores are naturally atomic; use xchg for seq_cst
+    fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
+        // On x86-64 TSO, aligned stores are naturally atomic with release semantics.
+        // Only SeqCst requires an additional fence (mfence after store).
         self.operand_to_rax(val);
         self.state.emit("    movq %rax, %rdx"); // rdx = val
         self.operand_to_rax(ptr);
@@ -2004,12 +2005,21 @@ impl ArchCodegen for X86Codegen {
         let store_reg = Self::reg_for_type("rdx", ty);
         let store_instr = Self::mov_store_for_type(ty);
         self.state.emit(&format!("    {} %{}, (%rax)", store_instr, store_reg));
-        // Full fence for seq_cst
-        self.state.emit("    mfence");
+        if matches!(ordering, AtomicOrdering::SeqCst) {
+            self.state.emit("    mfence");
+        }
     }
 
-    fn emit_fence(&mut self, _ordering: AtomicOrdering) {
-        self.state.emit("    mfence");
+    fn emit_fence(&mut self, ordering: AtomicOrdering) {
+        // On x86-64 TSO:
+        // - Relaxed: no fence needed
+        // - Acquire/Release/AcqRel: already guaranteed by TSO (loads are acquire, stores are release)
+        //   but we emit mfence to also act as a compiler barrier and be safe for non-temporal stores
+        // - SeqCst: full memory fence required
+        match ordering {
+            AtomicOrdering::Relaxed => {} // no-op
+            _ => self.state.emit("    mfence"),
+        }
     }
 
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {

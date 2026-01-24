@@ -2208,13 +2208,15 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
-    fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, _ordering: AtomicOrdering) {
+    fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, ordering: AtomicOrdering) {
         self.operand_to_t0(ptr);
         if Self::is_subword_type(ty) {
-            // For sub-word atomic loads, use regular load + fence.
+            // For sub-word atomic loads, use regular load + fences appropriate to ordering.
             // On RISC-V, aligned byte/halfword loads are naturally atomic for
-            // single-copy atomicity. Use fence for ordering.
-            self.state.emit("    fence rw, rw");
+            // single-copy atomicity. Use fences for ordering guarantees.
+            if matches!(ordering, AtomicOrdering::SeqCst) {
+                self.state.emit("    fence rw, rw");
+            }
             match ty {
                 IrType::I8 => self.state.emit("    lb t0, 0(t0)"),
                 IrType::U8 => self.state.emit("    lbu t0, 0(t0)"),
@@ -2222,11 +2224,19 @@ impl ArchCodegen for RiscvCodegen {
                 IrType::U16 => self.state.emit("    lhu t0, 0(t0)"),
                 _ => unreachable!(),
             }
-            self.state.emit("    fence rw, rw");
+            if matches!(ordering, AtomicOrdering::Acquire | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst) {
+                self.state.emit("    fence r, rw");
+            }
         } else {
-            // Use lr for word/doubleword atomic load
+            // Use lr for word/doubleword atomic load with appropriate ordering.
+            // lr supports .aq and .aqrl suffixes (not .rl alone).
             let suffix = Self::amo_width_suffix(ty);
-            self.state.emit(&format!("    lr.{}.aq t0, (t0)", suffix));
+            let lr_suffix = match ordering {
+                AtomicOrdering::Relaxed | AtomicOrdering::Release => "",
+                AtomicOrdering::Acquire => ".aq",
+                AtomicOrdering::AcqRel | AtomicOrdering::SeqCst => ".aqrl",
+            };
+            self.state.emit(&format!("    lr.{}{} t0, (t0)", suffix, lr_suffix));
             Self::sign_extend_riscv(&mut self.state, ty);
         }
         self.store_t0_to(dest);
@@ -2237,15 +2247,19 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t1, t0"); // t1 = val
         self.operand_to_t0(ptr);
         if Self::is_subword_type(ty) {
-            // For sub-word atomic stores, use fence + regular store + fence.
+            // For sub-word atomic stores, use fences appropriate to ordering + regular store.
             // Aligned byte/halfword stores are naturally atomic on RISC-V.
-            self.state.emit("    fence rw, rw");
+            if matches!(ordering, AtomicOrdering::Release | AtomicOrdering::AcqRel | AtomicOrdering::SeqCst) {
+                self.state.emit("    fence rw, w");
+            }
             match ty {
                 IrType::I8 | IrType::U8 => self.state.emit("    sb t1, 0(t0)"),
                 IrType::I16 | IrType::U16 => self.state.emit("    sh t1, 0(t0)"),
                 _ => unreachable!(),
             }
-            self.state.emit("    fence rw, rw");
+            if matches!(ordering, AtomicOrdering::SeqCst) {
+                self.state.emit("    fence rw, rw");
+            }
         } else {
             // Use amoswap with zero dest for atomic store
             let aq_rl = Self::amo_ordering(ordering);
@@ -2254,8 +2268,18 @@ impl ArchCodegen for RiscvCodegen {
         }
     }
 
-    fn emit_fence(&mut self, _ordering: AtomicOrdering) {
-        self.state.emit("    fence rw, rw");
+    fn emit_fence(&mut self, ordering: AtomicOrdering) {
+        // RISC-V fence instructions with appropriate ordering:
+        // - Relaxed: no fence needed
+        // - Acquire: fence r, rw (reads before fence complete before reads/writes after)
+        // - Release: fence rw, w (reads/writes before fence complete before writes after)
+        // - AcqRel/SeqCst: fence rw, rw (full barrier)
+        match ordering {
+            AtomicOrdering::Relaxed => {} // no-op
+            AtomicOrdering::Acquire => self.state.emit("    fence r, rw"),
+            AtomicOrdering::Release => self.state.emit("    fence rw, w"),
+            AtomicOrdering::AcqRel | AtomicOrdering::SeqCst => self.state.emit("    fence rw, rw"),
+        }
     }
 
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {
