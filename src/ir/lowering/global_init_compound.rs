@@ -1033,7 +1033,8 @@ impl Lowerer {
         }
     }
 
-    /// Fill a struct array where items correspond 1-to-1 to array elements (sequential init).
+    /// Fill a struct array where items map to array elements.
+    /// Handles both sequential init and `[N] = {...}` designated index patterns.
     /// Each item is either a braced list `{ .field = val, ... }` or a single expression.
     fn fill_struct_array_sequential(
         &mut self,
@@ -1044,11 +1045,23 @@ impl Lowerer {
         ptr_ranges: &mut Vec<(usize, GlobalInit)>,
     ) {
         let struct_size = layout.size;
-        for elem_idx in 0..num_elems {
-            let item = items.get(elem_idx);
+        // Track the current sequential index for items without designators
+        let mut current_idx = 0usize;
+        for item in items {
+            // Check if this item has an [N] array index designator
+            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {
+                    current_idx = idx;
+                }
+            }
+            let elem_idx = current_idx;
+            if elem_idx >= num_elems {
+                current_idx += 1;
+                continue;
+            }
             let base_offset = elem_idx * struct_size;
 
-            if let Some(item) = item {
+            {
                 match &item.init {
                     Initializer::List(sub_items) => {
                         let mut current_field_idx = 0usize;
@@ -1098,6 +1111,7 @@ impl Lowerer {
                     }
                 }
             }
+            current_idx += 1;
         }
     }
 
