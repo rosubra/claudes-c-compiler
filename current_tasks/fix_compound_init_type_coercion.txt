@@ -20,4 +20,4 @@ IrType::from_ctype(field_ty) and val.coerce_to() before push_const_as_bytes().
 
 Also check other similar code paths in the compound init for the same issue.
 
-Status: In progress
+Status: Completed
