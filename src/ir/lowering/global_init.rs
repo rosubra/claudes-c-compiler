@@ -211,7 +211,7 @@ impl Lowerer {
                     // But skip byte-serialization if any struct field is a pointer type
                     // (pointers need .quad directives for address relocations).
                     let has_ptr_fields = struct_layout.as_ref().map_or(false, |layout| {
-                        layout.fields.iter().any(|f| matches!(f.ty, CType::Pointer(_) | CType::Function(_)))
+                        layout.fields.iter().any(|f| Self::type_has_pointer_elements(&f.ty) || matches!(f.ty, CType::Function(_)))
                     });
                     if let Some(ref layout) = struct_layout {
                         if has_ptr_fields {

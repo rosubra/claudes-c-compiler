@@ -1,5 +1,5 @@
 Task: Fix global struct array initialization with pointer-array fields
-Status: In progress
+Status: Completed
 
 Problem:
 When a global array of structs is initialized, and the struct contains pointer-array
