@@ -547,6 +547,30 @@ impl Lowerer {
         self.current_instrs.push(inst);
     }
 
+    // --- IR emission helpers ---
+    // These reduce the common 4-line fresh_value+emit(Instruction::*) pattern to 1 line.
+
+    /// Emit a binary operation and return the result Value.
+    pub(super) fn emit_binop_val(&mut self, op: IrBinOp, lhs: Operand, rhs: Operand, ty: IrType) -> Value {
+        let dest = self.fresh_value();
+        self.emit(Instruction::BinOp { dest, op, lhs, rhs, ty });
+        dest
+    }
+
+    /// Emit a comparison and return the result Value (I32: 0 or 1).
+    pub(super) fn emit_cmp_val(&mut self, op: IrCmpOp, lhs: Operand, rhs: Operand, ty: IrType) -> Value {
+        let dest = self.fresh_value();
+        self.emit(Instruction::Cmp { dest, op, lhs, rhs, ty });
+        dest
+    }
+
+    /// Emit a type cast and return the result Value.
+    pub(super) fn emit_cast_val(&mut self, src: Operand, from_ty: IrType, to_ty: IrType) -> Value {
+        let dest = self.fresh_value();
+        self.emit(Instruction::Cast { dest, src, from_ty, to_ty });
+        dest
+    }
+
     pub(super) fn terminate(&mut self, term: Terminator) {
         let block = BasicBlock {
             label: self.current_label.clone(),
@@ -833,13 +857,7 @@ impl Lowerer {
                             ty: IrType::F64,
                         });
                         // Cast F64 -> F32
-                        let f32_val = self.fresh_value();
-                        self.emit(Instruction::Cast {
-                            dest: f32_val,
-                            src: Operand::Value(f64_val),
-                            from_ty: IrType::F64,
-                            to_ty: IrType::F32,
-                        });
+                        let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
                         // Create a new F32 alloca
                         let f32_alloca = self.fresh_value();
                         self.emit(Instruction::Alloca {
@@ -957,26 +975,10 @@ impl Lowerer {
                     // Compute stride = dim_val * current_stride
                     let stride_val = if let Some(prev) = current_stride {
                         // Runtime stride * runtime dim
-                        let result = self.fresh_value();
-                        self.emit(Instruction::BinOp {
-                            dest: result,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(dim_val),
-                            rhs: Operand::Value(prev),
-                            ty: IrType::I64,
-                        });
-                        result
+                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Value(prev), IrType::I64)
                     } else {
                         // Constant stride * runtime dim
-                        let result = self.fresh_value();
-                        self.emit(Instruction::BinOp {
-                            dest: result,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(dim_val),
-                            rhs: Operand::Const(IrConst::I64(current_const_stride as i64)),
-                            ty: IrType::I64,
-                        });
-                        result
+                        self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_val), Operand::Const(IrConst::I64(current_const_stride as i64)), IrType::I64)
                     };
 
                     // stride[i] is the stride for subscript at depth i
@@ -989,14 +991,7 @@ impl Lowerer {
                     let const_dim = dim_info.const_size.unwrap_or(1) as usize;
                     if let Some(prev) = current_stride {
                         // Multiply runtime stride by constant dim
-                        let result = self.fresh_value();
-                        self.emit(Instruction::BinOp {
-                            dest: result,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(prev),
-                            rhs: Operand::Const(IrConst::I64(const_dim as i64)),
-                            ty: IrType::I64,
-                        });
+                        let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::I64(const_dim as i64)), IrType::I64);
                         vla_strides[i] = Some(result);
                         current_stride = Some(result);
                     } else {

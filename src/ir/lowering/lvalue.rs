@@ -144,28 +144,13 @@ impl Lowerer {
         // Compute offset = index * stride (runtime VLA stride or compile-time elem_size)
         let offset = if let Some(stride_val) = vla_stride {
             // Use runtime VLA stride
-            let mul_dest = self.fresh_value();
-            self.emit(Instruction::BinOp {
-                dest: mul_dest,
-                op: IrBinOp::Mul,
-                lhs: index_val,
-                rhs: Operand::Value(stride_val),
-                ty: IrType::I64,
-            });
-            Operand::Value(mul_dest)
+            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Value(stride_val), IrType::I64);
+            Operand::Value(mul)
         } else if elem_size == 1 {
             index_val
         } else {
-            let size_const = Operand::Const(IrConst::I64(elem_size as i64));
-            let mul_dest = self.fresh_value();
-            self.emit(Instruction::BinOp {
-                dest: mul_dest,
-                op: IrBinOp::Mul,
-                lhs: index_val,
-                rhs: size_const,
-                ty: IrType::I64,
-            });
-            Operand::Value(mul_dest)
+            let mul = self.emit_binop_val(IrBinOp::Mul, index_val, Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64);
+            Operand::Value(mul)
         };
 
         // GEP: base + offset

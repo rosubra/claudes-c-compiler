@@ -1337,14 +1337,7 @@ impl Lowerer {
                             ty: IrType::I64,
                         });
 
-                        let cmp_result = self.fresh_value();
-                        self.emit(Instruction::Cmp {
-                            dest: cmp_result,
-                            op: IrCmpOp::Eq,
-                            lhs: Operand::Value(loaded),
-                            rhs: Operand::Const(IrConst::I64(*case_val)),
-                            ty: IrType::I64,
-                        });
+                        let cmp_result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(loaded), Operand::Const(IrConst::I64(*case_val)), IrType::I64);
 
                         let next_check = if i + 1 < cases.len() {
                             self.fresh_label("switch_check")
@@ -2180,26 +2173,12 @@ impl Lowerer {
                     let dim_value = self.operand_to_value(dim_val);
 
                     result = if let Some(prev) = result {
-                        let mul = self.fresh_value();
-                        self.emit(Instruction::BinOp {
-                            dest: mul,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(prev),
-                            rhs: Operand::Value(dim_value),
-                            ty: IrType::I64,
-                        });
+                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Value(dim_value), IrType::I64);
                         Some(mul)
                     } else {
                         // First runtime dim: multiply by accumulated constants
                         if const_product > 1 {
-                            let mul = self.fresh_value();
-                            self.emit(Instruction::BinOp {
-                                dest: mul,
-                                op: IrBinOp::Mul,
-                                lhs: Operand::Value(dim_value),
-                                rhs: Operand::Const(IrConst::I64(const_product as i64)),
-                                ty: IrType::I64,
-                            });
+                            let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(const_product as i64)), IrType::I64);
                             const_product = 1;
                             Some(mul)
                         } else {
@@ -2213,14 +2192,7 @@ impl Lowerer {
         // If we have remaining constant factors, multiply them in
         if let Some(prev) = result {
             if const_product > 1 {
-                let mul = self.fresh_value();
-                self.emit(Instruction::BinOp {
-                    dest: mul,
-                    op: IrBinOp::Mul,
-                    lhs: Operand::Value(prev),
-                    rhs: Operand::Const(IrConst::I64(const_product as i64)),
-                    ty: IrType::I64,
-                });
+                let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::I64(const_product as i64)), IrType::I64);
                 return Some(mul);
             }
             return Some(prev);
@@ -2244,14 +2216,7 @@ impl Lowerer {
                 let dim_val = self.lower_expr(&size_expr_clone);
                 let dim_value = self.operand_to_value(dim_val);
                 if elem_size > 1 {
-                    let mul = self.fresh_value();
-                    self.emit(Instruction::BinOp {
-                        dest: mul,
-                        op: IrBinOp::Mul,
-                        lhs: Operand::Value(dim_value),
-                        rhs: Operand::Const(IrConst::I64(elem_size as i64)),
-                        ty: IrType::I64,
-                    });
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(elem_size as i64)), IrType::I64);
                     Some(mul)
                 } else {
                     Some(dim_value)

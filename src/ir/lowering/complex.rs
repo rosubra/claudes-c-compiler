@@ -169,16 +169,8 @@ impl Lowerer {
         let rr = self.load_complex_real(rhs_ptr, ctype);
         let ri = self.load_complex_imag(rhs_ptr, ctype);
 
-        let real_sum = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: real_sum, op: IrBinOp::Add,
-            lhs: lr, rhs: rr, ty: comp_ty,
-        });
-        let imag_sum = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: imag_sum, op: IrBinOp::Add,
-            lhs: li, rhs: ri, ty: comp_ty,
-        });
+        let real_sum = self.emit_binop_val(IrBinOp::Add, lr, rr, comp_ty);
+        let imag_sum = self.emit_binop_val(IrBinOp::Add, li, ri, comp_ty);
 
         let result = self.alloca_complex(ctype);
         self.store_complex_parts(result, Operand::Value(real_sum), Operand::Value(imag_sum), ctype);
@@ -194,16 +186,8 @@ impl Lowerer {
         let rr = self.load_complex_real(rhs_ptr, ctype);
         let ri = self.load_complex_imag(rhs_ptr, ctype);
 
-        let real_diff = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: real_diff, op: IrBinOp::Sub,
-            lhs: lr, rhs: rr, ty: comp_ty,
-        });
-        let imag_diff = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: imag_diff, op: IrBinOp::Sub,
-            lhs: li, rhs: ri, ty: comp_ty,
-        });
+        let real_diff = self.emit_binop_val(IrBinOp::Sub, lr, rr, comp_ty);
+        let imag_diff = self.emit_binop_val(IrBinOp::Sub, li, ri, comp_ty);
 
         let result = self.alloca_complex(ctype);
         self.store_complex_parts(result, Operand::Value(real_diff), Operand::Value(imag_diff), ctype);
@@ -220,24 +204,18 @@ impl Lowerer {
         let d = self.load_complex_imag(rhs_ptr, ctype);
 
         // ac
-        let ac = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: ac, op: IrBinOp::Mul, lhs: a.clone(), rhs: c.clone(), ty: comp_ty });
+        let ac = self.emit_binop_val(IrBinOp::Mul, a.clone(), c.clone(), comp_ty);
         // bd
-        let bd = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: bd, op: IrBinOp::Mul, lhs: b.clone(), rhs: d.clone(), ty: comp_ty });
+        let bd = self.emit_binop_val(IrBinOp::Mul, b.clone(), d.clone(), comp_ty);
         // ad
-        let ad = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: ad, op: IrBinOp::Mul, lhs: a, rhs: d, ty: comp_ty });
+        let ad = self.emit_binop_val(IrBinOp::Mul, a, d, comp_ty);
         // bc
-        let bc = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: bc, op: IrBinOp::Mul, lhs: b, rhs: c, ty: comp_ty });
+        let bc = self.emit_binop_val(IrBinOp::Mul, b, c, comp_ty);
 
         // real = ac - bd
-        let real = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: real, op: IrBinOp::Sub, lhs: Operand::Value(ac), rhs: Operand::Value(bd), ty: comp_ty });
+        let real = self.emit_binop_val(IrBinOp::Sub, Operand::Value(ac), Operand::Value(bd), comp_ty);
         // imag = ad + bc
-        let imag = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: imag, op: IrBinOp::Add, lhs: Operand::Value(ad), rhs: Operand::Value(bc), ty: comp_ty });
+        let imag = self.emit_binop_val(IrBinOp::Add, Operand::Value(ad), Operand::Value(bc), comp_ty);
 
         let result = self.alloca_complex(ctype);
         self.store_complex_parts(result, Operand::Value(real), Operand::Value(imag), ctype);
@@ -254,34 +232,23 @@ impl Lowerer {
         let d = self.load_complex_imag(rhs_ptr, ctype);
 
         // denom = c*c + d*d
-        let cc = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: cc, op: IrBinOp::Mul, lhs: c.clone(), rhs: c.clone(), ty: comp_ty });
-        let dd = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: dd, op: IrBinOp::Mul, lhs: d.clone(), rhs: d.clone(), ty: comp_ty });
-        let denom = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: denom, op: IrBinOp::Add, lhs: Operand::Value(cc), rhs: Operand::Value(dd), ty: comp_ty });
+        let cc = self.emit_binop_val(IrBinOp::Mul, c.clone(), c.clone(), comp_ty);
+        let dd = self.emit_binop_val(IrBinOp::Mul, d.clone(), d.clone(), comp_ty);
+        let denom = self.emit_binop_val(IrBinOp::Add, Operand::Value(cc), Operand::Value(dd), comp_ty);
 
         // real_num = a*c + b*d
-        let ac = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: ac, op: IrBinOp::Mul, lhs: a.clone(), rhs: c.clone(), ty: comp_ty });
-        let bd = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: bd, op: IrBinOp::Mul, lhs: b.clone(), rhs: d.clone(), ty: comp_ty });
-        let real_num = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: real_num, op: IrBinOp::Add, lhs: Operand::Value(ac), rhs: Operand::Value(bd), ty: comp_ty });
+        let ac = self.emit_binop_val(IrBinOp::Mul, a.clone(), c.clone(), comp_ty);
+        let bd = self.emit_binop_val(IrBinOp::Mul, b.clone(), d.clone(), comp_ty);
+        let real_num = self.emit_binop_val(IrBinOp::Add, Operand::Value(ac), Operand::Value(bd), comp_ty);
 
         // imag_num = b*c - a*d
-        let bc = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: bc, op: IrBinOp::Mul, lhs: b, rhs: c, ty: comp_ty });
-        let ad = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: ad, op: IrBinOp::Mul, lhs: a, rhs: d, ty: comp_ty });
-        let imag_num = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: imag_num, op: IrBinOp::Sub, lhs: Operand::Value(bc), rhs: Operand::Value(ad), ty: comp_ty });
+        let bc = self.emit_binop_val(IrBinOp::Mul, b, c, comp_ty);
+        let ad = self.emit_binop_val(IrBinOp::Mul, a, d, comp_ty);
+        let imag_num = self.emit_binop_val(IrBinOp::Sub, Operand::Value(bc), Operand::Value(ad), comp_ty);
 
         // real = real_num / denom, imag = imag_num / denom
-        let real = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: real, op: IrBinOp::SDiv, lhs: Operand::Value(real_num), rhs: Operand::Value(denom), ty: comp_ty });
-        let imag = self.fresh_value();
-        self.emit(Instruction::BinOp { dest: imag, op: IrBinOp::SDiv, lhs: Operand::Value(imag_num), rhs: Operand::Value(denom), ty: comp_ty });
+        let real = self.emit_binop_val(IrBinOp::SDiv, Operand::Value(real_num), Operand::Value(denom), comp_ty);
+        let imag = self.emit_binop_val(IrBinOp::SDiv, Operand::Value(imag_num), Operand::Value(denom), comp_ty);
 
         let result = self.alloca_complex(ctype);
         self.store_complex_parts(result, Operand::Value(real), Operand::Value(imag), ctype);
@@ -347,13 +314,7 @@ impl Lowerer {
 
         // Convert the real value to the component type if needed
         let converted_real = if src_ir_ty != comp_ty {
-            let dest = self.fresh_value();
-            self.emit(Instruction::Cast {
-                dest,
-                src: real_val,
-                from_ty: src_ir_ty,
-                to_ty: comp_ty,
-            });
+            let dest = self.emit_cast_val(real_val, src_ir_ty, comp_ty);
             Operand::Value(dest)
         } else {
             real_val
@@ -373,15 +334,13 @@ impl Lowerer {
         let i = self.load_complex_imag(ptr, from_type);
 
         let conv_r = if from_comp != to_comp {
-            let dest = self.fresh_value();
-            self.emit(Instruction::Cast { dest, src: r, from_ty: from_comp, to_ty: to_comp });
+            let dest = self.emit_cast_val(r, from_comp, to_comp);
             Operand::Value(dest)
         } else {
             r
         };
         let conv_i = if from_comp != to_comp {
-            let dest = self.fresh_value();
-            self.emit(Instruction::Cast { dest, src: i, from_ty: from_comp, to_ty: to_comp });
+            let dest = self.emit_cast_val(i, from_comp, to_comp);
             Operand::Value(dest)
         } else {
             i
@@ -656,12 +615,7 @@ impl Lowerer {
                 let idx_val = self.lower_expr(index);
                 let elem_size = self.expr_ctype(expr).size();
                 let scaled = self.scale_index(idx_val, elem_size);
-                let dest = self.fresh_value();
-                self.emit(Instruction::BinOp {
-                    dest, op: IrBinOp::Add,
-                    lhs: base_val, rhs: scaled,
-                    ty: IrType::I64,
-                });
+                let dest = self.emit_binop_val(IrBinOp::Add, base_val, scaled, IrType::I64);
                 dest
             }
             Expr::MemberAccess(base, field, _) => {
@@ -735,45 +689,25 @@ impl Lowerer {
         // Compare real parts
         let lr = self.load_complex_real(lhs_ptr, &result_ct);
         let rr = self.load_complex_real(rhs_ptr, &result_ct);
-        let real_eq = self.fresh_value();
-        self.emit(Instruction::Cmp {
-            dest: real_eq, op: IrCmpOp::Eq, lhs: lr, rhs: rr, ty: comp_ty,
-        });
+        let real_eq = self.emit_cmp_val(IrCmpOp::Eq, lr, rr, comp_ty);
 
         // Compare imag parts
         let li = self.load_complex_imag(lhs_ptr, &result_ct);
         let ri = self.load_complex_imag(rhs_ptr, &result_ct);
-        let imag_eq = self.fresh_value();
-        self.emit(Instruction::Cmp {
-            dest: imag_eq, op: IrCmpOp::Eq, lhs: li, rhs: ri, ty: comp_ty,
-        });
+        let imag_eq = self.emit_cmp_val(IrCmpOp::Eq, li, ri, comp_ty);
 
         // Combine: both must be equal for == (either not equal for !=)
-        let result = self.fresh_value();
-        match op {
+        let result = match op {
             BinOp::Eq => {
-                self.emit(Instruction::BinOp {
-                    dest: result, op: IrBinOp::And,
-                    lhs: Operand::Value(real_eq), rhs: Operand::Value(imag_eq),
-                    ty: IrType::I64,
-                });
+                self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), IrType::I64)
             }
             BinOp::Ne => {
                 // a != b iff !(a.re == b.re && a.im == b.im)
-                let both_eq = self.fresh_value();
-                self.emit(Instruction::BinOp {
-                    dest: both_eq, op: IrBinOp::And,
-                    lhs: Operand::Value(real_eq), rhs: Operand::Value(imag_eq),
-                    ty: IrType::I64,
-                });
-                self.emit(Instruction::Cmp {
-                    dest: result, op: IrCmpOp::Eq,
-                    lhs: Operand::Value(both_eq), rhs: Operand::Const(IrConst::I64(0)),
-                    ty: IrType::I64,
-                });
+                let both_eq = self.emit_binop_val(IrBinOp::And, Operand::Value(real_eq), Operand::Value(imag_eq), IrType::I64);
+                self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(both_eq), Operand::Const(IrConst::I64(0)), IrType::I64)
             }
             _ => unreachable!(),
-        }
+        };
         Operand::Value(result)
     }
 
