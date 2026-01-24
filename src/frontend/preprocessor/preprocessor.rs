@@ -127,6 +127,8 @@ impl Preprocessor {
         self.define_simple_macro("__SIZEOF_SIZE_T__", "8");
         self.define_simple_macro("__SIZEOF_PTRDIFF_T__", "8");
         self.define_simple_macro("__SIZEOF_WCHAR_T__", "4");
+        self.define_simple_macro("__SIZEOF_INT128__", "16");
+        self.define_simple_macro("__SIZEOF_WINT_T__", "4");
 
         // Byte order
         self.define_simple_macro("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");

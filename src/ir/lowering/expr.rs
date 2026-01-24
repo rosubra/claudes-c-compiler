@@ -2046,9 +2046,12 @@ impl Lowerer {
     }
 
     /// Narrow call result if return type is sub-64-bit integer.
+    /// 128-bit return values (I128/U128) are already correctly handled by the
+    /// codegen's rax:rdx two-register return convention and must NOT be cast.
     fn maybe_narrow_call_result(&mut self, dest: Value, ret_ty: IrType) -> Operand {
         if ret_ty != IrType::I64 && ret_ty != IrType::Ptr
             && ret_ty != IrType::Void && ret_ty.is_integer()
+            && ret_ty != IrType::I128 && ret_ty != IrType::U128
         {
             let narrowed = self.emit_cast_val(Operand::Value(dest), IrType::I64, ret_ty);
             Operand::Value(narrowed)
@@ -2133,9 +2136,30 @@ impl Lowerer {
             return self.complex_to_complex(ptr, &inner_ctype, &target_ctype);
         }
         if !target_ctype.is_complex() && inner_ctype.is_complex() {
-            // Cast complex to real: (double)z -> extract real part
             let val = self.lower_expr(inner);
             let ptr = self.operand_to_value(val);
+
+            if target_ctype == CType::Bool {
+                // (_Bool)complex: true if either real or imaginary part is non-zero
+                let real = self.load_complex_real(ptr, &inner_ctype);
+                let imag = self.load_complex_imag(ptr, &inner_ctype);
+                let comp_ty = Self::complex_component_ir_type(&inner_ctype);
+                // Compare each component against zero using appropriate type
+                let zero = if comp_ty.is_float() {
+                    match comp_ty {
+                        IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                        _ => Operand::Const(IrConst::F64(0.0)),
+                    }
+                } else {
+                    Operand::Const(IrConst::I64(0))
+                };
+                let real_nz = self.emit_cmp_val(IrCmpOp::Ne, real, zero.clone(), comp_ty);
+                let imag_nz = self.emit_cmp_val(IrCmpOp::Ne, imag, zero, comp_ty);
+                let result = self.emit_binop_val(IrBinOp::Or, Operand::Value(real_nz), Operand::Value(imag_nz), IrType::I64);
+                return Operand::Value(result);
+            }
+
+            // Cast complex to real: (double)z -> extract real part
             let real = self.load_complex_real(ptr, &inner_ctype);
             // May need to cast the real part to the target type
             let comp_ty = Self::complex_component_ir_type(&inner_ctype);
@@ -2158,6 +2182,24 @@ impl Lowerer {
                     from_ty = IrType::Ptr;
                 }
             }
+        }
+
+        // C standard 6.3.1.2: conversion to _Bool yields 0 if the value compares
+        // equal to 0, and 1 otherwise.  This applies to integer, float, and pointer sources.
+        if target_ctype == CType::Bool {
+            if from_ty.is_float() {
+                // Float -> _Bool: compare float directly against 0.0
+                // (casting to int first would lose fractional values like -0.5)
+                let zero = match from_ty {
+                    IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                    IrType::F64 => Operand::Const(IrConst::F64(0.0)),
+                    _ => Operand::Const(IrConst::F64(0.0)),
+                };
+                let dest = self.emit_cmp_val(IrCmpOp::Ne, src, zero, from_ty);
+                return Operand::Value(dest);
+            }
+            // Integer/pointer -> _Bool: compare != 0
+            return self.emit_bool_normalize(src);
         }
 
         // No-op casts: same type, cast to Ptr, or Ptr->64-bit int
@@ -2899,7 +2941,8 @@ impl Lowerer {
 
     /// Compute the common type and operation type for a binary operation
     /// using C's "usual arithmetic conversions". Returns (common_ty, op_ty)
-    /// where op_ty is common_ty widened to I64 for integers.
+    /// where op_ty is common_ty widened to I64 for sub-64-bit integers,
+    /// or the 128-bit type itself for I128/U128 operands.
     fn usual_arithmetic_conversions(lhs_ty: IrType, rhs_ty: IrType, lhs_ir_ty: IrType, rhs_ir_ty: IrType) -> (IrType, IrType) {
         let common_ty = if lhs_ty.is_float() || rhs_ty.is_float() {
             if lhs_ty == IrType::F128 || rhs_ty == IrType::F128 { IrType::F128 }
@@ -2911,9 +2954,13 @@ impl Lowerer {
                 Self::integer_promote(rhs_ir_ty),
             )
         };
-        let op_ty = if common_ty.is_float() { common_ty }
-            else if common_ty == IrType::I128 || common_ty == IrType::U128 { common_ty }
-            else { IrType::I64 };
+        let op_ty = if common_ty.is_float() {
+            common_ty
+        } else if common_ty == IrType::I128 || common_ty == IrType::U128 {
+            common_ty
+        } else {
+            IrType::I64
+        };
         (common_ty, op_ty)
     }
 

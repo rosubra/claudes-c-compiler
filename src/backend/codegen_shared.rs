@@ -123,8 +123,25 @@ pub trait ArchCodegen {
     /// Emit a load instruction: load from the address in ptr to dest.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType);
 
-    /// Emit a binary operation.
-    fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType);
+    /// Emit a binary operation. Default: dispatches float/integer ops via
+    /// `emit_float_binop` and `emit_int_binop` primitives.
+    fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            let float_op = classify_float_binop(op)
+                .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
+            self.emit_float_binop(dest, float_op, lhs, rhs, ty);
+            return;
+        }
+        self.emit_int_binop(dest, op, lhs, rhs, ty);
+    }
+
+    /// Emit a float binary operation (add/sub/mul/div).
+    /// The default `emit_binop` dispatches here after classifying the operation.
+    fn emit_float_binop(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType);
+
+    /// Emit an integer binary operation (all IrBinOp variants).
+    /// The default `emit_binop` dispatches here for non-float types.
+    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a unary operation.
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType);
@@ -147,8 +164,18 @@ pub trait ArchCodegen {
     /// Emit a get-element-pointer (base + offset).
     fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand);
 
-    /// Emit a type cast.
-    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType);
+    /// Emit architecture-specific instructions for a type cast, after the source
+    /// value has been loaded into the accumulator. Does NOT load/store—only emits
+    /// the conversion instructions.
+    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType);
+
+    /// Emit a type cast. Default: load source → emit_cast_instrs → store result.
+    /// x86-64 overrides this to handle 128-bit widening/narrowing.
+    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+        self.emit_load_operand(src);
+        self.emit_cast_instrs(from_ty, to_ty);
+        self.emit_store_result(dest);
+    }
 
     /// Emit a memory copy: copy `size` bytes from src address to dest address.
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize);

@@ -56,6 +56,11 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **128-bit function return value fix**: Fixed `maybe_narrow_call_result` to exclude I128/U128
+  types from the sub-64-bit narrowing cast. Previously, 128-bit return values from function calls
+  had their high 64 bits destroyed by a spurious `cqto` sign-extension (cast from I64 to I128).
+  Also added missing `__SIZEOF_INT128__` (=16) and `__SIZEOF_WINT_T__` (=4) predefined macros,
+  enabling mbedtls Everest curve25519 and other crypto code to select 128-bit arithmetic paths.
 - **Two-register struct return ABI (9-16 byte structs)**: Fixed SysV AMD64 ABI compliance for
   structs between 9-16 bytes. These must be returned in rax+rdx registers, not via hidden sret
   pointer (which is only for >16 bytes). The fix covers direct calls, explicit function pointer
@@ -158,9 +163,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 | Project | Status | Notes |
 |---------|--------|-------|
-| lua | PARTIAL | Build succeeds; runtime segfaults (pre-existing regression) |
-| zlib | PARTIAL | Build succeeds; minigzip passes, self-test partially fails |
-| mbedtls | PARTIAL | Library builds; selftest: md5/sha/aes pass, rsa sign fails, ecp segfault |
+| lua | PASS | All 6 tests pass |
+| zlib | PASS | Build + self-test + minigzip roundtrip pass |
+| mbedtls | PARTIAL | Library builds; selftest: md5/sha/aes/gcm/mpi pass, rsa sign fails, ecp segfault |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PARTIAL | Builds; 139/447 jq.test pass, 0 crashes (was segfaulting on all queries) |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |

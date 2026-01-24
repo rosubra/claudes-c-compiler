@@ -299,107 +299,6 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit a type cast instruction sequence for AArch64.
-    /// Emit AArch64 instructions for a type cast, using shared cast classification.
-    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
-        match classify_cast(from_ty, to_ty) {
-            CastKind::Noop => {}
-
-            CastKind::FloatToSigned { from_f64 } => {
-                if from_f64 {
-                    self.state.emit("    fmov d0, x0");
-                    self.state.emit("    fcvtzs x0, d0");
-                } else {
-                    self.state.emit("    fmov s0, w0");
-                    self.state.emit("    fcvtzs x0, s0");
-                }
-            }
-
-            CastKind::FloatToUnsigned { from_f64, .. } => {
-                if from_f64 {
-                    self.state.emit("    fmov d0, x0");
-                    self.state.emit("    fcvtzu x0, d0");
-                } else {
-                    self.state.emit("    fmov s0, w0");
-                    self.state.emit("    fcvtzu x0, s0");
-                }
-            }
-
-            CastKind::SignedToFloat { to_f64 } => {
-                if to_f64 {
-                    self.state.emit("    scvtf d0, x0");
-                    self.state.emit("    fmov x0, d0");
-                } else {
-                    self.state.emit("    scvtf s0, x0");
-                    self.state.emit("    fmov w0, s0");
-                }
-            }
-
-            CastKind::UnsignedToFloat { to_f64, .. } => {
-                if to_f64 {
-                    self.state.emit("    ucvtf d0, x0");
-                    self.state.emit("    fmov x0, d0");
-                } else {
-                    self.state.emit("    ucvtf s0, x0");
-                    self.state.emit("    fmov w0, s0");
-                }
-            }
-
-            CastKind::FloatToFloat { widen } => {
-                if widen {
-                    self.state.emit("    fmov s0, w0");
-                    self.state.emit("    fcvt d0, s0");
-                    self.state.emit("    fmov x0, d0");
-                } else {
-                    self.state.emit("    fmov d0, x0");
-                    self.state.emit("    fcvt s0, d0");
-                    self.state.emit("    fmov w0, s0");
-                }
-            }
-
-            CastKind::SignedToUnsignedSameSize { to_ty } => {
-                // Clear upper bits for sub-word unsigned types to ensure proper semantics.
-                // For U32/U64, the noop is fine since the value already occupies the full
-                // register width needed. For U8/U16, we must mask to the correct width.
-                match to_ty {
-                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
-                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
-                    IrType::U32 => self.state.emit("    mov w0, w0"), // clears upper 32 bits
-                    _ => {} // U64: no masking needed
-                }
-            }
-
-            CastKind::IntWiden { from_ty, .. } => {
-                if from_ty.is_unsigned() {
-                    match from_ty {
-                        IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
-                        IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
-                        IrType::U32 => self.state.emit("    mov w0, w0"),
-                        _ => {}
-                    }
-                } else {
-                    match from_ty {
-                        IrType::I8 => self.state.emit("    sxtb x0, w0"),
-                        IrType::I16 => self.state.emit("    sxth x0, w0"),
-                        IrType::I32 => self.state.emit("    sxtw x0, w0"),
-                        _ => {}
-                    }
-                }
-            }
-
-            CastKind::IntNarrow { to_ty } => {
-                match to_ty {
-                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
-                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
-                    IrType::I16 => self.state.emit("    sxth x0, w0"),
-                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
-                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
-                    IrType::U32 => self.state.emit("    mov w0, w0"),
-                    _ => {}
-                }
-            }
-        }
-    }
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -665,36 +564,34 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        if ty.is_float() {
-            let float_op = classify_float_binop(op)
-                .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
-            let mnemonic = match float_op {
-                FloatOp::Add => "fadd",
-                FloatOp::Sub => "fsub",
-                FloatOp::Mul => "fmul",
-                FloatOp::Div => "fdiv",
-            };
-            self.operand_to_x0(lhs);
-            self.state.emit("    mov x1, x0");
-            self.operand_to_x0(rhs);
-            self.state.emit("    mov x2, x0");
-            if ty == IrType::F32 {
-                self.state.emit("    fmov s0, w1");
-                self.state.emit("    fmov s1, w2");
-                self.state.emit(&format!("    {} s0, s0, s1", mnemonic));
-                self.state.emit("    fmov w0, s0");
-                self.state.emit("    mov w0, w0"); // zero-extend
-            } else {
-                self.state.emit("    fmov d0, x1");
-                self.state.emit("    fmov d1, x2");
-                self.state.emit(&format!("    {} d0, d0, d1", mnemonic));
-                self.state.emit("    fmov x0, d0");
-            }
-            self.store_x0_to(dest);
-            return;
+    fn emit_float_binop(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        let mnemonic = match op {
+            FloatOp::Add => "fadd",
+            FloatOp::Sub => "fsub",
+            FloatOp::Mul => "fmul",
+            FloatOp::Div => "fdiv",
+        };
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
+        self.state.emit("    mov x2, x0");
+        // F128 uses F64 instructions (long double computed at double precision)
+        if ty == IrType::F32 {
+            self.state.emit("    fmov s0, w1");
+            self.state.emit("    fmov s1, w2");
+            self.state.emit(&format!("    {} s0, s0, s1", mnemonic));
+            self.state.emit("    fmov w0, s0");
+            self.state.emit("    mov w0, w0"); // zero-extend
+        } else {
+            self.state.emit("    fmov d0, x1");
+            self.state.emit("    fmov d1, x2");
+            self.state.emit(&format!("    {} d0, d0, d1", mnemonic));
+            self.state.emit("    fmov x0, d0");
         }
+        self.store_x0_to(dest);
+    }
 
+    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         self.operand_to_x0(lhs);
         self.state.emit("    mov x1, x0");
         self.operand_to_x0(rhs);
@@ -1230,11 +1127,104 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
-        self.operand_to_x0(src);
-        self.emit_cast_instrs(from_ty, to_ty);
-        self.store_x0_to(dest);
+    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
+        match classify_cast(from_ty, to_ty) {
+            CastKind::Noop => {}
+
+            CastKind::FloatToSigned { from_f64 } => {
+                if from_f64 {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fcvtzs x0, d0");
+                } else {
+                    self.state.emit("    fmov s0, w0");
+                    self.state.emit("    fcvtzs x0, s0");
+                }
+            }
+
+            CastKind::FloatToUnsigned { from_f64, .. } => {
+                if from_f64 {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fcvtzu x0, d0");
+                } else {
+                    self.state.emit("    fmov s0, w0");
+                    self.state.emit("    fcvtzu x0, s0");
+                }
+            }
+
+            CastKind::SignedToFloat { to_f64 } => {
+                if to_f64 {
+                    self.state.emit("    scvtf d0, x0");
+                    self.state.emit("    fmov x0, d0");
+                } else {
+                    self.state.emit("    scvtf s0, x0");
+                    self.state.emit("    fmov w0, s0");
+                }
+            }
+
+            CastKind::UnsignedToFloat { to_f64, .. } => {
+                if to_f64 {
+                    self.state.emit("    ucvtf d0, x0");
+                    self.state.emit("    fmov x0, d0");
+                } else {
+                    self.state.emit("    ucvtf s0, x0");
+                    self.state.emit("    fmov w0, s0");
+                }
+            }
+
+            CastKind::FloatToFloat { widen } => {
+                if widen {
+                    self.state.emit("    fmov s0, w0");
+                    self.state.emit("    fcvt d0, s0");
+                    self.state.emit("    fmov x0, d0");
+                } else {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fcvt s0, d0");
+                    self.state.emit("    fmov w0, s0");
+                }
+            }
+
+            CastKind::SignedToUnsignedSameSize { to_ty } => {
+                match to_ty {
+                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::U32 => self.state.emit("    mov w0, w0"),
+                    _ => {}
+                }
+            }
+
+            CastKind::IntWiden { from_ty, .. } => {
+                if from_ty.is_unsigned() {
+                    match from_ty {
+                        IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                        IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                        IrType::U32 => self.state.emit("    mov w0, w0"),
+                        _ => {}
+                    }
+                } else {
+                    match from_ty {
+                        IrType::I8 => self.state.emit("    sxtb x0, w0"),
+                        IrType::I16 => self.state.emit("    sxth x0, w0"),
+                        IrType::I32 => self.state.emit("    sxtw x0, w0"),
+                        _ => {}
+                    }
+                }
+            }
+
+            CastKind::IntNarrow { to_ty } => {
+                match to_ty {
+                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
+                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::I16 => self.state.emit("    sxth x0, w0"),
+                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
+                    IrType::U32 => self.state.emit("    mov w0, w0"),
+                    _ => {}
+                }
+            }
+        }
     }
+
+    // emit_cast uses the default from ArchCodegen: load → emit_cast_instrs → store
 
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
         // Load dest address into x9, src address into x10

@@ -230,8 +230,10 @@ impl X86Codegen {
         }
     }
 
-    /// Emit x86-64 instructions for a type cast, using shared cast classification.
-    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
+    /// Emit x86-64 instructions for a type cast that operates on the
+    /// primary accumulator (%rax). Used internally by both `emit_cast_instrs`
+    /// (trait method) and the i128 special-case paths in `emit_cast`.
+    fn emit_cast_instrs_x86(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
             CastKind::Noop => {}
 
@@ -827,6 +829,7 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
+    /// Override emit_binop to handle 128-bit integer ops on x86-64.
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if Self::is_i128_type(ty) {
             self.emit_binop_i128(dest, op, lhs, rhs, ty);
@@ -835,32 +838,39 @@ impl ArchCodegen for X86Codegen {
         if ty.is_float() {
             let float_op = classify_float_binop(op)
                 .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
-            let (mov_to_xmm, mov_from_xmm) = if ty == IrType::F32 {
-                ("movd %eax, %xmm0", "movd %xmm0, %eax")
-            } else {
-                ("movq %rax, %xmm0", "movq %xmm0, %rax")
-            };
-            let mov_to_xmm1 = if ty == IrType::F32 { "movd %eax, %xmm1" } else { "movq %rax, %xmm1" };
-            self.operand_to_rax(lhs);
-            self.state.emit(&format!("    {}", mov_to_xmm));
-            self.state.emit("    pushq %rax");
-            self.operand_to_rax(rhs);
-            self.state.emit(&format!("    {}", mov_to_xmm1));
-            self.state.emit("    popq %rax");
-            // F128 uses F64 instructions (long double computed at double precision)
-            let suffix = if ty == IrType::F64 || ty == IrType::F128 { "sd" } else { "ss" };
-            let mnemonic = match float_op {
-                FloatOp::Add => "add",
-                FloatOp::Sub => "sub",
-                FloatOp::Mul => "mul",
-                FloatOp::Div => "div",
-            };
-            self.state.emit(&format!("    {}{} %xmm1, %xmm0", mnemonic, suffix));
-            self.state.emit(&format!("    {}", mov_from_xmm));
-            self.store_rax_to(dest);
+            self.emit_float_binop(dest, float_op, lhs, rhs, ty);
             return;
         }
+        self.emit_int_binop(dest, op, lhs, rhs, ty);
+    }
 
+    fn emit_float_binop(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        let (mov_to_xmm, mov_from_xmm) = if ty == IrType::F32 {
+            ("movd %eax, %xmm0", "movd %xmm0, %eax")
+        } else {
+            ("movq %rax, %xmm0", "movq %xmm0, %rax")
+        };
+        let mov_to_xmm1 = if ty == IrType::F32 { "movd %eax, %xmm1" } else { "movq %rax, %xmm1" };
+        self.operand_to_rax(lhs);
+        self.state.emit(&format!("    {}", mov_to_xmm));
+        self.state.emit("    pushq %rax");
+        self.operand_to_rax(rhs);
+        self.state.emit(&format!("    {}", mov_to_xmm1));
+        self.state.emit("    popq %rax");
+        // F128 uses F64 instructions (long double computed at double precision)
+        let suffix = if ty == IrType::F64 || ty == IrType::F128 { "sd" } else { "ss" };
+        let mnemonic = match op {
+            FloatOp::Add => "add",
+            FloatOp::Sub => "sub",
+            FloatOp::Mul => "mul",
+            FloatOp::Div => "div",
+        };
+        self.state.emit(&format!("    {}{} %xmm1, %xmm0", mnemonic, suffix));
+        self.state.emit(&format!("    {}", mov_from_xmm));
+        self.store_rax_to(dest);
+    }
+
+    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         self.operand_to_rax(lhs);
         self.state.emit("    pushq %rax");
         self.operand_to_rax(rhs);
@@ -1381,31 +1391,31 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
+    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
+        self.emit_cast_instrs_x86(from_ty, to_ty);
+    }
+
+    /// Override the default emit_cast to handle 128-bit widening/narrowing.
     fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
         if Self::is_i128_type(to_ty) && !Self::is_i128_type(from_ty) {
             // Widening to 128-bit: load src into rax, extend to rax:rdx
             self.operand_to_rax(src);
-            // First apply standard widening to 64-bit if needed
             if from_ty.size() < 8 {
-                self.emit_cast_instrs(from_ty, if from_ty.is_signed() { IrType::I64 } else { IrType::U64 });
+                self.emit_cast_instrs_x86(from_ty, if from_ty.is_signed() { IrType::I64 } else { IrType::U64 });
             }
-            // Now extend 64-bit rax to 128-bit rax:rdx
             if from_ty.is_signed() {
-                // Sign-extend: rdx = rax >> 63 (arithmetic)
-                self.state.emit("    cqto");  // sign-extend rax into rdx:rax
+                self.state.emit("    cqto");
             } else {
-                // Zero-extend: rdx = 0
                 self.state.emit("    xorq %rdx, %rdx");
             }
             self.store_rax_rdx_to(dest);
             return;
         }
         if Self::is_i128_type(from_ty) && !Self::is_i128_type(to_ty) {
-            // Narrowing from 128-bit: load into rax:rdx, just use rax (low 64 bits)
+            // Narrowing from 128-bit: load into rax:rdx, use rax (low 64 bits)
             self.operand_to_rax_rdx(src);
-            // rax already has the low 64 bits; apply standard narrowing if needed
             if to_ty.size() < 8 {
-                self.emit_cast_instrs(IrType::I64, to_ty);
+                self.emit_cast_instrs_x86(IrType::I64, to_ty);
             }
             self.store_rax_to(dest);
             return;
@@ -1416,8 +1426,9 @@ impl ArchCodegen for X86Codegen {
             self.store_rax_rdx_to(dest);
             return;
         }
+        // Standard cast: use default load → cast_instrs → store pattern
         self.operand_to_rax(src);
-        self.emit_cast_instrs(from_ty, to_ty);
+        self.emit_cast_instrs_x86(from_ty, to_ty);
         self.store_rax_to(dest);
     }
 
