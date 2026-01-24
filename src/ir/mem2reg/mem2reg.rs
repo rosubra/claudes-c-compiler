@@ -270,6 +270,14 @@ fn instruction_used_values(inst: &Instruction) -> Vec<u32> {
                 add_operand_values(op, &mut used);
             }
         }
+        Instruction::X86SseOp { dest_ptr, args, .. } => {
+            if let Some(ptr) = dest_ptr {
+                used.push(ptr.0);
+            }
+            for arg in args {
+                add_operand_values(arg, &mut used);
+            }
+        }
     }
     used
 }

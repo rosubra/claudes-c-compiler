@@ -170,6 +170,14 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
                 collect_operand_uses(op, used);
             }
         }
+        Instruction::X86SseOp { dest_ptr, args, .. } => {
+            if let Some(ptr) = dest_ptr {
+                used.insert(ptr.0);
+            }
+            for arg in args {
+                collect_operand_uses(arg, used);
+            }
+        }
     }
 }
 
@@ -222,7 +230,8 @@ fn has_side_effects(inst: &Instruction) -> bool {
         Instruction::Fence { .. } |
         Instruction::GetReturnF64Second { .. } |
         Instruction::SetReturnF64Second { .. } |
-        Instruction::InlineAsm { .. }
+        Instruction::InlineAsm { .. } |
+        Instruction::X86SseOp { .. }
     )
 }
 

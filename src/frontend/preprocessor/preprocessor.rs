@@ -62,9 +62,47 @@ impl Preprocessor {
         pp
     }
 
+    /// Locate the bundled `include/` directory shipped alongside the binary.
+    ///
+    /// Walks up to 5 parent directories from the canonicalized executable path
+    /// looking for an `include/` directory that contains `emmintrin.h`.
+    /// Falls back to the compile-time `CARGO_MANIFEST_DIR/include` path.
+    /// Returns `Some(path)` when a valid bundled include directory is found.
+    fn bundled_include_dir() -> Option<PathBuf> {
+        // Try to find the include dir relative to the running binary.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Ok(canonical) = exe.canonicalize() {
+                let mut dir = canonical.as_path().parent();
+                for _ in 0..5 {
+                    if let Some(d) = dir {
+                        let candidate = d.join("include");
+                        if candidate.join("emmintrin.h").is_file() {
+                            return Some(candidate);
+                        }
+                        dir = d.parent();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Compile-time fallback: CARGO_MANIFEST_DIR/include
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include");
+        if fallback.join("emmintrin.h").is_file() {
+            return Some(fallback);
+        }
+
+        None
+    }
+
     /// Get default system include paths (arch-neutral only).
     fn default_system_include_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
+        // Bundled include directory takes priority over system GCC headers
+        if let Some(bundled) = Self::bundled_include_dir() {
+            paths.push(bundled);
+        }
         // Only include arch-neutral paths here; arch-specific paths are added by set_target
         let candidates = [
             "/usr/local/include",

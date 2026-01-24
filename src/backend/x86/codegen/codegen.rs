@@ -561,6 +561,278 @@ impl X86Codegen {
         }
         self.store_rax_rdx_to(dest);
     }
+
+    /// Load an operand value into any GP register (returned as string).
+    /// Uses rcx as the scratch register.
+    fn operand_to_reg(&mut self, op: &Operand, reg: &str) {
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::I8(v) => self.state.emit(&format!("    movq ${}, %{}", *v as i64, reg)),
+                    IrConst::I16(v) => self.state.emit(&format!("    movq ${}, %{}", *v as i64, reg)),
+                    IrConst::I32(v) => self.state.emit(&format!("    movq ${}, %{}", *v as i64, reg)),
+                    IrConst::I64(v) => {
+                        if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                            self.state.emit(&format!("    movq ${}, %{}", v, reg));
+                        } else {
+                            self.state.emit(&format!("    movabsq ${}, %{}", v, reg));
+                        }
+                    }
+                    _ => self.state.emit(&format!("    xorq %{0}, %{0}", reg)),
+                }
+            }
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.state.emit(&format!("    leaq {}(%rbp), %{}", slot.0, reg));
+                    } else {
+                        self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, reg));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit SSE binary 128-bit op: load xmm0 from arg0 ptr, xmm1 from arg1 ptr,
+    /// apply the given SSE instruction, store result xmm0 to dest_ptr.
+    fn emit_sse_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], sse_inst: &str) {
+        // arg0 and arg1 are pointers to 16-byte data
+        self.operand_to_reg(&args[0], "rax");
+        self.state.emit("    movdqu (%rax), %xmm0");
+        self.operand_to_reg(&args[1], "rcx");
+        self.state.emit("    movdqu (%rcx), %xmm1");
+        self.state.emit(&format!("    {} %xmm1, %xmm0", sse_inst));
+        // Store result to dest_ptr
+        if let Some(slot) = self.state.get_slot(dest_ptr.0) {
+            if self.state.is_alloca(dest_ptr.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+            }
+            self.state.emit("    movdqu %xmm0, (%rax)");
+        }
+    }
+
+    fn emit_x86_sse_op_impl(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+        match op {
+            X86SseOpKind::Lfence => { self.state.emit("    lfence"); }
+            X86SseOpKind::Mfence => { self.state.emit("    mfence"); }
+            X86SseOpKind::Sfence => { self.state.emit("    sfence"); }
+            X86SseOpKind::Pause => { self.state.emit("    pause"); }
+            X86SseOpKind::Clflush => {
+                // args[0] = pointer to flush
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    clflush (%rax)");
+            }
+            X86SseOpKind::Movnti => {
+                // dest_ptr = target address, args[0] = 32-bit value
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    if let Some(slot) = self.state.get_slot(ptr.0) {
+                        if self.state.is_alloca(ptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                    }
+                    self.state.emit("    movnti %ecx, (%rax)");
+                }
+            }
+            X86SseOpKind::Movnti64 => {
+                // dest_ptr = target address, args[0] = 64-bit value
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    if let Some(slot) = self.state.get_slot(ptr.0) {
+                        if self.state.is_alloca(ptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                    }
+                    self.state.emit("    movnti %rcx, (%rax)");
+                }
+            }
+            X86SseOpKind::Movntdq => {
+                // dest_ptr = target address, args[0] = ptr to 128-bit source
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    self.state.emit("    movdqu (%rcx), %xmm0");
+                    if let Some(slot) = self.state.get_slot(ptr.0) {
+                        if self.state.is_alloca(ptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                    }
+                    self.state.emit("    movntdq %xmm0, (%rax)");
+                }
+            }
+            X86SseOpKind::Movntpd => {
+                // dest_ptr = target address, args[0] = ptr to 128-bit double source
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    self.state.emit("    movupd (%rcx), %xmm0");
+                    if let Some(slot) = self.state.get_slot(ptr.0) {
+                        if self.state.is_alloca(ptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                    }
+                    self.state.emit("    movntpd %xmm0, (%rax)");
+                }
+            }
+            X86SseOpKind::Loaddqu => {
+                // args[0] = source pointer, dest_ptr = result storage
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    if let Some(slot) = self.state.get_slot(dptr.0) {
+                        if self.state.is_alloca(dptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                        self.state.emit("    movdqu %xmm0, (%rax)");
+                    }
+                }
+            }
+            X86SseOpKind::Storedqu => {
+                // dest_ptr = target pointer, args[0] = source pointer to 128-bit data
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rcx");
+                    self.state.emit("    movdqu (%rcx), %xmm0");
+                    if let Some(slot) = self.state.get_slot(ptr.0) {
+                        if self.state.is_alloca(ptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                    }
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            X86SseOpKind::Pcmpeqb128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "pcmpeqb");
+                }
+            }
+            X86SseOpKind::Pcmpeqd128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "pcmpeqd");
+                }
+            }
+            X86SseOpKind::Psubusb128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "psubusb");
+                }
+            }
+            X86SseOpKind::Por128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "por");
+                }
+            }
+            X86SseOpKind::Pand128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "pand");
+                }
+            }
+            X86SseOpKind::Pxor128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_sse_binary_128(dptr, args, "pxor");
+                }
+            }
+            X86SseOpKind::Pmovmskb128 => {
+                // args[0] = pointer to 128-bit data, result is i32 in rax
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                self.state.emit("    pmovmskb %xmm0, %eax");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+                    }
+                }
+            }
+            X86SseOpKind::SetEpi8 => {
+                // args[0] = byte value to splat, dest_ptr = result storage
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    // Splat al to all 16 bytes: movd to xmm, then pshufb with zero mask
+                    // Simpler approach: use stack
+                    self.state.emit("    movd %eax, %xmm0");
+                    // punpcklbw to splat byte: xmm0 = [al, al, ...]
+                    self.state.emit("    punpcklbw %xmm0, %xmm0");
+                    self.state.emit("    punpcklwd %xmm0, %xmm0");
+                    self.state.emit("    pshufd $0, %xmm0, %xmm0");
+                    if let Some(slot) = self.state.get_slot(dptr.0) {
+                        if self.state.is_alloca(dptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                        self.state.emit("    movdqu %xmm0, (%rax)");
+                    }
+                }
+            }
+            X86SseOpKind::SetEpi32 => {
+                // args[0] = 32-bit value to splat, dest_ptr = result storage
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movd %eax, %xmm0");
+                    self.state.emit("    pshufd $0, %xmm0, %xmm0");
+                    if let Some(slot) = self.state.get_slot(dptr.0) {
+                        if self.state.is_alloca(dptr.0) {
+                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+                        } else {
+                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                        self.state.emit("    movdqu %xmm0, (%rax)");
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_8 => {
+                // args: [crc_val, data_val]
+                self.operand_to_reg(&args[0], "rax");
+                self.operand_to_reg(&args[1], "rcx");
+                self.state.emit("    crc32b %cl, %eax");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_16 => {
+                self.operand_to_reg(&args[0], "rax");
+                self.operand_to_reg(&args[1], "rcx");
+                self.state.emit("    crc32w %cx, %eax");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_32 => {
+                self.operand_to_reg(&args[0], "rax");
+                self.operand_to_reg(&args[1], "rcx");
+                self.state.emit("    crc32l %ecx, %eax");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_64 => {
+                self.operand_to_reg(&args[0], "rax");
+                self.operand_to_reg(&args[1], "rcx");
+                self.state.emit("    crc32q %rcx, %rax");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+                    }
+                }
+            }
+        }
+    }
 }
 
 const X86_ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
@@ -1830,6 +2102,10 @@ impl ArchCodegen for X86Codegen {
         // 128-bit copy: load src into rax:rdx, store to dest
         self.operand_to_rax_rdx(src);
         self.store_rax_rdx_to(dest);
+    }
+
+    fn emit_x86_sse_op(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+        self.emit_x86_sse_op_impl(dest, op, dest_ptr, args);
     }
 }
 

@@ -255,6 +255,140 @@ impl Lowerer {
             BuiltinIntrinsic::VaStart | BuiltinIntrinsic::VaEnd | BuiltinIntrinsic::VaCopy => {
                 unreachable!("va builtins handled earlier by name match")
             }
+            // Nop intrinsic - just evaluate args for side effects and return 0
+            BuiltinIntrinsic::Nop => {
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // X86 SSE fence/barrier operations (no dest, no meaningful return)
+            BuiltinIntrinsic::X86Lfence => {
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Lfence, dest_ptr: None, args: vec![] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            BuiltinIntrinsic::X86Mfence => {
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Mfence, dest_ptr: None, args: vec![] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            BuiltinIntrinsic::X86Sfence => {
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Sfence, dest_ptr: None, args: vec![] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            BuiltinIntrinsic::X86Pause => {
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Pause, dest_ptr: None, args: vec![] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // clflush(ptr)
+            BuiltinIntrinsic::X86Clflush => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Clflush, dest_ptr: None, args: arg_ops });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // Non-temporal store: movnti(ptr, val) - 32-bit
+            BuiltinIntrinsic::X86Movnti => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movnti, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // Non-temporal store: movnti64(ptr, val) - 64-bit
+            BuiltinIntrinsic::X86Movnti64 => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movnti64, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // Non-temporal store 128-bit: movntdq(ptr, src_ptr)
+            BuiltinIntrinsic::X86Movntdq => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movntdq, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // Non-temporal store 128-bit double: movntpd(ptr, src_ptr)
+            BuiltinIntrinsic::X86Movntpd => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movntpd, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // 128-bit operations that return __m128i (16-byte struct via pointer)
+            // These allocate a 16-byte stack slot for the result and return a pointer to it
+            BuiltinIntrinsic::X86Loaddqu
+            | BuiltinIntrinsic::X86Pcmpeqb128
+            | BuiltinIntrinsic::X86Pcmpeqd128
+            | BuiltinIntrinsic::X86Psubusb128
+            | BuiltinIntrinsic::X86Por128
+            | BuiltinIntrinsic::X86Pand128
+            | BuiltinIntrinsic::X86Pxor128
+            | BuiltinIntrinsic::X86Set1Epi8
+            | BuiltinIntrinsic::X86Set1Epi32 => {
+                let sse_op = match intrinsic {
+                    BuiltinIntrinsic::X86Loaddqu => X86SseOpKind::Loaddqu,
+                    BuiltinIntrinsic::X86Pcmpeqb128 => X86SseOpKind::Pcmpeqb128,
+                    BuiltinIntrinsic::X86Pcmpeqd128 => X86SseOpKind::Pcmpeqd128,
+                    BuiltinIntrinsic::X86Psubusb128 => X86SseOpKind::Psubusb128,
+                    BuiltinIntrinsic::X86Por128 => X86SseOpKind::Por128,
+                    BuiltinIntrinsic::X86Pand128 => X86SseOpKind::Pand128,
+                    BuiltinIntrinsic::X86Pxor128 => X86SseOpKind::Pxor128,
+                    BuiltinIntrinsic::X86Set1Epi8 => X86SseOpKind::SetEpi8,
+                    BuiltinIntrinsic::X86Set1Epi32 => X86SseOpKind::SetEpi32,
+                    _ => unreachable!(),
+                };
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                // Allocate 16-byte stack slot for result
+                let result_alloca = self.fresh_value();
+                self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::Ptr, size: 16 });
+                let dest_val = self.fresh_value();
+                self.emit(Instruction::X86SseOp {
+                    dest: Some(dest_val),
+                    op: sse_op,
+                    dest_ptr: Some(result_alloca),
+                    args: arg_ops,
+                });
+                // Return pointer to the 16-byte result (struct return)
+                Some(Operand::Value(result_alloca))
+            }
+            // storedqu(ptr, src_ptr) - store 128 bits unaligned
+            BuiltinIntrinsic::X86Storedqu => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ptr_val = self.operand_to_value(arg_ops[0].clone());
+                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Storedqu, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                Some(Operand::Const(IrConst::I64(0)))
+            }
+            // pmovmskb returns i32 scalar
+            BuiltinIntrinsic::X86Pmovmskb128 => {
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let dest_val = self.fresh_value();
+                self.emit(Instruction::X86SseOp {
+                    dest: Some(dest_val),
+                    op: X86SseOpKind::Pmovmskb128,
+                    dest_ptr: None,
+                    args: arg_ops,
+                });
+                Some(Operand::Value(dest_val))
+            }
+            // CRC32 operations return scalar i32/i64
+            BuiltinIntrinsic::X86Crc32_8 | BuiltinIntrinsic::X86Crc32_16
+            | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64 => {
+                let sse_op = match intrinsic {
+                    BuiltinIntrinsic::X86Crc32_8 => X86SseOpKind::Crc32_8,
+                    BuiltinIntrinsic::X86Crc32_16 => X86SseOpKind::Crc32_16,
+                    BuiltinIntrinsic::X86Crc32_32 => X86SseOpKind::Crc32_32,
+                    BuiltinIntrinsic::X86Crc32_64 => X86SseOpKind::Crc32_64,
+                    _ => unreachable!(),
+                };
+                let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let dest_val = self.fresh_value();
+                self.emit(Instruction::X86SseOp {
+                    dest: Some(dest_val),
+                    op: sse_op,
+                    dest_ptr: None,
+                    args: arg_ops,
+                });
+                Some(Operand::Value(dest_val))
+            }
         }
     }
 

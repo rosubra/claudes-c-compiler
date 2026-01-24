@@ -173,6 +173,71 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     m.insert("__builtin_va_end", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaEnd));
     m.insert("__builtin_va_copy", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaCopy));
 
+    // Prefetch (no-op, handled separately in lowering)
+    m.insert("__builtin_prefetch", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
+
+    // Vector construction builtins used by SSE header wrapper functions.
+    // The actual _mm_set1_* calls are intercepted as direct builtins, but the
+    // function bodies in emmintrin.h still reference these, so register as Nop
+    // to avoid linker errors from the compiled (but never called) wrappers.
+    m.insert("__builtin_ia32_vec_init_v16qi", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
+    m.insert("__builtin_ia32_vec_init_v4si", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
+
+    // x86 SSE/SSE2/SSE4.2 intrinsic builtins (__builtin_ia32_* names)
+    m.insert("__builtin_ia32_lfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Lfence));
+    m.insert("__builtin_ia32_mfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Mfence));
+    m.insert("__builtin_ia32_sfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Sfence));
+    m.insert("__builtin_ia32_clflush", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Clflush));
+    m.insert("__builtin_ia32_pause", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pause));
+    m.insert("__builtin_ia32_movnti", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movnti));
+    m.insert("__builtin_ia32_movnti64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movnti64));
+    m.insert("__builtin_ia32_movntdq", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movntdq));
+    m.insert("__builtin_ia32_movntpd", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movntpd));
+    m.insert("__builtin_ia32_loaddqu", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loaddqu));
+    m.insert("__builtin_ia32_storedqu", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storedqu));
+    m.insert("__builtin_ia32_pcmpeqb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqb128));
+    m.insert("__builtin_ia32_pcmpeqd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqd128));
+    m.insert("__builtin_ia32_psubusb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubusb128));
+    m.insert("__builtin_ia32_por128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Por128));
+    m.insert("__builtin_ia32_pand128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pand128));
+    m.insert("__builtin_ia32_pxor128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pxor128));
+    m.insert("__builtin_ia32_pmovmskb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmovmskb128));
+    m.insert("__builtin_ia32_set1_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi8));
+    m.insert("__builtin_ia32_set1_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi32));
+    m.insert("__builtin_ia32_crc32qi", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_8));
+    m.insert("__builtin_ia32_crc32hi", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_16));
+    m.insert("__builtin_ia32_crc32si", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_32));
+    m.insert("__builtin_ia32_crc32di", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_64));
+
+    // Direct _mm_* function name mappings (bypass wrapper functions, avoid ABI issues)
+    m.insert("_mm_loadu_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loaddqu));
+    m.insert("_mm_load_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loaddqu));
+    m.insert("_mm_storeu_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storedqu));
+    m.insert("_mm_store_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Storedqu));
+    m.insert("_mm_set1_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi8));
+    m.insert("_mm_set1_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi32));
+    m.insert("_mm_setzero_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Set1Epi8));
+    m.insert("_mm_cmpeq_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqb128));
+    m.insert("_mm_cmpeq_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqd128));
+    m.insert("_mm_subs_epu8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubusb128));
+    m.insert("_mm_or_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Por128));
+    m.insert("_mm_and_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pand128));
+    m.insert("_mm_xor_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pxor128));
+    m.insert("_mm_movemask_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pmovmskb128));
+    m.insert("_mm_stream_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movntdq));
+    m.insert("_mm_stream_si64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movnti64));
+    m.insert("_mm_stream_si32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movnti));
+    m.insert("_mm_stream_pd", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Movntpd));
+    m.insert("_mm_lfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Lfence));
+    m.insert("_mm_mfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Mfence));
+    m.insert("_mm_sfence", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Sfence));
+    m.insert("_mm_clflush", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Clflush));
+    m.insert("_mm_pause", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pause));
+    m.insert("_mm_crc32_u8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_8));
+    m.insert("_mm_crc32_u16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_16));
+    m.insert("_mm_crc32_u32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_32));
+    m.insert("_mm_crc32_u64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_64));
+
     m
 });
 
@@ -237,6 +302,33 @@ pub enum BuiltinIntrinsic {
     VaEnd,
     /// __builtin_va_copy(dest, src) -> copy va_list (lowered specially in IR)
     VaCopy,
+    /// No-op builtin (evaluates args, returns 0)
+    Nop,
+    // X86 SSE intrinsics
+    X86Lfence,
+    X86Mfence,
+    X86Sfence,
+    X86Pause,
+    X86Clflush,
+    X86Movnti,
+    X86Movnti64,
+    X86Movntdq,
+    X86Movntpd,
+    X86Loaddqu,
+    X86Storedqu,
+    X86Pcmpeqb128,
+    X86Pcmpeqd128,
+    X86Psubusb128,
+    X86Por128,
+    X86Pand128,
+    X86Pxor128,
+    X86Pmovmskb128,
+    X86Set1Epi8,
+    X86Set1Epi32,
+    X86Crc32_8,
+    X86Crc32_16,
+    X86Crc32_32,
+    X86Crc32_64,
 }
 
 impl BuiltinInfo {

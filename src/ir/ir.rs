@@ -231,6 +231,16 @@ pub enum Instruction {
         /// Types of operands (outputs first, then inputs) for register size selection
         operand_types: Vec<IrType>,
     },
+
+    /// X86 SSE operation (target-specific instruction that passes through optimization).
+    X86SseOp {
+        dest: Option<Value>,
+        op: X86SseOpKind,
+        /// For store ops: destination pointer
+        dest_ptr: Option<Value>,
+        /// Operand arguments (varies by op)
+        args: Vec<Operand>,
+    },
 }
 
 /// Block terminator.
@@ -739,6 +749,46 @@ pub enum IrCmpOp {
     Uge,
 }
 
+/// X86 SSE operation kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum X86SseOpKind {
+    /// Memory fence operations (no dest, no args beyond optional ptr)
+    Lfence,
+    Mfence,
+    Sfence,
+    Pause,
+    Clflush,
+    /// Non-temporal stores: movnti (32-bit), movnti64 (64-bit), movntdq (128-bit), movntpd (128-bit double)
+    Movnti,
+    Movnti64,
+    Movntdq,
+    Movntpd,
+    /// Load/store 128-bit unaligned
+    Loaddqu,
+    Storedqu,
+    /// Compare equal packed bytes (16 bytes)
+    Pcmpeqb128,
+    /// Compare equal packed dwords (4x32)
+    Pcmpeqd128,
+    /// Subtract packed unsigned saturated bytes
+    Psubusb128,
+    /// Bitwise OR/AND/XOR on 128-bit
+    Por128,
+    Pand128,
+    Pxor128,
+    /// Move byte mask (pmovmskb) - returns i32
+    Pmovmskb128,
+    /// Set all bytes to value (splat)
+    SetEpi8,
+    /// Set all dwords to value (splat)
+    SetEpi32,
+    /// CRC32 accumulate
+    Crc32_8,
+    Crc32_16,
+    Crc32_32,
+    Crc32_64,
+}
+
 impl Instruction {
     /// Get the destination value defined by this instruction, if any.
     /// Instructions like Store, Memcpy, VaStart, VaEnd, VaCopy, AtomicStore,
@@ -791,6 +841,7 @@ impl Instruction {
             | Instruction::GetReturnF64Second { dest } => Some(*dest),
             Instruction::Call { dest, .. }
             | Instruction::CallIndirect { dest, .. } => *dest,
+            Instruction::X86SseOp { dest, .. } => *dest,
             Instruction::Store { .. }
             | Instruction::Memcpy { .. }
             | Instruction::VaStart { .. }

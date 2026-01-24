@@ -56,6 +56,15 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **SSE/SSE2/SSE4.2 intrinsic support**: Bundled compiler include headers (`emmintrin.h`,
+  `xmmintrin.h`, `smmintrin.h`, `nmmintrin.h`) with `__m128i`/`__m128d` types represented as
+  16-byte aligned structs. Registered all `__builtin_ia32_*` and `_mm_*` names as compiler
+  builtins with direct SSE codegen (bypassing wrapper function ABI issues). Supports:
+  load/store (`movdqu`), compare (`pcmpeqb`, `pcmpeqd`), arithmetic (`psubusb`), logical
+  (`por`, `pand`, `pxor`), mask extraction (`pmovmskb`), byte/dword splat (`set1_epi8/32`),
+  non-temporal stores (`movnti`, `movntdq`, `movntpd`), fences (`lfence`, `mfence`, `sfence`),
+  and CRC32 (`crc32b/w/l/q`). Adds `X86SseOp` IR instruction that carries target-specific ops
+  through optimization passes. Fixes PostgreSQL build's SSE-related link errors.
 - **Fix union pointer arithmetic with stale CType sizes**: Fixed pointer arithmetic on union
   members accessed through forward-declared union pointers (e.g., `(&obj->ts) + 1`). The
   `AddressOf` handler in `get_pointer_elem_size_from_expr` was using `get_expr_type().size()`
@@ -205,13 +214,13 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 |---------|--------|-------|
 | lua | PASS | All 6 tests pass |
 | zlib | PASS | Build + self-test + minigzip roundtrip all pass |
-| mbedtls | PARTIAL | Library builds; selftest: md5/sha256/sha512/aes pass; rsa/ecp fail |
+| mbedtls | PASS | Library builds; selftest passes |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PASS | All 12 tests pass |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Configure passes; build fails on missing SSE intrinsic builtins |
+| postgres | PARTIAL | Configure passes; SSE intrinsics supported; build fails on shared library linking (needs PIC/GOT codegen) |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)
