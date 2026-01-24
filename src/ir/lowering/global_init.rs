@@ -734,7 +734,7 @@ impl Lowerer {
                     }
                 }
                 // Pad values up to current_idx if needed
-                while values.len() <= current_idx {
+                while values.len() < current_idx {
                     values.push(self.zero_const(base_ty));
                 }
                 self.flatten_global_init_item(&item.init, base_ty, values);
@@ -748,13 +748,7 @@ impl Lowerer {
         } else {
             1
         };
-        // Total number of scalar elements this level covers
-        let total_scalar_elems = sub_elem_count * (if array_dim_strides[0] > 0 {
-            // number of sub-arrays at the parent level is determined by caller
-            // Here we just process items sequentially or by designator
-            0 // placeholder, we use values.len() tracking instead
-        } else { 0 });
-        let _ = total_scalar_elems;
+        let start_len = values.len();
         let mut current_outer_idx = 0usize;
         for item in items {
             // Check for multi-dimensional designators: [i][j]...
@@ -827,14 +821,13 @@ impl Lowerer {
             }
 
             // No designator: sequential processing
-            // Pad values up to current_outer_idx * sub_elem_count
-            let target_start = current_outer_idx * sub_elem_count;
-            while values.len() < target_start {
-                values.push(self.zero_const(base_ty));
-            }
-
             match &item.init {
                 Initializer::List(sub_items) => {
+                    // Braced sub-list: aligns to the next sub-array boundary
+                    let target_start = start_len + current_outer_idx * sub_elem_count;
+                    while values.len() < target_start {
+                        values.push(self.zero_const(base_ty));
+                    }
                     // Check for braced string literal initializing a char sub-array: { "abc" }
                     if sub_items.len() == 1 {
                         if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
@@ -849,20 +842,36 @@ impl Lowerer {
                     while values.len() < start_len + sub_elem_count {
                         values.push(self.zero_const(base_ty));
                     }
+                    current_outer_idx += 1;
                 }
                 Initializer::Expr(expr) => {
+                    // Bare scalar in a multi-dim array: fills the next sequential
+                    // scalar position (flat initialization without inner braces).
+                    // Per C standard, scalars fill in row-major order.
                     if let Expr::StringLiteral(s, _) = expr {
+                        let target_start = start_len + current_outer_idx * sub_elem_count;
+                        while values.len() < target_start {
+                            values.push(self.zero_const(base_ty));
+                        }
                         self.inline_string_to_values(s, sub_elem_count, base_ty, values);
+                        current_outer_idx += 1;
                     } else if let Some(val) = self.eval_const_expr(expr) {
-                        // Bare scalar: fills one base element, no sub-array padding
                         let expr_ty = self.get_expr_type(expr);
                         values.push(self.coerce_const_to_type_with_src(val, base_ty, expr_ty));
+                        // Update current_outer_idx based on relative position from start
+                        let relative_pos = values.len() - start_len;
+                        if sub_elem_count > 0 {
+                            current_outer_idx = (relative_pos + sub_elem_count - 1) / sub_elem_count;
+                        }
                     } else {
                         values.push(self.zero_const(base_ty));
+                        let relative_pos = values.len() - start_len;
+                        if sub_elem_count > 0 {
+                            current_outer_idx = (relative_pos + sub_elem_count - 1) / sub_elem_count;
+                        }
                     }
                 }
             }
-            current_outer_idx += 1;
         }
     }
 
