@@ -29,4 +29,4 @@ Real-world impact: Fixes the VFUNC/NARG variadic dispatch pattern used in redis
 (fmtargs.h), jq, and many C projects. This is the token-paste variant of the
 issue fixed in fix_funclike_macro_rescan_chaining.
 
-Status: In progress
+Status: Completed

@@ -169,8 +169,9 @@ impl MacroTable {
                                                         let (trail_args, trail_end) = self.parse_macro_args(&chars, k);
                                                         i = trail_end;
                                                         let trail_mac_clone = trail_mac.clone();
-                                                        // Remove the trailing macro name from expanded
-                                                        let prefix_len = expanded.len() - trail_ident.len();
+                                                        // Remove the trailing macro name (and any trailing whitespace) from expanded
+                                                        let trimmed_len = expanded.trim_end().len();
+                                                        let prefix_len = trimmed_len - trail_ident.len();
                                                         expanded.truncate(prefix_len);
                                                         let trail_expanded = self.expand_function_macro(&trail_mac_clone, &trail_args, expanding);
                                                         expanded.push_str(&trail_expanded);
@@ -710,9 +711,10 @@ impl Default for MacroTable {
 }
 
 /// Extract the trailing identifier from a string, if it ends with one.
-/// Returns Some(ident) if the string ends with an identifier.
+/// Returns Some(ident) if the string ends with an identifier (skipping trailing whitespace).
 fn extract_trailing_ident(s: &str) -> Option<String> {
-    let chars: Vec<char> = s.chars().collect();
+    let trimmed = s.trim_end();
+    let chars: Vec<char> = trimmed.chars().collect();
     if chars.is_empty() {
         return None;
     }
