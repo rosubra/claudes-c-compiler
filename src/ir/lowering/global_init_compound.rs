@@ -239,15 +239,15 @@ impl Lowerer {
             } else if inits.len() == 1 {
                 let item = inits[0];
 
-                // Check for nested designators: e.g., .u.keyword={"hello", -5}
-                // where item.designators = [Field("u"), Field("keyword")]
-                // The first designator was used to resolve the field index (fi),
-                // but remaining designators must drill into the sub-composite.
-                let has_nested_designator = item.designators.len() > 1
+                // Check for multi-level designators targeting a sub-field within this
+                // struct/union field (e.g., .u.keyword={"hello", -5} or .bs.keyword = {"STORE", -1}).
+                // The first designator resolved to this field; remaining designators
+                // target a sub-field within.
+                let has_nested_field_designator = item.designators.len() > 1
                     && matches!(item.designators.first(), Some(Designator::Field(_)));
 
-                if has_nested_designator {
-                    self.emit_compound_nested_designator_init(
+                if has_nested_field_designator {
+                    self.emit_compound_nested_designator_field(
                         &mut elements, item, &layout.fields[fi].ty, field_size);
                 } else {
                     // Check if this is a designated init for an array-of-pointer field
@@ -476,6 +476,108 @@ impl Lowerer {
             let field_is_pointer = matches!(field_ty, CType::Pointer(_) | CType::Function(_));
             self.emit_compound_field_init(elements, &item.init, field_ty, field_size, field_is_pointer);
         }
+    }
+
+    /// Emit a field whose initializer has multi-level designators targeting a sub-field
+    /// within this struct/union (e.g., .bs.keyword = {"STORE", -1}).
+    ///
+    /// Drills through the designator chain to find the target sub-field, then emits
+    /// the field data using compound (relocation-aware) initialization for the target
+    /// sub-field, with zero-fill for the rest of the outer field.
+    fn emit_compound_nested_designator_field(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        item: &InitializerItem,
+        outer_ty: &CType,
+        outer_size: usize,
+    ) {
+        // Drill through designators starting from the second one (first already resolved
+        // to this outer field). Track the byte offset within the outer field.
+        let mut current_ty = outer_ty.clone();
+        let mut sub_offset = 0usize;
+
+        for desig in &item.designators[1..] {
+            match desig {
+                Designator::Field(name) => {
+                    if let Some(sub_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+                        if let Some(fi) = sub_layout.resolve_init_field_idx(Some(name.as_str()), 0) {
+                            sub_offset += sub_layout.fields[fi].offset;
+                            current_ty = sub_layout.fields[fi].ty.clone();
+                        } else {
+                            // Field not found - zero fill the whole field
+                            push_zero_bytes(elements, outer_size);
+                            return;
+                        }
+                    } else {
+                        push_zero_bytes(elements, outer_size);
+                        return;
+                    }
+                }
+                Designator::Index(idx_expr) => {
+                    if let CType::Array(elem_ty, _) = &current_ty {
+                        let idx = self.eval_const_expr(idx_expr)
+                            .and_then(|c| c.to_usize())
+                            .unwrap_or(0);
+                        sub_offset += idx * elem_ty.size();
+                        current_ty = elem_ty.as_ref().clone();
+                    } else {
+                        push_zero_bytes(elements, outer_size);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Now current_ty is the target sub-field type at sub_offset within the outer field.
+        // Emit: [zero padding before sub_offset] [sub-field data] [zero padding after]
+        let sub_size = current_ty.size();
+        let sub_is_pointer = matches!(current_ty, CType::Pointer(_) | CType::Function(_));
+
+        // If the target is a struct/union and the init is a List, use compound struct init
+        // to properly handle pointer fields within it.
+        let sub_init_result = match &current_ty {
+            CType::Struct(_) | CType::Union(_) => {
+                if let Initializer::List(nested_items) = &item.init {
+                    if let Some(target_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+                        Some(self.lower_struct_global_init_compound(nested_items, &target_layout))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        // Emit zero bytes before the sub-field
+        push_zero_bytes(elements, sub_offset);
+
+        if let Some(sub_global_init) = sub_init_result {
+            // Flatten compound init into elements
+            match sub_global_init {
+                GlobalInit::Compound(sub_elems) => {
+                    let emitted = sub_elems.len();
+                    elements.extend(sub_elems);
+                    // Pad if the compound didn't fill the full sub_size
+                    // (compound should already handle this, but be safe)
+                    if emitted < sub_size {
+                        push_zero_bytes(elements, sub_size - emitted);
+                    }
+                }
+                _ => {
+                    // Shouldn't happen, but handle gracefully
+                    self.emit_compound_field_init(elements, &item.init, &current_ty, sub_size, sub_is_pointer);
+                }
+            }
+        } else {
+            // Non-struct target or Expr init - use standard compound field emit
+            self.emit_compound_field_init(elements, &item.init, &current_ty, sub_size, sub_is_pointer);
+        }
+
+        // Emit zero bytes after the sub-field to fill the rest of the outer field
+        let remaining = outer_size.saturating_sub(sub_offset + sub_size);
+        push_zero_bytes(elements, remaining);
     }
 
     /// Emit an array-of-pointers field from a braced initializer list.
@@ -873,24 +975,18 @@ impl Lowerer {
                             let is_ptr_array = Self::type_has_pointer_elements(&field.ty)
                                 && matches!(field.ty, CType::Array(..));
 
-                            // Handle nested designators: e.g., .bs.keyword={"GET", -1}
-                            // Strip first designator and drill into sub-composite
-                            let has_nested_designator = sub_item.designators.len() > 1
+                            // Handle multi-level designators (e.g., .bs.keyword={"GET", -1}
+                            // or .bs.keyword = {"STORE", -1}) that target a sub-field within
+                            // a struct/union field.
+                            let has_nested_field_designator = sub_item.designators.len() > 1
                                 && matches!(sub_item.designators.first(), Some(Designator::Field(_)));
 
-                            if has_nested_designator {
-                                let nested_sub_item = InitializerItem {
-                                    designators: sub_item.designators[1..].to_vec(),
-                                    init: sub_item.init.clone(),
-                                };
-                                if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
-                                    // Use fill_struct_global_bytes for byte-level data
-                                    self.fill_struct_global_bytes(
-                                        &[nested_sub_item.clone()], &sub_layout, &mut bytes, field_offset);
-                                    // Also check for pointer fields that need relocations
-                                    self.collect_ptr_ranges_from_nested_init(
-                                        &nested_sub_item, &sub_layout, field_offset, &mut ptr_ranges);
-                                }
+                            if has_nested_field_designator {
+                                // Drill through nested designators to find the target sub-field
+                                self.fill_nested_designator_with_ptrs(
+                                    sub_item, &field.ty, field_offset,
+                                    &mut bytes, &mut ptr_ranges,
+                                );
                                 current_field_idx = field_idx + 1;
                                 continue;
                             }
@@ -937,11 +1033,19 @@ impl Lowerer {
                                         }
                                     }
                                 } else if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
-                                    // Nested struct with braced init
-                                    self.fill_struct_global_bytes(inner_items, &sub_layout, &mut bytes, field_offset);
-                                    // Also collect pointer/function-pointer relocations from nested struct fields
-                                    self.collect_ptr_ranges_from_struct_init_list(
-                                        inner_items, &sub_layout, field_offset, &mut ptr_ranges);
+                                    // Nested struct with braced init - must handle pointer fields
+                                    let has_ptr = sub_layout.fields.iter().any(|f| {
+                                        matches!(f.ty, CType::Pointer(_) | CType::Function(_))
+                                        || Self::type_has_pointer_elements(&f.ty)
+                                    });
+                                    if has_ptr {
+                                        self.fill_nested_struct_with_ptrs(
+                                            inner_items, &sub_layout, field_offset,
+                                            &mut bytes, &mut ptr_ranges,
+                                        );
+                                    } else {
+                                        self.fill_struct_global_bytes(inner_items, &sub_layout, &mut bytes, field_offset);
+                                    }
                                 } else {
                                     // Array of scalars with braced init
                                     let elem_size = match &field.ty {
@@ -1013,5 +1117,205 @@ impl Lowerer {
         }
 
         GlobalInit::Compound(compound_elements)
+    }
+
+    /// Handle a multi-level designated initializer within a struct array element.
+    /// Drills through the designator chain (starting from the second designator)
+    /// to find the actual target sub-field, then writes integer values to the byte
+    /// buffer and records pointer relocations in ptr_ranges.
+    fn fill_nested_designator_with_ptrs(
+        &mut self,
+        item: &InitializerItem,
+        outer_ty: &CType,
+        outer_offset: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        // Drill through designators starting from the second one
+        let mut current_ty = outer_ty.clone();
+        let mut sub_offset = outer_offset;
+
+        for desig in &item.designators[1..] {
+            match desig {
+                Designator::Field(name) => {
+                    if let Some(sub_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+                        if let Some(fi) = sub_layout.resolve_init_field_idx(Some(name.as_str()), 0) {
+                            sub_offset += sub_layout.fields[fi].offset;
+                            current_ty = sub_layout.fields[fi].ty.clone();
+                        } else {
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
+                }
+                Designator::Index(idx_expr) => {
+                    if let CType::Array(elem_ty, _) = &current_ty {
+                        let idx = self.eval_const_expr(idx_expr)
+                            .and_then(|c| c.to_usize())
+                            .unwrap_or(0);
+                        sub_offset += idx * elem_ty.size();
+                        current_ty = elem_ty.as_ref().clone();
+                    } else {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Now current_ty is the target type and sub_offset is the byte offset.
+        // Handle the init value based on target type.
+        match &item.init {
+            Initializer::Expr(expr) => {
+                let is_ptr = matches!(current_ty, CType::Pointer(_) | CType::Function(_));
+                if is_ptr {
+                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                        ptr_ranges.push((sub_offset, addr_init));
+                    } else if let Some(val) = self.eval_const_expr(expr) {
+                        let ir_ty = IrType::from_ctype(&current_ty);
+                        self.write_const_to_bytes(bytes, sub_offset, &val, ir_ty);
+                    }
+                } else if let Some(val) = self.eval_const_expr(expr) {
+                    let ir_ty = IrType::from_ctype(&current_ty);
+                    self.write_const_to_bytes(bytes, sub_offset, &val, ir_ty);
+                }
+            }
+            Initializer::List(inner_items) => {
+                // The target is likely a struct - process each field
+                if let Some(target_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+                    let has_ptr = target_layout.fields.iter().any(|f| {
+                        matches!(f.ty, CType::Pointer(_) | CType::Function(_))
+                        || Self::type_has_pointer_elements(&f.ty)
+                    });
+                    if has_ptr {
+                        self.fill_nested_struct_with_ptrs(
+                            inner_items, &target_layout, sub_offset,
+                            bytes, ptr_ranges,
+                        );
+                    } else {
+                        self.fill_struct_global_bytes(inner_items, &target_layout, bytes, sub_offset);
+                    }
+                } else {
+                    // Fallback: try byte-level fill
+                    self.fill_struct_global_bytes(&[InitializerItem {
+                        designators: item.designators[1..].to_vec(),
+                        init: item.init.clone(),
+                    }], &StructLayout::for_union(&[]), bytes, sub_offset);
+                }
+            }
+        }
+    }
+
+    /// Fill a nested struct's fields into the byte buffer and ptr_ranges,
+    /// properly handling pointer/function pointer fields that need relocations.
+    /// This is used when a struct field with a braced initializer list contains
+    /// pointer-type sub-fields within a struct array element context.
+    fn fill_nested_struct_with_ptrs(
+        &mut self,
+        inner_items: &[InitializerItem],
+        sub_layout: &StructLayout,
+        base_offset: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let mut current_field_idx = 0usize;
+        for inner_item in inner_items {
+            // Handle multi-level designators within the nested struct (e.g., .config.i = &val)
+            if inner_item.designators.len() > 1 {
+                if let Some(Designator::Field(ref first_name)) = inner_item.designators.first() {
+                    if let Some(fi) = sub_layout.resolve_init_field_idx(Some(first_name.as_str()), current_field_idx) {
+                        let field = &sub_layout.fields[fi];
+                        let field_abs_offset = base_offset + field.offset;
+                        // Drill through remaining designators
+                        let mut current_ty = field.ty.clone();
+                        let mut sub_offset = field_abs_offset;
+                        for desig in &inner_item.designators[1..] {
+                            match desig {
+                                Designator::Field(name) => {
+                                    if let Some(dl) = self.get_struct_layout_for_ctype(&current_ty) {
+                                        if let Some(dfi) = dl.resolve_init_field_idx(Some(name.as_str()), 0) {
+                                            sub_offset += dl.fields[dfi].offset;
+                                            current_ty = dl.fields[dfi].ty.clone();
+                                        }
+                                    }
+                                }
+                                Designator::Index(idx_expr) => {
+                                    if let CType::Array(elem_ty, _) = &current_ty {
+                                        let idx = self.eval_const_expr(idx_expr)
+                                            .and_then(|c| c.to_usize())
+                                            .unwrap_or(0);
+                                        sub_offset += idx * elem_ty.size();
+                                        current_ty = elem_ty.as_ref().clone();
+                                    }
+                                }
+                            }
+                        }
+                        let is_ptr = matches!(current_ty, CType::Pointer(_) | CType::Function(_));
+                        if let Initializer::Expr(ref expr) = inner_item.init {
+                            if is_ptr {
+                                if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                                    ptr_ranges.push((sub_offset, addr_init));
+                                } else if let Some(val) = self.eval_const_expr(expr) {
+                                    let ir_ty = IrType::from_ctype(&current_ty);
+                                    self.write_const_to_bytes(bytes, sub_offset, &val, ir_ty);
+                                }
+                            } else if let Some(val) = self.eval_const_expr(expr) {
+                                let ir_ty = IrType::from_ctype(&current_ty);
+                                self.write_const_to_bytes(bytes, sub_offset, &val, ir_ty);
+                            }
+                        }
+                        current_field_idx = fi + 1;
+                        continue;
+                    }
+                }
+            }
+
+            let desig_name = match inner_item.designators.first() {
+                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                _ => None,
+            };
+            let field_idx = match sub_layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                Some(idx) => idx,
+                None => break,
+            };
+            let field = &sub_layout.fields[field_idx];
+            let field_abs_offset = base_offset + field.offset;
+            let is_ptr = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
+
+            if let Initializer::Expr(ref expr) = inner_item.init {
+                if is_ptr {
+                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                        ptr_ranges.push((field_abs_offset, addr_init));
+                    } else if let Some(val) = self.eval_const_expr(expr) {
+                        let ir_ty = IrType::from_ctype(&field.ty);
+                        self.write_const_to_bytes(bytes, field_abs_offset, &val, ir_ty);
+                    }
+                } else if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
+                    let val = self.eval_init_scalar(&inner_item.init);
+                    let ir_ty = IrType::from_ctype(&field.ty);
+                    self.write_bitfield_to_bytes(bytes, field_abs_offset, &val, ir_ty, bit_offset, bit_width);
+                } else if let Some(val) = self.eval_const_expr(expr) {
+                    let ir_ty = IrType::from_ctype(&field.ty);
+                    self.write_const_to_bytes(bytes, field_abs_offset, &val, ir_ty);
+                }
+            } else if let Initializer::List(ref nested_items) = inner_item.init {
+                // Recursively handle deeper nested structs
+                if let Some(nested_layout) = self.get_struct_layout_for_ctype(&field.ty) {
+                    let has_ptr = nested_layout.fields.iter().any(|f| {
+                        matches!(f.ty, CType::Pointer(_) | CType::Function(_))
+                        || Self::type_has_pointer_elements(&f.ty)
+                    });
+                    if has_ptr {
+                        self.fill_nested_struct_with_ptrs(
+                            nested_items, &nested_layout, field_abs_offset,
+                            bytes, ptr_ranges,
+                        );
+                    } else {
+                        self.fill_struct_global_bytes(nested_items, &nested_layout, bytes, field_abs_offset);
+                    }
+                }
+            }
+            current_field_idx = field_idx + 1;
+        }
     }
 }

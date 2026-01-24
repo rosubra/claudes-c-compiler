@@ -549,7 +549,7 @@ impl Lowerer {
 
     /// Check if a struct initializer list contains any fields that require address relocations.
     /// This handles flat init (where multiple items fill an array field), braced init,
-    /// and designated init patterns.
+    /// and designated init patterns, including multi-level designators like .u.field = {...}.
     pub(super) fn struct_init_has_addr_fields(&self, items: &[InitializerItem], layout: &StructLayout) -> bool {
         let mut current_field_idx = 0usize;
         let mut item_idx = 0usize;
@@ -567,26 +567,16 @@ impl Lowerer {
 
             let field_ty = &layout.fields[field_idx].ty;
 
-            // Handle nested designators: e.g., .u.keyword={"hello", -5}
-            // The item targets a sub-member of a struct/union field.
-            // We must check the designated sub-member for addr fields, not the
-            // outer field type directly.
+            // Handle multi-level designators (e.g., .u.keyword={"hello", -5} or
+            // .bs.keyword = {"STORE", -1}). When designators.len() > 1 and the first
+            // resolves to a struct/union, we need to drill into the nested type to
+            // check for address fields.
             let has_nested_designator = item.designators.len() > 1
                 && matches!(item.designators.first(), Some(Designator::Field(_)));
 
             if has_nested_designator {
-                // Drill into the sub-composite with remaining designators
-                let sub_item = InitializerItem {
-                    designators: item.designators[1..].to_vec(),
-                    init: item.init.clone(),
-                };
-                if let Some(sub_layout) = self.get_struct_layout_for_ctype(field_ty) {
-                    if self.struct_init_has_addr_fields(&[sub_item], &sub_layout) {
-                        return true;
-                    }
-                }
-                // Also check if the init itself contains addr exprs (fallback)
-                if self.init_has_addr_exprs(&item.init) {
+                // Drill through nested designators to find the actual target type
+                if self.nested_designator_has_addr_fields(item, field_ty) {
                     return true;
                 }
                 current_field_idx = field_idx + 1;
@@ -647,6 +637,79 @@ impl Lowerer {
             current_field_idx = field_idx + 1;
             item_idx += 1;
         }
+        false
+    }
+
+    /// Check if a multi-level designated initializer (e.g., .bs.keyword = {"STORE", -1})
+    /// contains address fields by drilling through the designator chain to find the
+    /// actual target type.
+    fn nested_designator_has_addr_fields(&self, item: &InitializerItem, outer_ty: &CType) -> bool {
+        // Strip the first designator and drill into the nested type
+        let mut current_ty = outer_ty.clone();
+        let mut desig_idx = 1; // Start from second designator (first already resolved)
+
+        while desig_idx < item.designators.len() {
+            match &item.designators[desig_idx] {
+                Designator::Field(name) => {
+                    // Resolve the field name in the current struct/union type
+                    if let Some(sub_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+                        if let Some(fi) = sub_layout.resolve_init_field_idx(Some(name.as_str()), 0) {
+                            current_ty = sub_layout.fields[fi].ty.clone();
+                            desig_idx += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                Designator::Index(_) => {
+                    // Array index designator - get element type
+                    if let CType::Array(elem_ty, _) = &current_ty {
+                        current_ty = elem_ty.as_ref().clone();
+                        desig_idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Now current_ty is the actual target type being initialized.
+        // Check if the init value contains address expressions that need relocations.
+        // The target type might be a struct with pointer members, a pointer itself, etc.
+        match &current_ty {
+            CType::Pointer(_) | CType::Function(_) => {
+                // Direct pointer field - check if init has addr expressions
+                return self.init_has_addr_exprs(&item.init);
+            }
+            _ => {}
+        }
+
+        // If target is a struct/union, check its fields for pointers
+        if let Some(target_layout) = self.get_struct_layout_for_ctype(&current_ty) {
+            // Check if any field in the target struct is a pointer type
+            let has_ptr_fields = target_layout.fields.iter().any(|f| {
+                Self::type_has_pointer_elements(&f.ty)
+            });
+            if has_ptr_fields && self.init_has_addr_exprs(&item.init) {
+                return true;
+            }
+            // Also recurse into the init list if it's a List
+            if let Initializer::List(nested_items) = &item.init {
+                if self.struct_init_has_addr_fields(nested_items, &target_layout) {
+                    return true;
+                }
+            }
+        }
+
+        // For arrays, check element type
+        if let CType::Array(elem_ty, _) = &current_ty {
+            if Self::type_has_pointer_elements(elem_ty) {
+                return self.init_has_addr_exprs(&item.init);
+            }
+        }
+
         false
     }
 

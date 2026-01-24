@@ -289,7 +289,7 @@ impl Lowerer {
                 8
             }
             Expr::AddressOf(inner, _) => {
-                // &x: pointer to typeof(x) — use sizeof_expr which correctly
+                // &x: pointer to typeof(x) -- use sizeof_expr which correctly
                 // resolves struct/union sizes via CType and struct_layouts,
                 // unlike get_expr_type().size() which returns 8 for all
                 // struct/union types (since they map to IrType::Ptr in the IR).

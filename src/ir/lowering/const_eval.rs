@@ -350,15 +350,9 @@ impl Lowerer {
                         }
                         None
                     }
-                    // &s.field or &s.a.b.c -> GlobalAddrOffset("s", cumulative_offset)
-                    Expr::MemberAccess(..) => {
-                        if let Some((global_name, offset)) = self.resolve_member_access_chain(inner) {
-                            if offset == 0 {
-                                return Some(GlobalInit::GlobalAddr(global_name));
-                            }
-                            return Some(GlobalInit::GlobalAddrOffset(global_name, offset as i64));
-                        }
-                        None
+                    // &s.field or &s.a.b.c -> GlobalAddrOffset("s", total_field_offset)
+                    Expr::MemberAccess(_, _, _) => {
+                        self.resolve_chained_member_access(inner)
                     }
                     _ => None,
                 }
@@ -516,6 +510,76 @@ impl Lowerer {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Resolve a chained member access expression like `s.a.b.c` to a global address.
+    /// Walks the chain from the root identifier, accumulating field offsets.
+    fn resolve_chained_member_access(&self, expr: &Expr) -> Option<GlobalInit> {
+        // Collect the chain of field names from innermost to outermost
+        let mut fields = Vec::new();
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::MemberAccess(base, field, _) => {
+                    fields.push(field.clone());
+                    current = base.as_ref();
+                }
+                Expr::Identifier(name, _) => {
+                    let global_name = self.resolve_to_global_name(name)?;
+                    let ginfo = self.globals.get(&global_name)?;
+                    // Walk from the root struct through the field chain
+                    let mut total_offset: i64 = 0;
+                    let mut current_layout = ginfo.struct_layout.clone()?;
+                    // fields are in reverse order (outermost field last)
+                    for field_name in fields.iter().rev() {
+                        let mut found = false;
+                        for f in &current_layout.fields {
+                            if f.name == *field_name {
+                                total_offset += f.offset as i64;
+                                // Try to get the layout of this field for further chaining
+                                current_layout = match &f.ty {
+                                    CType::Struct(st) => {
+                                        if let Some(ref tag) = st.name {
+                                            let key = format!("struct.{}", tag);
+                                            if let Some(layout) = self.struct_layouts.get(&key) {
+                                                layout.clone()
+                                            } else {
+                                                StructLayout::for_struct(&st.fields)
+                                            }
+                                        } else {
+                                            StructLayout::for_struct(&st.fields)
+                                        }
+                                    }
+                                    CType::Union(st) => {
+                                        if let Some(ref tag) = st.name {
+                                            let key = format!("union.{}", tag);
+                                            if let Some(layout) = self.struct_layouts.get(&key) {
+                                                layout.clone()
+                                            } else {
+                                                StructLayout::for_union(&st.fields)
+                                            }
+                                        } else {
+                                            StructLayout::for_union(&st.fields)
+                                        }
+                                    }
+                                    _ => StructLayout::for_struct(&[]),
+                                };
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            return None;
+                        }
+                    }
+                    if total_offset == 0 {
+                        return Some(GlobalInit::GlobalAddr(global_name));
+                    }
+                    return Some(GlobalInit::GlobalAddrOffset(global_name, total_offset));
+                }
+                _ => return None,
+            }
         }
     }
 

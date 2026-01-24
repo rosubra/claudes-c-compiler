@@ -898,11 +898,28 @@ impl Lowerer {
             self.get_expr_ctype(base_expr)?
         };
         // Look up field in the struct/union type
-        match base_ctype {
+        match &base_ctype {
             CType::Struct(st) | CType::Union(st) => {
-                for field in &st.fields {
-                    if field.name == field_name {
-                        return Some(field.ty.clone());
+                // If the struct/union has fields, search directly
+                if !st.fields.is_empty() {
+                    for field in &st.fields {
+                        if field.name == field_name {
+                            return Some(field.ty.clone());
+                        }
+                    }
+                }
+                // If fields are empty or field not found, try looking up from struct_layouts
+                // (handles forward-declared types whose full definition was registered later)
+                if let Some(tag) = &st.name {
+                    let is_union = matches!(&base_ctype, CType::Union(_));
+                    let prefix = if is_union { "union" } else { "struct" };
+                    let key = format!("{}.{}", prefix, tag);
+                    if let Some(layout) = self.struct_layouts.get(&key) {
+                        for field in &layout.fields {
+                            if field.name == field_name {
+                                return Some(field.ty.clone());
+                            }
+                        }
                     }
                 }
                 None
