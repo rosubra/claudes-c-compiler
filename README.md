@@ -129,9 +129,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 |---------|--------|-------|
 | lua | PASS | All 6 tests pass |
 | zlib | PASS | Build + self-test + minigzip roundtrip pass |
-| mbedtls | PARTIAL | Library builds; test programs have parser errors (expected Semicolon) |
+| mbedtls | PARTIAL | Library + test programs build; selftest crashes in AES-GCM-256, rsa/ecp segfault |
 | libpng | PARTIAL | Builds successfully; pngtest fails at runtime (IHDR parsing issue) |
-| jq | FAIL | Build timeout |
+| jq | PARTIAL | Builds successfully; --version passes, runtime segfaults on queries |
 | sqlite | FAIL | Not yet tested |
 | libjpeg-turbo | FAIL | Not yet tested |
 | redis | FAIL | Not yet tested |

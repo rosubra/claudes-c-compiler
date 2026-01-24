@@ -640,11 +640,20 @@ impl Lowerer {
         for decl in tu.decls.iter() {
             match decl {
                 ExternalDecl::FunctionDef(func) => {
-                    // Skip unreferenced static functions (e.g., static inline from headers
-                    // that are never called). This avoids lowering 100+ unused header functions.
-                    if (func.is_static || func.is_inline)
-                        && !referenced_statics.contains(&func.name)
-                    {
+                    // Skip unreferenced static/static-inline functions (e.g., static inline
+                    // from headers that are never called). Non-static inline functions must
+                    // still be emitted because they have external linkage (GNU inline semantics)
+                    // and may be referenced from other translation units.
+                    let can_skip = if func.is_static {
+                        // static or static inline: internal linkage, safe to skip if unreferenced
+                        true
+                    } else if func.is_inline {
+                        // plain inline (non-static): external linkage, must emit
+                        false
+                    } else {
+                        false
+                    };
+                    if can_skip && !referenced_statics.contains(&func.name) {
                         continue;
                     }
                     self.lower_function(func);

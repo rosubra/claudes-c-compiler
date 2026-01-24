@@ -93,14 +93,15 @@ impl MacroTable {
 
                 // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
                 // A pp-number is: digit (digit|letter|.|e[+-]|p[+-])*
-                // We check the last characters in 'result' (the actual output so far) rather than
-                // chars[start-1] (the original input), because macro expansion may have changed
-                // the preceding context. For example, in `FOO(1).BAR(2)`, after FOO(1) expands to
-                // `1 `, the `.` that follows should not make BAR a pp-number suffix.
+                // or: . digit (digit|letter|.|e[+-]|p[+-])*
+                // We check the output built so far in 'result' to determine if the current
+                // identifier is a continuation of a pp-number token.
                 //
-                // We must be careful: "base+GETARG" should NOT treat GETARG as pp-number suffix
-                // even though 'base' ends in 'e' and '+' follows (looks like an exponent but isn't).
-                // We verify the exponent 'e'/'p' is itself preceded by a hex digit.
+                // Key insight: a pp-number must START with a digit (or .digit). So when we
+                // see a potential pp-number suffix pattern (e.g., e+<ident>), we trace back
+                // through the entire token to verify it originates from a digit. This prevents
+                // false positives like "source+D2U" where 'source' ends in 'e' but is an
+                // identifier, not a pp-number.
                 let is_ppnumber_suffix = {
                     let result_bytes = result.as_bytes();
                     let rlen = result_bytes.len();
@@ -115,17 +116,49 @@ impl MacroTable {
                             // After digit-dot: e.g., "1.f", "3.14e"
                             true
                         } else if (prev == b'+' || prev == b'-') && rlen >= 3
-                            && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P')
-                            && result_bytes[rlen - 3].is_ascii_hexdigit() {
-                            // After exponent sign where the e/p is preceded by a hex digit:
-                            // e.g., "1e+f" (valid pp-number), but NOT "base+X" (identifier + operator)
-                            true
+                            && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P') {
+                            // Potential exponent sign (e.g., "1e+f", "0x1p-2").
+                            // Walk backwards through the result to find the start of this
+                            // pp-number token and verify it begins with a digit.
+                            is_ppnumber_context(result_bytes, rlen - 3)
                         } else {
                             false
                         }
                     }
                 };
                 if is_ppnumber_suffix {
+                    result.push_str(&ident);
+                    continue;
+                }
+
+                // Handle _Pragma("string") operator (C99 §6.10.9).
+                // _Pragma is consumed and discarded since we don't implement
+                // any pragmas that affect code generation (diagnostic push/pop, etc.)
+                if ident == "_Pragma" {
+                    // Skip whitespace to find '('
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < len && chars[j] == '(' {
+                        // Skip the entire parenthesized argument
+                        let mut depth = 1;
+                        j += 1;
+                        while j < len && depth > 0 {
+                            if chars[j] == '(' {
+                                depth += 1;
+                            } else if chars[j] == ')' {
+                                depth -= 1;
+                            } else if chars[j] == '"' || chars[j] == '\'' {
+                                j = skip_literal(&chars, j, chars[j]);
+                                continue;
+                            }
+                            j += 1;
+                        }
+                        i = j;
+                        continue;
+                    }
+                    // No '(' follows - emit _Pragma as-is (shouldn't happen in valid code)
                     result.push_str(&ident);
                     continue;
                 }
@@ -707,6 +740,41 @@ impl MacroTable {
 impl Default for MacroTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Check whether position `pos` in `bytes` is part of a pp-number token.
+/// A pp-number must originate from a digit (or .digit). This walks backwards
+/// through valid pp-number continuation characters to find the token start
+/// and checks if it begins with a digit.
+fn is_ppnumber_context(bytes: &[u8], pos: usize) -> bool {
+    // Walk backwards through characters that are valid pp-number continuations:
+    // digits, letters, underscores, dots, and e/E/p/P followed by +/-
+    let mut j = pos;
+    loop {
+        let ch = bytes[j];
+        if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' {
+            // Valid pp-number continuation character
+            if j == 0 {
+                // Reached the start of the string; check if this char is a digit
+                return ch.is_ascii_digit();
+            }
+            j -= 1;
+        } else if (ch == b'+' || ch == b'-') && j >= 1
+            && matches!(bytes[j - 1], b'e' | b'E' | b'p' | b'P')
+        {
+            // Exponent sign preceded by e/E/p/P - skip both
+            if j < 2 {
+                return false;
+            }
+            j -= 2;
+        } else {
+            // Not a pp-number character; the token starts at j+1
+            let start = bytes[j + 1];
+            // A pp-number starts with a digit or with '.' followed by a digit
+            return start.is_ascii_digit()
+                || (start == b'.' && j + 2 <= pos && bytes[j + 2].is_ascii_digit());
+        }
     }
 }
 
