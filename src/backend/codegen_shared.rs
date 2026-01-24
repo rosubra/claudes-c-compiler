@@ -145,10 +145,60 @@ pub trait ArchCodegen {
     fn emit_store_result(&mut self, dest: &Value);
 
     /// Emit a store instruction: store val to the address in ptr.
-    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType);
+    /// Default implementation uses i128 pair ops and slot primitives.
+    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_load_acc_pair(val);
+            if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+                if self.state_ref().is_alloca(ptr.0) {
+                    self.emit_store_pair_to_slot(slot);
+                } else {
+                    self.emit_save_acc_pair();
+                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_store_pair_indirect();
+                }
+            }
+            return;
+        }
+        self.emit_load_operand(val);
+        if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+            let store_instr = self.store_instr_for_type(ty);
+            if self.state_ref().is_alloca(ptr.0) {
+                self.emit_typed_store_to_slot(store_instr, ty, slot);
+            } else {
+                self.emit_save_acc();
+                self.emit_load_ptr_from_slot(slot);
+                self.emit_typed_store_indirect(store_instr, ty);
+            }
+        }
+    }
 
     /// Emit a load instruction: load from the address in ptr to dest.
-    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType);
+    /// Default implementation uses i128 pair ops and slot primitives.
+    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+                if self.state_ref().is_alloca(ptr.0) {
+                    self.emit_load_pair_from_slot(slot);
+                } else {
+                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_load_pair_indirect();
+                }
+                self.emit_store_acc_pair(dest);
+            }
+            return;
+        }
+        if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+            let load_instr = self.load_instr_for_type(ty);
+            if self.state_ref().is_alloca(ptr.0) {
+                self.emit_typed_load_from_slot(load_instr, slot);
+            } else {
+                self.emit_load_ptr_from_slot(slot);
+                self.emit_typed_load_indirect(load_instr);
+            }
+            self.emit_store_result(dest);
+        }
+    }
 
     /// Emit a binary operation. Default: dispatches float/integer ops via
     /// `emit_float_binop` and `emit_int_binop` primitives.
@@ -171,7 +221,37 @@ pub trait ArchCodegen {
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a unary operation.
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType);
+    /// Default dispatches i128/float/int to arch-specific primitives.
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_load_acc_pair(src);
+            match op {
+                IrUnaryOp::Neg => self.emit_i128_neg(),
+                IrUnaryOp::Not => self.emit_i128_not(),
+                _ => {} // Clz/Ctz/Bswap/Popcount not expected for 128-bit
+            }
+            self.emit_store_acc_pair(dest);
+            return;
+        }
+        self.emit_load_operand(src);
+        if ty.is_float() {
+            match op {
+                IrUnaryOp::Neg => self.emit_float_neg(ty),
+                IrUnaryOp::Not => self.emit_int_not(ty),
+                _ => {} // Clz/Ctz/Bswap/Popcount not applicable to floats
+            }
+        } else {
+            match op {
+                IrUnaryOp::Neg => self.emit_int_neg(ty),
+                IrUnaryOp::Not => self.emit_int_not(ty),
+                IrUnaryOp::Clz => self.emit_int_clz(ty),
+                IrUnaryOp::Ctz => self.emit_int_ctz(ty),
+                IrUnaryOp::Bswap => self.emit_int_bswap(ty),
+                IrUnaryOp::Popcount => self.emit_int_popcount(ty),
+            }
+        }
+        self.emit_store_result(dest);
+    }
 
     /// Emit a comparison operation.
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
@@ -189,7 +269,16 @@ pub trait ArchCodegen {
     fn emit_global_addr(&mut self, dest: &Value, name: &str);
 
     /// Emit a get-element-pointer (base + offset).
-    fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand);
+    /// Default: load base address to secondary reg, load offset to acc, add, store.
+    fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
+        if let Some(slot) = self.state_ref().get_slot(base.0) {
+            let is_alloca = self.state_ref().is_alloca(base.0);
+            self.emit_slot_addr_to_secondary(slot, is_alloca);
+        }
+        self.emit_load_operand(offset);
+        self.emit_add_secondary_to_acc();
+        self.emit_store_result(dest);
+    }
 
     /// Emit architecture-specific instructions for a type cast, after the source
     /// value has been loaded into the accumulator. Does NOT load/store—only emits
@@ -205,7 +294,18 @@ pub trait ArchCodegen {
     }
 
     /// Emit a memory copy: copy `size` bytes from src address to dest address.
-    fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize);
+    /// Default: loads dest/src addresses via slot primitives, then calls emit_memcpy_impl.
+    fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
+        if let Some(dst_slot) = self.state_ref().get_slot(dest.0) {
+            let is_alloca = self.state_ref().is_alloca(dest.0);
+            self.emit_memcpy_load_dest_addr(dst_slot, is_alloca);
+        }
+        if let Some(src_slot) = self.state_ref().get_slot(src.0) {
+            let is_alloca = self.state_ref().is_alloca(src.0);
+            self.emit_memcpy_load_src_addr(src_slot, is_alloca);
+        }
+        self.emit_memcpy_impl(size);
+    }
 
     /// Emit va_arg: extract next variadic argument from va_list and store to dest.
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType);
@@ -245,6 +345,123 @@ pub trait ArchCodegen {
     // ---- Architecture-specific instruction primitives ----
     // These small methods provide the building blocks for default implementations
     // of higher-level codegen methods, avoiding duplication across backends.
+
+    // --- 128-bit (accumulator pair) primitives ---
+    // Convention: each arch uses a register pair for 128-bit values:
+    //   x86: rax:rdx, ARM: x0:x1, RISC-V: t0:t1
+
+    /// Load an operand into the accumulator pair (rax:rdx / x0:x1 / t0:t1).
+    fn emit_load_acc_pair(&mut self, op: &Operand);
+
+    /// Store the accumulator pair to a value's 16-byte stack slot.
+    fn emit_store_acc_pair(&mut self, dest: &Value);
+
+    /// Store the accumulator pair directly to a stack slot (alloca case for i128 store).
+    fn emit_store_pair_to_slot(&mut self, slot: StackSlot);
+
+    /// Load the accumulator pair from a stack slot (alloca case for i128 load).
+    fn emit_load_pair_from_slot(&mut self, slot: StackSlot);
+
+    /// Save the accumulator pair to scratch regs before loading a pointer (i128 indirect store).
+    fn emit_save_acc_pair(&mut self);
+
+    /// Store the saved accumulator pair through the pointer now in the scratch/addr reg (i128 indirect store).
+    fn emit_store_pair_indirect(&mut self);
+
+    /// Load the accumulator pair through the pointer now in the scratch/addr reg (i128 indirect load).
+    fn emit_load_pair_indirect(&mut self);
+
+    /// Emit 128-bit negate on the accumulator pair.
+    fn emit_i128_neg(&mut self);
+
+    /// Emit 128-bit bitwise NOT on the accumulator pair.
+    fn emit_i128_not(&mut self);
+
+    // --- Typed store/load primitives ---
+    // Used by emit_store/emit_load defaults for non-i128 paths.
+
+    /// Return the store instruction mnemonic for a type (e.g., "movb"/"strb"/"sb").
+    fn store_instr_for_type(&self, ty: IrType) -> &'static str;
+
+    /// Return the load instruction mnemonic for a type (e.g., "movzbl"/"ldrb"/"lbu").
+    fn load_instr_for_type(&self, ty: IrType) -> &'static str;
+
+    /// Store the accumulator to a slot using a typed instruction (alloca direct store).
+    fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot);
+
+    /// Load from a slot into the accumulator using a typed instruction (alloca direct load).
+    fn emit_typed_load_from_slot(&mut self, instr: &'static str, slot: StackSlot);
+
+    /// Save the accumulator to a scratch register (for indirect store: save val, then load ptr).
+    fn emit_save_acc(&mut self);
+
+    /// Load a pointer value from a non-alloca slot into the address register.
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot);
+
+    /// Store the saved accumulator through the address register (indirect typed store).
+    fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType);
+
+    /// Load through the address register into the accumulator (indirect typed load).
+    fn emit_typed_load_indirect(&mut self, instr: &'static str);
+
+    // --- GEP primitives ---
+
+    /// Load a slot's effective address (alloca) or pointer value (non-alloca) into a secondary register.
+    /// The secondary register is used to hold the base while the accumulator loads the offset.
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool);
+
+    /// Add the secondary register to the accumulator (base + offset for GEP).
+    fn emit_add_secondary_to_acc(&mut self);
+
+    // --- Dynamic alloca primitives ---
+
+    /// Round up the accumulator to 16-byte alignment: acc = (acc + 15) & -16.
+    fn emit_round_up_acc_to_16(&mut self);
+
+    /// Subtract the accumulator from the stack pointer.
+    fn emit_sub_sp_by_acc(&mut self);
+
+    /// Move the stack pointer value into the accumulator.
+    fn emit_mov_sp_to_acc(&mut self);
+
+    /// Align the accumulator to the given alignment: acc = (acc + align-1) & -align.
+    fn emit_align_acc(&mut self, align: usize);
+
+    // --- Memcpy primitives ---
+
+    /// Load the dest address for memcpy into the arch-specific dest register.
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool);
+
+    /// Load the src address for memcpy into the arch-specific src register.
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool);
+
+    /// Emit the actual copy loop/instruction for memcpy (after addresses are loaded).
+    fn emit_memcpy_impl(&mut self, size: usize);
+
+    // --- Unary operation primitives ---
+
+    /// Emit float negation on the accumulator.
+    fn emit_float_neg(&mut self, ty: IrType);
+
+    /// Emit integer negation on the accumulator.
+    fn emit_int_neg(&mut self, ty: IrType);
+
+    /// Emit integer bitwise NOT on the accumulator.
+    fn emit_int_not(&mut self, ty: IrType);
+
+    /// Emit count-leading-zeros on the accumulator.
+    fn emit_int_clz(&mut self, ty: IrType);
+
+    /// Emit count-trailing-zeros on the accumulator.
+    fn emit_int_ctz(&mut self, ty: IrType);
+
+    /// Emit byte-swap on the accumulator.
+    fn emit_int_bswap(&mut self, ty: IrType);
+
+    /// Emit population count on the accumulator.
+    fn emit_int_popcount(&mut self, ty: IrType);
+
+    // --- Control flow primitives ---
 
     /// The unconditional jump mnemonic for this architecture.
     /// x86: "jmp", ARM: "b", RISC-V: "j"
@@ -314,7 +531,19 @@ pub trait ArchCodegen {
 
     /// Emit dynamic stack allocation: subtract size from stack pointer,
     /// align the result, and store the pointer in dest.
-    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize);
+    /// Default: load size, round up to 16, subtract from SP, optionally over-align.
+    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
+        self.emit_load_operand(size);
+        self.emit_round_up_acc_to_16();
+        self.emit_sub_sp_by_acc();
+        if align > 16 {
+            self.emit_mov_sp_to_acc();
+            self.emit_align_acc(align);
+        } else {
+            self.emit_mov_sp_to_acc();
+        }
+        self.emit_store_result(dest);
+    }
 
     /// Emit a 128-bit value copy (src -> dest, both 16-byte stack slots).
     /// Default: truncates to 64-bit (used by ARM/RISC-V where i128 is not fully supported).

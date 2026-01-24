@@ -23,13 +23,19 @@ Completed items:
   Each backend implements InlineAsmEmitter with arch-specific constraint classification,
   register pools, load/store, and template substitution.
 
+- emit_store/emit_load: Default trait implementations handle i128 pair + typed store/load
+  with alloca/indirect dispatch. Each backend provides small primitives (emit_load_acc_pair,
+  emit_store_pair_to_slot, emit_typed_store_to_slot, emit_load_ptr_from_slot, etc.).
+- emit_gep: Default uses emit_slot_addr_to_secondary + emit_add_secondary_to_acc.
+- emit_dyn_alloca: Default uses emit_round_up_acc_to_16, emit_sub_sp_by_acc, etc.
+- emit_unaryop: Default dispatches i128/float/int then calls per-operation primitives
+  (emit_float_neg, emit_int_clz, emit_int_bswap, etc.).
+- emit_memcpy: Default loads addresses via emit_memcpy_load_dest/src_addr, then calls
+  emit_memcpy_impl for the arch-specific copy loop.
+
 Remaining opportunities (diminishing returns):
 
 1. Parameter classification: emit_store_params and emit_call all independently classify
    params as int-reg/float-reg/stack. A shared classify_params() helper could reduce this,
    but the three ABIs differ significantly (x86-64 SysV, AAPCS64, RISC-V LP64D), so the
    benefit is lower.
-
-2. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
-   modes (ARM post-increment vs RISC-V explicit pointer advance). x86 uses rep movsb.
-   The savings are marginal (~10 lines) since the loop bodies are structurally different.

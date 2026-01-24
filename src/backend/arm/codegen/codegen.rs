@@ -548,6 +548,19 @@ impl ArmCodegen {
         }
     }
 
+    /// Parse a load instruction token into the actual ARM instruction and destination register.
+    /// ARM's "ldr" instruction is width-polymorphic (the register determines access width),
+    /// so load_instr_for_type returns "ldr32"/"ldr64" tokens to distinguish 32-bit from 64-bit.
+    fn arm_parse_load(instr: &'static str) -> (&'static str, &'static str) {
+        match instr {
+            "ldr32" => ("ldr", "w0"),
+            "ldr64" => ("ldr", "x0"),
+            "ldrb" | "ldrh" => (instr, "w0"),
+            // ldrsb, ldrsh, ldrsw all sign-extend into x0
+            _ => (instr, "x0"),
+        }
+    }
+
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -820,69 +833,218 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
-        if is_i128_type(ty) {
-            // 128-bit store: load value into x0:x1, then store both halves
-            self.operand_to_x0_x1(val);
-            if let Some(slot) = self.state.get_slot(ptr.0) {
-                if self.state.is_alloca(ptr.0) {
-                    self.emit_store_to_sp("x0", slot.0, "str");
-                    self.emit_store_to_sp("x1", slot.0 + 8, "str");
-                } else {
-                    // ptr is indirect: save x0:x1, load ptr, then store
-                    self.state.emit("    mov x2, x0");
-                    self.state.emit("    mov x3, x1");
-                    self.emit_load_from_sp("x4", slot.0, "ldr");
-                    self.state.emit("    str x2, [x4]");
-                    self.state.emit("    str x3, [x4, #8]");
-                }
-            }
-            return;
-        }
-        self.operand_to_x0(val);
-        if let Some(slot) = self.state.get_slot(ptr.0) {
-            if self.state.is_alloca(ptr.0) {
-                let store_instr = Self::str_for_type(ty);
-                let reg = Self::reg_for_type("x0", ty);
-                self.emit_store_to_sp(reg, slot.0, store_instr);
-            } else {
-                self.state.emit("    mov x1, x0");
-                self.emit_load_from_sp("x2", slot.0, "ldr");
-                let store_instr = Self::str_for_type(ty);
-                let reg = Self::reg_for_type("x1", ty);
-                self.state.emit(&format!("    {} {}, [x2]", store_instr, reg));
-            }
+    // ---- Primitives for shared default implementations ----
+
+    fn emit_load_acc_pair(&mut self, op: &Operand) {
+        self.operand_to_x0_x1(op);
+    }
+
+    fn emit_store_acc_pair(&mut self, dest: &Value) {
+        self.store_x0_x1_to(dest);
+    }
+
+    fn emit_store_pair_to_slot(&mut self, slot: StackSlot) {
+        self.emit_store_to_sp("x0", slot.0, "str");
+        self.emit_store_to_sp("x1", slot.0 + 8, "str");
+    }
+
+    fn emit_load_pair_from_slot(&mut self, slot: StackSlot) {
+        self.emit_load_from_sp("x0", slot.0, "ldr");
+        self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
+    }
+
+    fn emit_save_acc_pair(&mut self) {
+        self.state.emit("    mov x2, x0");
+        self.state.emit("    mov x3, x1");
+    }
+
+    fn emit_store_pair_indirect(&mut self) {
+        // pair saved to x2:x3, ptr in x9
+        self.state.emit("    str x2, [x9]");
+        self.state.emit("    str x3, [x9, #8]");
+    }
+
+    fn emit_load_pair_indirect(&mut self) {
+        // ptr in x9
+        self.state.emit("    ldr x0, [x9]");
+        self.state.emit("    ldr x1, [x9, #8]");
+    }
+
+    fn emit_i128_neg(&mut self) {
+        self.state.emit("    mvn x0, x0");
+        self.state.emit("    mvn x1, x1");
+        self.state.emit("    adds x0, x0, #1");
+        self.state.emit("    adc x1, x1, xzr");
+    }
+
+    fn emit_i128_not(&mut self) {
+        self.state.emit("    mvn x0, x0");
+        self.state.emit("    mvn x1, x1");
+    }
+
+    fn store_instr_for_type(&self, ty: IrType) -> &'static str {
+        Self::str_for_type(ty)
+    }
+
+    fn load_instr_for_type(&self, ty: IrType) -> &'static str {
+        // Use distinct tokens so emit_typed_load_from_slot/emit_typed_load_indirect
+        // can determine the correct destination register for ARM's width-polymorphic "ldr".
+        // "ldr" on ARM uses the register operand to determine access width (w0=32-bit, x0=64-bit),
+        // so we encode the width in the token: "ldr32" for 32-bit, "ldr64" for 64-bit.
+        match ty {
+            IrType::I8 => "ldrsb",
+            IrType::U8 => "ldrb",
+            IrType::I16 => "ldrsh",
+            IrType::U16 => "ldrh",
+            IrType::I32 => "ldrsw",
+            IrType::U32 | IrType::F32 => "ldr32",
+            _ => "ldr64",
         }
     }
 
-    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
-        if is_i128_type(ty) {
-            // 128-bit load: load both halves into x0:x1
-            if let Some(slot) = self.state.get_slot(ptr.0) {
-                if self.state.is_alloca(ptr.0) {
-                    self.emit_load_from_sp("x0", slot.0, "ldr");
-                    self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
-                } else {
-                    self.emit_load_from_sp("x2", slot.0, "ldr");
-                    self.state.emit("    ldr x0, [x2]");
-                    self.state.emit("    ldr x1, [x2, #8]");
-                }
-                self.store_x0_x1_to(dest);
-            }
-            return;
+    fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) {
+        let reg = Self::reg_for_type("x0", ty);
+        self.emit_store_to_sp(reg, slot.0, instr);
+    }
+
+    fn emit_typed_load_from_slot(&mut self, instr: &'static str, slot: StackSlot) {
+        let (actual_instr, dest_reg) = Self::arm_parse_load(instr);
+        self.emit_load_from_sp(dest_reg, slot.0, actual_instr);
+    }
+
+    fn emit_save_acc(&mut self) {
+        self.state.emit("    mov x1, x0");
+    }
+
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot) {
+        self.emit_load_from_sp("x9", slot.0, "ldr");
+    }
+
+    fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType) {
+        let reg = Self::reg_for_type("x1", ty);
+        self.state.emit(&format!("    {} {}, [x9]", instr, reg));
+    }
+
+    fn emit_typed_load_indirect(&mut self, instr: &'static str) {
+        let (actual_instr, dest_reg) = Self::arm_parse_load(instr);
+        self.state.emit(&format!("    {} {}, [x9]", actual_instr, dest_reg));
+    }
+
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool) {
+        if is_alloca {
+            self.emit_add_sp_offset("x1", slot.0);
+        } else {
+            self.emit_load_from_sp("x1", slot.0, "ldr");
         }
-        if let Some(slot) = self.state.get_slot(ptr.0) {
-            let load_instr = Self::ldr_for_type(ty);
-            let dest_reg = Self::load_dest_reg(ty);
-            if self.state.is_alloca(ptr.0) {
-                self.emit_load_from_sp(dest_reg, slot.0, load_instr);
-            } else {
-                self.emit_load_from_sp("x0", slot.0, "ldr");
-                self.state.emit("    mov x1, x0");
-                self.state.emit(&format!("    {} {}, [x1]", load_instr, dest_reg));
-            }
-            self.store_x0_to(dest);
+    }
+
+    fn emit_add_secondary_to_acc(&mut self) {
+        self.state.emit("    add x0, x1, x0");
+    }
+
+    fn emit_round_up_acc_to_16(&mut self) {
+        self.state.emit("    add x0, x0, #15");
+        self.state.emit("    and x0, x0, #-16");
+    }
+
+    fn emit_sub_sp_by_acc(&mut self) {
+        self.state.emit("    sub sp, sp, x0");
+    }
+
+    fn emit_mov_sp_to_acc(&mut self) {
+        self.state.emit("    mov x0, sp");
+    }
+
+    fn emit_align_acc(&mut self, align: usize) {
+        self.state.emit(&format!("    add x0, x0, #{}", align - 1));
+        self.state.emit(&format!("    and x0, x0, #{}", -(align as i64)));
+    }
+
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+        if is_alloca {
+            self.emit_add_sp_offset("x9", slot.0);
+        } else {
+            self.emit_load_from_sp("x9", slot.0, "ldr");
         }
+    }
+
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+        if is_alloca {
+            self.emit_add_sp_offset("x10", slot.0);
+        } else {
+            self.emit_load_from_sp("x10", slot.0, "ldr");
+        }
+    }
+
+    fn emit_memcpy_impl(&mut self, size: usize) {
+        let label_id = self.state.next_label_id();
+        let loop_label = format!(".Lmemcpy_loop_{}", label_id);
+        let done_label = format!(".Lmemcpy_done_{}", label_id);
+        self.load_large_imm("x11", size as i64);
+        self.state.emit(&format!("{}:", loop_label));
+        self.state.emit(&format!("    cbz x11, {}", done_label));
+        self.state.emit("    ldrb w12, [x10], #1");
+        self.state.emit("    strb w12, [x9], #1");
+        self.state.emit("    sub x11, x11, #1");
+        self.state.emit(&format!("    b {}", loop_label));
+        self.state.emit(&format!("{}:", done_label));
+    }
+
+    fn emit_float_neg(&mut self, ty: IrType) {
+        if ty == IrType::F32 {
+            self.state.emit("    fmov s0, w0");
+            self.state.emit("    fneg s0, s0");
+            self.state.emit("    fmov w0, s0");
+            self.state.emit("    mov w0, w0"); // zero-extend
+        } else {
+            self.state.emit("    fmov d0, x0");
+            self.state.emit("    fneg d0, d0");
+            self.state.emit("    fmov x0, d0");
+        }
+    }
+
+    fn emit_int_neg(&mut self, _ty: IrType) {
+        self.state.emit("    neg x0, x0");
+    }
+
+    fn emit_int_not(&mut self, _ty: IrType) {
+        self.state.emit("    mvn x0, x0");
+    }
+
+    fn emit_int_clz(&mut self, ty: IrType) {
+        if ty == IrType::I32 || ty == IrType::U32 {
+            self.state.emit("    clz w0, w0");
+        } else {
+            self.state.emit("    clz x0, x0");
+        }
+    }
+
+    fn emit_int_ctz(&mut self, ty: IrType) {
+        if ty == IrType::I32 || ty == IrType::U32 {
+            self.state.emit("    rbit w0, w0");
+            self.state.emit("    clz w0, w0");
+        } else {
+            self.state.emit("    rbit x0, x0");
+            self.state.emit("    clz x0, x0");
+        }
+    }
+
+    fn emit_int_bswap(&mut self, ty: IrType) {
+        if ty == IrType::I16 || ty == IrType::U16 {
+            self.state.emit("    rev w0, w0");
+            self.state.emit("    lsr w0, w0, #16");
+        } else if ty == IrType::I32 || ty == IrType::U32 {
+            self.state.emit("    rev w0, w0");
+        } else {
+            self.state.emit("    rev x0, x0");
+        }
+    }
+
+    fn emit_int_popcount(&mut self, _ty: IrType) {
+        self.state.emit("    fmov d0, x0");
+        self.state.emit("    cnt v0.8b, v0.8b");
+        self.state.emit("    uaddlv h0, v0.8b");
+        self.state.emit("    fmov w0, s0");
     }
 
     fn emit_float_binop(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
@@ -985,87 +1147,6 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        self.store_x0_to(dest);
-    }
-
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
-        if is_i128_type(ty) {
-            self.operand_to_x0_x1(src);
-            match op {
-                IrUnaryOp::Neg => {
-                    // 128-bit negate: ~x + 1
-                    self.state.emit("    mvn x0, x0");
-                    self.state.emit("    mvn x1, x1");
-                    self.state.emit("    adds x0, x0, #1");
-                    self.state.emit("    adc x1, x1, xzr");
-                }
-                IrUnaryOp::Not => {
-                    // 128-bit bitwise NOT
-                    self.state.emit("    mvn x0, x0");
-                    self.state.emit("    mvn x1, x1");
-                }
-                _ => {} // Clz/Ctz/Bswap/Popcount not expected for 128-bit
-            }
-            self.store_x0_x1_to(dest);
-            return;
-        }
-        self.operand_to_x0(src);
-        if ty.is_float() {
-            match op {
-                IrUnaryOp::Neg => {
-                    if ty == IrType::F32 {
-                        self.state.emit("    fmov s0, w0");
-                        self.state.emit("    fneg s0, s0");
-                        self.state.emit("    fmov w0, s0");
-                        self.state.emit("    mov w0, w0"); // zero-extend
-                    } else {
-                        self.state.emit("    fmov d0, x0");
-                        self.state.emit("    fneg d0, d0");
-                        self.state.emit("    fmov x0, d0");
-                    }
-                }
-                IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
-                _ => {} // Clz/Ctz/Bswap/Popcount not applicable to floats
-            }
-        } else {
-            match op {
-                IrUnaryOp::Neg => self.state.emit("    neg x0, x0"),
-                IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
-                IrUnaryOp::Clz => {
-                    if ty == IrType::I32 || ty == IrType::U32 {
-                        self.state.emit("    clz w0, w0");
-                    } else {
-                        self.state.emit("    clz x0, x0");
-                    }
-                }
-                IrUnaryOp::Ctz => {
-                    if ty == IrType::I32 || ty == IrType::U32 {
-                        self.state.emit("    rbit w0, w0");
-                        self.state.emit("    clz w0, w0");
-                    } else {
-                        self.state.emit("    rbit x0, x0");
-                        self.state.emit("    clz x0, x0");
-                    }
-                }
-                IrUnaryOp::Bswap => {
-                    if ty == IrType::I16 || ty == IrType::U16 {
-                        self.state.emit("    rev w0, w0");
-                        self.state.emit("    lsr w0, w0, #16");
-                    } else if ty == IrType::I32 || ty == IrType::U32 {
-                        self.state.emit("    rev w0, w0");
-                    } else {
-                        self.state.emit("    rev x0, x0");
-                    }
-                }
-                IrUnaryOp::Popcount => {
-                    // Use NEON cnt instruction: move to vector, count bits per byte, sum
-                    self.state.emit("    fmov d0, x0");
-                    self.state.emit("    cnt v0.8b, v0.8b");
-                    self.state.emit("    uaddlv h0, v0.8b");
-                    self.state.emit("    fmov w0, s0");
-                }
-            }
-        }
         self.store_x0_to(dest);
     }
 
@@ -1619,19 +1700,6 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
-        if let Some(slot) = self.state.get_slot(base.0) {
-            if self.state.is_alloca(base.0) {
-                self.emit_add_sp_offset("x1", slot.0);
-            } else {
-                self.emit_load_from_sp("x1", slot.0, "ldr");
-            }
-        }
-        self.operand_to_x0(offset);
-        self.state.emit("    add x0, x1, x0");
-        self.store_x0_to(dest);
-    }
-
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
             CastKind::Noop => {}
@@ -1768,36 +1836,6 @@ impl ArchCodegen for ArmCodegen {
         self.emit_load_operand(src);
         self.emit_cast_instrs(from_ty, to_ty);
         self.emit_store_result(dest);
-    }
-
-    fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
-        // Load dest address into x9, src address into x10
-        if let Some(dst_slot) = self.state.get_slot(dest.0) {
-            if self.state.is_alloca(dest.0) {
-                self.emit_add_sp_offset("x9", dst_slot.0);
-            } else {
-                self.emit_load_from_sp("x9", dst_slot.0, "ldr");
-            }
-        }
-        if let Some(src_slot) = self.state.get_slot(src.0) {
-            if self.state.is_alloca(src.0) {
-                self.emit_add_sp_offset("x10", src_slot.0);
-            } else {
-                self.emit_load_from_sp("x10", src_slot.0, "ldr");
-            }
-        }
-        // Inline byte-by-byte copy using a loop
-        let label_id = self.state.next_label_id();
-        let loop_label = format!(".Lmemcpy_loop_{}", label_id);
-        let done_label = format!(".Lmemcpy_done_{}", label_id);
-        self.load_large_imm("x11", size as i64);
-        self.state.emit(&format!("{}:", loop_label));
-        self.state.emit(&format!("    cbz x11, {}", done_label));
-        self.state.emit("    ldrb w12, [x10], #1");
-        self.state.emit("    strb w12, [x9], #1");
-        self.state.emit("    sub x11, x11, #1");
-        self.state.emit(&format!("    b {}", loop_label));
-        self.state.emit(&format!("{}:", done_label));
     }
 
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
@@ -2070,26 +2108,6 @@ impl ArchCodegen for ArmCodegen {
                 self.state.emit("    fmov d1, x0");
             }
         }
-    }
-
-    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
-        // Dynamic stack allocation on AArch64
-        // 1. Load size into x0
-        self.operand_to_x0(size);
-        // 2. Round up size to 16-byte alignment
-        self.state.emit("    add x0, x0, #15");
-        self.state.emit("    and x0, x0, #-16");
-        // 3. Subtract from stack pointer
-        self.state.emit("    sub sp, sp, x0");
-        // 4. Result is the new sp value
-        if align > 16 {
-            self.state.emit("    mov x0, sp");
-            self.state.emit(&format!("    add x0, x0, #{}", align - 1));
-            self.state.emit(&format!("    and x0, x0, #{}", -(align as i64)));
-        } else {
-            self.state.emit("    mov x0, sp");
-        }
-        self.store_x0_to(dest);
     }
 
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
