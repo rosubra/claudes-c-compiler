@@ -1338,8 +1338,20 @@ impl Lowerer {
         let fptr_idx = self.find_function_pointer_core(derived);
 
         if let Some(fp_start) = fptr_idx {
-            // Build the function pointer type from base
+            // Build the function pointer type.
+            // Pointer declarators in the prefix (before fp_start) are part of the
+            // return type, not outer wrappers.  E.g. for `Page *(*xFetch)(int)`:
+            //   derived = [Pointer, Pointer, FunctionPointer([int])]
+            //   prefix  = [Pointer]  — the `*` on return type `Page *`
+            //   core    = [Pointer, FunctionPointer] — the `(*)(int)` syntax
+            // We fold prefix Pointer declarators into the base to form the return type.
             let mut result = base;
+            for d in &derived[..fp_start] {
+                if matches!(d, DerivedDeclarator::Pointer) {
+                    result = CType::Pointer(Box::new(result));
+                }
+                // Array declarators in prefix are outer wrappers, handled after the core.
+            }
 
             // Process from fp_start to end (the function pointer core and any
             // additional inner wrappers after it)
@@ -1389,8 +1401,12 @@ impl Lowerer {
                 }
             }
 
-            // Now apply outer wrappers (prefix before fp_start): Array, Pointer
-            // These are outermost, so apply them in reverse order
+            // Apply outer wrappers from the prefix (before fp_start).
+            // Only Array declarators in the prefix are true outer wrappers
+            // (e.g., `int (*fp[10])(void)` = array of function pointers).
+            // Pointer declarators in the prefix are NOT outer wrappers — they
+            // were already folded into the return type above when we initialized
+            // `result` from `base` with prefix pointers applied.
             let prefix = &derived[..fp_start];
             for d in prefix.iter().rev() {
                 match d {
@@ -1400,9 +1416,8 @@ impl Lowerer {
                         });
                         result = CType::Array(Box::new(result), size);
                     }
-                    DerivedDeclarator::Pointer => {
-                        result = CType::Pointer(Box::new(result));
-                    }
+                    // Pointer declarators in prefix are part of the return type,
+                    // already applied to `result` before the function pointer core.
                     _ => {}
                 }
             }
