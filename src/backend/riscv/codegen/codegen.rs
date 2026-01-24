@@ -9,12 +9,12 @@ use super::inline_asm::{RvConstraintKind, classify_rv_constraint};
 pub struct RiscvCodegen {
     pub(super) state: CodegenState,
     current_return_type: IrType,
-    /// For variadic functions: offset from SP where the register save area starts.
-    va_save_area_offset: i64,
     /// Number of named integer params for current variadic function.
     va_named_gp_count: usize,
-    /// Current frame size.
+    /// Current frame size (below s0, not including the register save area above s0).
     current_frame_size: i64,
+    /// Whether the current function is variadic.
+    is_variadic: bool,
 }
 
 impl RiscvCodegen {
@@ -22,9 +22,9 @@ impl RiscvCodegen {
         Self {
             state: CodegenState::new(),
             current_return_type: IrType::I64,
-            va_save_area_offset: 0,
             va_named_gp_count: 0,
             current_frame_size: 0,
+            is_variadic: false,
         }
     }
 
@@ -81,24 +81,30 @@ impl RiscvCodegen {
     ///   s0 - 16 - ...: local data (allocas and value slots)
     ///   sp: bottom of frame
     fn emit_prologue_riscv(&mut self, frame_size: i64) {
+        // For variadic functions, the register save area (64 bytes for a0-a7) is
+        // placed ABOVE s0, contiguous with the caller's stack-passed arguments.
+        // Layout: s0+0..s0+56 = a0..a7, s0+64+ = caller stack args.
+        // This means total_alloc = frame_size + 64 for variadic, but s0 = sp + frame_size.
+        let total_alloc = if self.is_variadic { frame_size + 64 } else { frame_size };
+
         // Small-frame path requires ALL immediates to fit in 12 bits:
-        // -frame_size (sp adjust), frame_size-8 and frame_size-16 (save offsets),
-        // and frame_size (s0 setup). Since fits_imm12 checks [-2048, 2047],
-        // we check both -frame_size AND frame_size.
-        if Self::fits_imm12(-frame_size) && Self::fits_imm12(frame_size) {
+        // -total_alloc (sp adjust), and frame_size (s0 setup).
+        if Self::fits_imm12(-total_alloc) && Self::fits_imm12(total_alloc) {
             // Small frame: all offsets fit in 12-bit immediates
-            self.state.emit(&format!("    addi sp, sp, -{}", frame_size));
+            self.state.emit(&format!("    addi sp, sp, -{}", total_alloc));
+            // ra and s0 are saved relative to s0, which is sp + frame_size
+            // (NOT sp + total_alloc for variadic functions!)
             self.state.emit(&format!("    sd ra, {}(sp)", frame_size - 8));
             self.state.emit(&format!("    sd s0, {}(sp)", frame_size - 16));
             self.state.emit(&format!("    addi s0, sp, {}", frame_size));
         } else {
-            // Large frame: save ra/s0 at top of frame (s0-8, s0-16) to avoid
-            // collision with local data that grows downward from s0-16.
-            self.state.emit(&format!("    li t0, {}", frame_size));
+            // Large frame: use t0 for offsets
+            self.state.emit(&format!("    li t0, {}", total_alloc));
             self.state.emit("    sub sp, sp, t0");
-            // t0 still has frame_size; compute s0 = sp + frame_size = old_sp
+            // Compute s0 = sp + frame_size (NOT total_alloc)
+            self.state.emit(&format!("    li t0, {}", frame_size));
             self.state.emit("    add t0, sp, t0");
-            // Save ra and old s0 at top of frame (relative to new s0)
+            // Save ra and old s0 at s0-8, s0-16
             self.state.emit("    sd ra, -8(t0)");
             self.state.emit("    sd s0, -16(t0)");
             self.state.emit("    mv s0, t0");
@@ -107,17 +113,23 @@ impl RiscvCodegen {
 
     /// Emit epilogue: restore ra/s0 and deallocate stack.
     fn emit_epilogue_riscv(&mut self, frame_size: i64) {
-        if Self::fits_imm12(-frame_size) && Self::fits_imm12(frame_size) {
+        let total_alloc = if self.is_variadic { frame_size + 64 } else { frame_size };
+        if Self::fits_imm12(-total_alloc) && Self::fits_imm12(total_alloc) {
             // Small frame: restore from known sp offsets
+            // ra/s0 saved at sp + frame_size - 8/16 (relative to current sp)
             self.state.emit(&format!("    ld ra, {}(sp)", frame_size - 8));
             self.state.emit(&format!("    ld s0, {}(sp)", frame_size - 16));
-            self.state.emit(&format!("    addi sp, sp, {}", frame_size));
+            self.state.emit(&format!("    addi sp, sp, {}", total_alloc));
         } else {
             // Large frame: restore from s0-relative offsets (always fit in imm12).
-            // Load saved values before adjusting sp to avoid reading below sp.
             self.state.emit("    ld ra, -8(s0)");
             self.state.emit("    ld t0, -16(s0)");
-            self.state.emit("    mv sp, s0");
+            // For variadic functions, s0 + 64 = old_sp, so sp = s0 + 64
+            if self.is_variadic {
+                self.state.emit("    addi sp, s0, 64");
+            } else {
+                self.state.emit("    mv sp, s0");
+            }
             self.state.emit("    mv s0, t0");
         }
     }
@@ -342,21 +354,22 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
+        let space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
             // RISC-V uses negative offsets from s0 (frame pointer)
             let new_space = space + ((alloc_size + 7) & !7).max(8);
             (-(new_space as i64), new_space)
         });
 
-        // For variadic functions, reserve space for the register save area (a0-a7 = 64 bytes)
+        // For variadic functions, count named GP params.
+        // The register save area (64 bytes for a0-a7) is placed ABOVE s0
+        // (at positive offsets from s0) so it's contiguous with the caller's
+        // stack-passed arguments. This means the frame_size below s0 does NOT
+        // include the register save area; it's accounted for in the prologue.
         if func.is_variadic {
-            space = (space + 7) & !7; // align
-            self.va_save_area_offset = space;
-            space += 64; // 8 registers * 8 bytes
-
-            // Count named params. On RISC-V, all params in variadic functions
-            // go through integer registers (a0-a7), including named float params.
             self.va_named_gp_count = func.params.len().min(8);
+            self.is_variadic = true;
+        } else {
+            self.is_variadic = false;
         }
 
         space
@@ -377,12 +390,14 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_store_params(&mut self, func: &IrFunction) {
-        // For variadic functions: save all integer register args (a0-a7) to the save area.
-        // Layout: a0 at lowest offset, a7 at highest offset, so va_arg can advance by +8.
-        // save_area starts at -(va_save_area_offset + 64) and ends at -(va_save_area_offset + 8).
+        // For variadic functions: save all integer register args (a0-a7) to the
+        // register save area at POSITIVE offsets from s0 (above the frame pointer).
+        // Layout: a0 at s0+0, a1 at s0+8, ..., a7 at s0+56.
+        // This makes the register save area contiguous with the caller's stack-passed
+        // arguments at s0+64, s0+72, etc.
         if func.is_variadic {
             for i in 0..8usize {
-                let offset = -(self.va_save_area_offset as i64) - 64 + (i as i64) * 8;
+                let offset = (i as i64) * 8;
                 self.emit_store_to_s0(RISCV_ARG_REGS[i], offset, "sd");
             }
         }
@@ -390,8 +405,11 @@ impl ArchCodegen for RiscvCodegen {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
-        // Stack-passed params are at positive offsets from s0 (s0 = old sp)
-        let mut stack_param_offset: i64 = 0;
+        // Stack-passed params are at positive offsets from s0.
+        // For non-variadic: s0 = old_sp, stack params at s0+0, s0+8, ...
+        // For variadic: s0 = old_sp - 64, stack params at s0+64, s0+72, ...
+        //   (because the register save area occupies s0+0..s0+56)
+        let mut stack_param_offset: i64 = if func.is_variadic { 64 } else { 0 };
 
         // Phase 1: If there are any F128 params in GP registers, save all GP and FP arg regs
         // to the stack first, because __trunctfdf2 calls will clobber them.
@@ -417,10 +435,25 @@ impl ArchCodegen for RiscvCodegen {
         for (_i, param) in func.params.iter().enumerate() {
             let is_long_double = param.ty.is_long_double();
             let is_float = param.ty.is_float() && !is_long_double;
-            // RISC-V LP64D ABI: FP args go to fa0-fa7, then spill to a0-a7 (GPRs),
-            // then to the stack. This matches the caller's classification in emit_call.
-            let is_float_in_gpr = is_float && float_reg_idx >= 8 && int_reg_idx < 8;
-            let is_stack_passed = if is_long_double {
+
+            // For variadic functions: ALL args (including floats) go through GP registers.
+            // For non-variadic: FP args go to fa0-fa7 first, then spill to GP regs.
+            let is_float_in_gpr = if func.is_variadic {
+                false // In variadic functions, floats are always in GP regs (handled in else branch)
+            } else {
+                is_float && float_reg_idx >= 8 && int_reg_idx < 8
+            };
+
+            let is_stack_passed = if func.is_variadic {
+                // In variadic functions, all args go through GP regs (a0-a7).
+                // F128 takes 2 GP regs (aligned to even).
+                if is_long_double {
+                    let aligned = (int_reg_idx + 1) & !1;
+                    aligned + 1 >= 8
+                } else {
+                    int_reg_idx >= 8
+                }
+            } else if is_long_double {
                 // F128 needs an aligned pair of GP regs
                 let aligned = (int_reg_idx + 1) & !1; // align to even
                 aligned + 1 >= 8
@@ -444,6 +477,9 @@ impl ArchCodegen for RiscvCodegen {
                     // Align to even GP register
                     if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
                     int_reg_idx += 2;
+                } else if func.is_variadic {
+                    // All args in variadic functions go through GP regs
+                    int_reg_idx += 1;
                 } else if is_float_in_gpr {
                     // FP arg spilled to GPR - consume a GPR slot
                     int_reg_idx += 1;
@@ -456,7 +492,45 @@ impl ArchCodegen for RiscvCodegen {
             }
             if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if is_long_double && !is_stack_passed {
+                    if func.is_variadic {
+                        // In variadic functions, ALL named params come through GP registers.
+                        // We already saved a0-a7 at s0+0..s0+56. Load from the save area.
+                        if is_long_double && !is_stack_passed {
+                            // F128 arrives in aligned GP register pair
+                            if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
+                            // Load from register save area at s0 + idx*8
+                            let lo_off = (int_reg_idx as i64) * 8;
+                            let hi_off = ((int_reg_idx + 1) as i64) * 8;
+                            self.emit_load_from_s0("a0", lo_off, "ld");
+                            self.emit_load_from_s0("a1", hi_off, "ld");
+                            self.state.emit("    call __trunctfdf2");
+                            self.state.emit("    fmv.x.d t0, fa0");
+                            self.emit_store_to_s0("t0", slot.0, "sd");
+                            int_reg_idx += 2;
+                        } else if is_long_double && is_stack_passed {
+                            // F128 on stack
+                            stack_param_offset = (stack_param_offset + 15) & !15;
+                            self.emit_load_from_s0("a0", stack_param_offset, "ld");
+                            self.emit_load_from_s0("a1", stack_param_offset + 8, "ld");
+                            self.state.emit("    call __trunctfdf2");
+                            self.state.emit("    fmv.x.d t0, fa0");
+                            self.emit_store_to_s0("t0", slot.0, "sd");
+                            stack_param_offset += 16;
+                            int_reg_idx = 8;
+                        } else if is_stack_passed {
+                            self.emit_load_from_s0("t0", stack_param_offset, "ld");
+                            let store_instr = Self::store_for_type(ty);
+                            self.emit_store_to_s0("t0", slot.0, store_instr);
+                            stack_param_offset += 8;
+                        } else {
+                            // Named param in GP register (including float params).
+                            // For variadic, a0-a7 were saved to s0+0..s0+56. Load from there.
+                            // We can also just use the register directly since we saved it first.
+                            let store_instr = Self::store_for_type(ty);
+                            self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, store_instr);
+                            int_reg_idx += 1;
+                        }
+                    } else if is_long_double && !is_stack_passed {
                         // F128 arrives in GP register pair (aligned to even).
                         // GP regs were saved to stack in phase 1; load from saved area.
                         if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
@@ -472,9 +546,7 @@ impl ArchCodegen for RiscvCodegen {
                         int_reg_idx += 2;
                     } else if is_long_double && is_stack_passed {
                         // F128 stack-passed: 16 bytes, 16-byte aligned
-                        // Stack params are at positive offsets from s0, but if we pushed
-                        // the save area, add 64 to account for it.
-                        let extra = if has_f128_reg_params && !func.is_variadic { 64 } else { 0 };
+                        let extra = if has_f128_reg_params { 64 } else { 0 };
                         let adj_offset = stack_param_offset + extra;
                         stack_param_offset = (stack_param_offset + 15) & !15;
                         // Load the f128 from stack and call __trunctfdf2
@@ -502,7 +574,7 @@ impl ArchCodegen for RiscvCodegen {
                     } else if is_float_in_gpr {
                         // FP arg that spilled to a GP register (fa0-fa7 exhausted)
                         // The value arrives as raw bits in an integer register
-                        if has_f128_reg_params && !func.is_variadic {
+                        if has_f128_reg_params {
                             let off = f128_save_offset + (int_reg_idx as i64) * 8;
                             self.state.emit(&format!("    ld t0, {}(sp)", off));
                         } else {
@@ -512,7 +584,7 @@ impl ArchCodegen for RiscvCodegen {
                         int_reg_idx += 1;
                     } else if is_float {
                         // Float params arrive in fa0-fa7 per RISC-V calling convention
-                        if has_f128_reg_params && !func.is_variadic {
+                        if has_f128_reg_params {
                             // FP regs were saved to stack; load from save area
                             let fp_off = f128_save_offset + 64 + (float_reg_idx as i64) * 8;
                             if ty == IrType::F32 {
@@ -533,7 +605,7 @@ impl ArchCodegen for RiscvCodegen {
                         float_reg_idx += 1;
                     } else {
                         // GP register param - load from save area if we have F128 params
-                        if has_f128_reg_params && !func.is_variadic {
+                        if has_f128_reg_params {
                             let off = f128_save_offset + (int_reg_idx as i64) * 8;
                             self.state.emit(&format!("    ld t0, {}(sp)", off));
                             let store_instr = Self::store_for_type(ty);
@@ -557,6 +629,9 @@ impl ArchCodegen for RiscvCodegen {
                     }
                 } else if is_stack_passed {
                     stack_param_offset += 8;
+                } else if func.is_variadic {
+                    // Variadic: all args in GP regs
+                    int_reg_idx += 1;
                 } else if is_float_in_gpr {
                     // FP arg spilled to GPR - consume a GPR slot
                     int_reg_idx += 1;
@@ -1130,8 +1205,10 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_va_start(&mut self, va_list_ptr: &Value) {
         // RISC-V LP64D: va_list = pointer to first variadic arg.
-        // For variadic functions, we save a0-a7 to the register save area.
-        // The variadic args start after the named GP params.
+        // The register save area (a0-a7) is at s0+0..s0+56, and the caller's
+        // stack-passed args are at s0+64, s0+72, etc. They form a contiguous
+        // array of 8-byte slots. va_start sets va_list to point to the first
+        // variadic argument.
         if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
                 self.emit_addi_s0("t0", slot.0);
@@ -1140,18 +1217,12 @@ impl ArchCodegen for RiscvCodegen {
             }
         }
 
-        if self.va_named_gp_count < 8 {
-            // Variadic args start in the register save area, after named params.
-            // a0 is at -(va_save_area_offset + 64), a1 at -(va_save_area_offset + 56), etc.
-            // Variadic args start at a[named_gp_count], which is at:
-            let vararg_offset = -(self.va_save_area_offset as i64) - 64 + (self.va_named_gp_count as i64) * 8;
-            self.emit_addi_s0("t1", vararg_offset);
-        } else {
-            // All registers used by named params; variadic args are on the caller's stack.
-            // s0 points to the old sp, and stack-passed args start at s0 + 0 (the return
-            // address slot in the caller's frame is above, args are at positive offsets).
-            self.state.emit("    mv t1, s0");
-        }
+        // Variadic args start at a[named_gp_count] in the register save area.
+        // a0 is at s0+0, a1 at s0+8, ..., a7 at s0+56.
+        // If all 8 GP regs are used by named params, variadic args start on the
+        // caller's stack at s0+64.
+        let vararg_offset = (self.va_named_gp_count as i64) * 8;
+        self.emit_addi_s0("t1", vararg_offset);
         self.state.emit("    sd t1, 0(t0)");
     }
 
