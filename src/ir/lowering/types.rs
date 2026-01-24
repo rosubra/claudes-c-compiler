@@ -608,18 +608,38 @@ impl Lowerer {
             if has_func_ptr || pointer_from_type_spec || last_is_array {
                 // Array of pointers (or array of pointers-to-arrays, etc.)
                 // Each element is a pointer (8 bytes).
-                // Only collect array dims that are AFTER the last pointer
-                // (these are the variable's own array dimensions, not the pointee's).
+                // Collect the variable's own array dimensions:
+                // - For regular pointer arrays like int *arr[3] (derived=[Pointer, Array(3)]):
+                //   Array dims AFTER the last Pointer are the variable's dimensions.
+                // - For function pointer arrays like int (*ops[3])(int,int)
+                //   (derived=[Array(3), Pointer, FunctionPointer(...)]):
+                //   Array dims BEFORE the Pointer are the variable's dimensions,
+                //   because the Pointer+FunctionPointer group describes the element type.
                 let last_ptr_pos = derived.iter().rposition(|d| matches!(d, DerivedDeclarator::Pointer));
                 let array_dims: Vec<Option<usize>> = if let Some(lpp) = last_ptr_pos {
-                    // Collect only Array dims after the last pointer in derived
-                    derived[lpp + 1..].iter().filter_map(|d| {
+                    // First try: collect Array dims after the last pointer
+                    let after_dims: Vec<Option<usize>> = derived[lpp + 1..].iter().filter_map(|d| {
                         if let DerivedDeclarator::Array(size_expr) = d {
                             Some(size_expr.as_ref().and_then(|e| self.expr_as_array_size(e).map(|n| n as usize)))
                         } else {
                             None
                         }
-                    }).collect()
+                    }).collect();
+                    if !after_dims.is_empty() {
+                        after_dims
+                    } else if has_func_ptr {
+                        // For function pointer arrays, array dims come BEFORE the
+                        // Pointer+FunctionPointer group (e.g., [Array(3), Pointer, FuncPtr])
+                        derived[..lpp].iter().filter_map(|d| {
+                            if let DerivedDeclarator::Array(size_expr) = d {
+                                Some(size_expr.as_ref().and_then(|e| self.expr_as_array_size(e).map(|n| n as usize)))
+                            } else {
+                                None
+                            }
+                        }).collect()
+                    } else {
+                        after_dims
+                    }
                 } else {
                     // Pointer comes from type spec (typedef'd pointer/func ptr),
                     // not from derived list. All array dims in derived belong to
