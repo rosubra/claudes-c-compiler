@@ -563,7 +563,8 @@ impl ArchCodegen for X86Codegen {
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty.is_float() {
-            let float_op = classify_float_binop(op).unwrap_or(FloatOp::Add);
+            let float_op = classify_float_binop(op)
+                .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
             let (mov_to_xmm, mov_from_xmm) = if ty == IrType::F32 {
                 ("movd %eax, %xmm0", "movd %xmm0, %eax")
             } else {

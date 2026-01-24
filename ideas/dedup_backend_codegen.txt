@@ -6,12 +6,17 @@ Items 1 and 2 have been completed:
 - classify_float_binop() + FloatOp enum fixes the latent fadd-fallback bug and shares
   the float operation dispatch across all three backends
 
-Items 1, 2, and 4 have been completed:
+Items 1, 2, 4, and additional consistency fixes completed:
 - CastKind enum + classify_cast() extracts shared cast classification
 - classify_float_binop() + FloatOp enum shares float operation dispatch
 - ARM operand_to_x0 movz/movk inlining deduplicated via emit_load_imm64 (I64/F32/F64/LongDouble)
 - ARM emit_sub_sp/emit_add_sp simplified to use emit_load_imm64 for large offsets
 - ARM emit_inline_asm const loading simplified to use emit_load_imm64
+- classify_float_binop() unwrap_or(FloatOp::Add) latent bug now panics on all 3 backends
+- ARM emit_va_start/emit_va_copy/emit_va_arg large-offset bug fixed via emit_add_fp_offset
+- SignedToUnsignedSameSize cast now properly masks sub-word types on ARM and RISC-V
+- RISC-V emit_ctz hardcoded .+12 offset replaced with proper label reference
+- ARM emit_call comment corrected: AAPCS64 passes variadic floats in FP registers (not GP)
 
 Remaining opportunities:
 

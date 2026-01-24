@@ -135,6 +135,17 @@ impl ArmCodegen {
         }
     }
 
+    /// Emit `add dest, x29, #offset` handling large offsets.
+    /// Uses x17 (IP1) as scratch for offsets > 4095.
+    fn emit_add_fp_offset(&mut self, dest: &str, offset: i64) {
+        if offset >= 0 && offset <= 4095 {
+            self.state.emit(&format!("    add {}, x29, #{}", dest, offset));
+        } else {
+            self.load_large_imm("x17", offset);
+            self.state.emit(&format!("    add {}, x29, x17", dest));
+        }
+    }
+
     /// Load a large immediate into a register.
     fn load_large_imm(&mut self, reg: &str, val: i64) {
         if val <= 65535 {
@@ -357,8 +368,16 @@ impl ArmCodegen {
                 }
             }
 
-            CastKind::SignedToUnsignedSameSize { .. } => {
-                // On AArch64, same-size signed->unsigned is a noop (no sign-extension issue)
+            CastKind::SignedToUnsignedSameSize { to_ty } => {
+                // Clear upper bits for sub-word unsigned types to ensure proper semantics.
+                // For U32/U64, the noop is fine since the value already occupies the full
+                // register width needed. For U8/U16, we must mask to the correct width.
+                match to_ty {
+                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::U32 => self.state.emit("    mov w0, w0"), // clears upper 32 bits
+                    _ => {} // U64: no masking needed
+                }
             }
 
             CastKind::IntWiden { from_ty, .. } => {
@@ -648,7 +667,8 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty.is_float() {
-            let float_op = classify_float_binop(op).unwrap_or(FloatOp::Add);
+            let float_op = classify_float_binop(op)
+                .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
             let mnemonic = match float_op {
                 FloatOp::Add => "fadd",
                 FloatOp::Sub => "fsub",
@@ -875,13 +895,17 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Classify args: determine which go in registers vs stack.
-        // On AArch64 (AAPCS64), both named and variadic float args go in FP registers (d0-d7 / q0-q7),
-        // and int args go in GP registers (x0-x7). The callee saves both register sets
-        // and uses va_list with __gr_offs/__vr_offs to access variadic args.
+        // On AArch64 (AAPCS64), ALL float args (both named and variadic) go in FP registers
+        // (d0-d7 / q0-q7), and all int args go in GP registers (x0-x7). Unlike x86-64 and
+        // RISC-V where variadic float args must go through GP registers, AAPCS64 passes them
+        // in FP registers. The callee saves both GP and FP register sets in variadic functions
+        // and va_arg uses __gr_offs/__vr_offs to locate args in the correct save area.
         // F128 (long double) uses Q registers (128-bit) and consumes one FP register slot.
         let mut arg_classes: Vec<char> = Vec::new(); // 'f' = float reg, 'i' = int reg, 's' = stack, 'q' = F128 in Q reg
         let mut fi = 0usize;
         let mut ii = 0usize;
+        let _ = is_variadic; // AAPCS64: variadic status doesn't affect register assignment
+        let _ = num_fixed_args; // AAPCS64: all args use same classification regardless
         for (i, _arg) in args.iter().enumerate() {
             let arg_ty = if i < arg_types.len() { Some(arg_types[i]) } else { None };
             let is_long_double = arg_ty == Some(IrType::F128);
@@ -1257,9 +1281,9 @@ impl ArchCodegen for ArmCodegen {
         // x1 = pointer to va_list struct
         if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
-                self.state.emit(&format!("    add x1, x29, #{}", slot.0));
+                self.emit_add_fp_offset("x1", slot.0);
             } else {
-                self.state.emit(&format!("    ldr x1, [x29, #{}]", slot.0));
+                self.emit_load_from_sp("x1", slot.0, "ldr");
             }
         }
 
@@ -1383,9 +1407,9 @@ impl ArchCodegen for ArmCodegen {
         // x0 = pointer to va_list struct
         if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
-                self.state.emit(&format!("    add x0, x29, #{}", slot.0));
+                self.emit_add_fp_offset("x0", slot.0);
             } else {
-                self.state.emit(&format!("    ldr x0, [x29, #{}]", slot.0));
+                self.emit_load_from_sp("x0", slot.0, "ldr");
             }
         }
 
@@ -1436,16 +1460,16 @@ impl ArchCodegen for ArmCodegen {
         // Copy va_list struct (32 bytes on AArch64)
         if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
             if self.state.is_alloca(src_ptr.0) {
-                self.state.emit(&format!("    add x1, x29, #{}", src_slot.0));
+                self.emit_add_fp_offset("x1", src_slot.0);
             } else {
-                self.state.emit(&format!("    ldr x1, [x29, #{}]", src_slot.0));
+                self.emit_load_from_sp("x1", src_slot.0, "ldr");
             }
         }
         if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
             if self.state.is_alloca(dest_ptr.0) {
-                self.state.emit(&format!("    add x0, x29, #{}", dest_slot.0));
+                self.emit_add_fp_offset("x0", dest_slot.0);
             } else {
-                self.state.emit(&format!("    ldr x0, [x29, #{}]", dest_slot.0));
+                self.emit_load_from_sp("x0", dest_slot.0, "ldr");
             }
         }
         // Copy 32 bytes

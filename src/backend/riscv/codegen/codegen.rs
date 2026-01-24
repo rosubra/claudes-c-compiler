@@ -284,8 +284,22 @@ impl RiscvCodegen {
                 }
             }
 
-            CastKind::SignedToUnsignedSameSize { .. } => {
-                // On RISC-V 64, same-size signed->unsigned is a noop
+            CastKind::SignedToUnsignedSameSize { to_ty } => {
+                // Clear upper bits for sub-word unsigned types to ensure proper semantics.
+                // For U32/U64, the noop is fine since the value already occupies the full
+                // register width needed. For U8/U16, we must mask to the correct width.
+                match to_ty {
+                    IrType::U8 => self.state.emit("    andi t0, t0, 0xff"),
+                    IrType::U16 => {
+                        self.state.emit("    slli t0, t0, 48");
+                        self.state.emit("    srli t0, t0, 48");
+                    }
+                    IrType::U32 => {
+                        self.state.emit("    slli t0, t0, 32");
+                        self.state.emit("    srli t0, t0, 32");
+                    }
+                    _ => {} // U64: no masking needed
+                }
             }
 
             CastKind::IntWiden { from_ty, .. } => {
@@ -624,7 +638,8 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty.is_float() {
-            let float_op = classify_float_binop(op).unwrap_or(FloatOp::Add);
+            let float_op = classify_float_binop(op)
+                .unwrap_or_else(|| panic!("unsupported float binop: {:?} on type {:?}", op, ty));
             let mnemonic = match float_op {
                 FloatOp::Add => "fadd",
                 FloatOp::Sub => "fsub",
@@ -2234,7 +2249,7 @@ impl RiscvCodegen {
         self.state.emit("    li t1, 0");
         self.state.emit(&format!("{}:", loop_label));
         self.state.emit(&format!("    li t2, {}", bits));
-        self.state.emit("    beq t1, t2, .+12"); // if counted all bits, done
+        self.state.emit(&format!("    beq t1, t2, {}", done_label)); // if counted all bits, done
         self.state.emit("    andi t3, t0, 1");
         self.state.emit(&format!("    bnez t3, {}", done_label)); // found a 1 bit
         self.state.emit("    srli t0, t0, 1");
