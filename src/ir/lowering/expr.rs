@@ -936,6 +936,22 @@ impl Lowerer {
     /// - *(s->fnptr) where fnptr is a function pointer member → same no-op
     /// - **f, ***f etc. are also no-ops (recursive application)
     pub(super) fn is_function_pointer_deref(&self, inner: &Expr) -> bool {
+        // First, check if the inner expression is actually a pointer-to-function-pointer.
+        // Due to our CType representation, int (**fpp)(int,int) is stored as
+        // Pointer(Function(FunctionType { return_type: Pointer(Int), ... })) — the same
+        // shape as a direct function pointer. We use the is_ptr_to_func_ptr flag
+        // (set during declaration analysis based on pointer count in derived declarators)
+        // to correctly distinguish these cases.
+        if let Expr::Identifier(name, _) = inner {
+            if let Some(vi) = self.lookup_var_info(name) {
+                if vi.is_ptr_to_func_ptr {
+                    // This is a pointer-to-function-pointer (e.g., int (**fpp)(int,int)).
+                    // Dereferencing it requires a real load to get the inner function pointer.
+                    return false;
+                }
+            }
+        }
+
         // Check CType-based detection (works for typedef'd function pointers
         // where param_ctype correctly sets CType::Pointer(CType::Function(...)),
         // and also for struct member function pointers via get_expr_ctype)
@@ -956,10 +972,10 @@ impl Lowerer {
                 if self.known_functions.contains(name.as_str()) {
                     return true;
                 }
-                // Check if this is a function pointer variable.
-                // Only Pointer(Function(_)) or Function(_) makes a deref a no-op.
-                // Pointer(Pointer(Function(_))) (i.e., int (**fpp)()) is a REAL
-                // dereference that produces a function pointer value — NOT a no-op.
+                // Check if this variable is a function pointer (deref is no-op).
+                // Pointer-to-function-pointer cases are already handled by the
+                // is_ptr_to_func_ptr early-return above, so any Pointer(Function(...))
+                // at this point is a genuine direct function pointer.
                 if let Some(vi) = self.lookup_var_info(name) {
                     let has_ctype = vi.c_type.is_some();
                     if let Some(ref ct) = vi.c_type {
@@ -1042,15 +1058,19 @@ impl Lowerer {
     }
 
     fn lower_deref(&mut self, inner: &Expr) -> Operand {
+        // Check if pointee is an aggregate type that doesn't need a Load.
+        // Note: Function types are NOT included here — function pointer dereferences
+        // are handled by is_function_pointer_deref which correctly distinguishes
+        // direct function pointers (no-op deref) from pointer-to-function-pointers
+        // (which need a real load despite having similar CType shapes).
         let pointee_is_no_load = |ct: &CType| -> bool {
             if let CType::Pointer(ref pointee) = ct {
                 matches!(pointee.as_ref(),
-                    CType::Array(_, _) | CType::Struct(_) | CType::Union(_) | CType::Function(_))
+                    CType::Array(_, _) | CType::Struct(_) | CType::Union(_))
                     || pointee.is_complex()
-            } else if matches!(ct, CType::Function(_)) {
-                // Dereferencing a function type is a no-op in C
-                true
-            } else { false }
+            } else {
+                false
+            }
         };
         // In C, dereferencing a function pointer yields a function designator which
         // immediately decays back to a function pointer. So *f, **f, ***f etc. are
@@ -1061,7 +1081,7 @@ impl Lowerer {
         if self.is_function_pointer_deref(inner) {
             return self.lower_expr(inner);
         }
-        // Check if dereferencing yields an aggregate or function type.
+        // Check if dereferencing yields an aggregate type.
         // In these cases, the result is an address (no Load needed).
         if self.get_expr_ctype(inner).map_or(false, |ct| pointee_is_no_load(&ct)) {
             return self.lower_expr(inner);

@@ -70,6 +70,9 @@ pub(super) struct VarInfo {
     pub array_dim_strides: Vec<usize>,
     /// Full C type for precise multi-level pointer type resolution.
     pub c_type: Option<CType>,
+    /// Whether this is a pointer-to-function-pointer (e.g., int (**fpp)(int, int)).
+    /// Distinguished from direct function pointers despite similar CType representation.
+    pub is_ptr_to_func_ptr: bool,
 }
 
 /// Information about a local variable stored in an alloca.
@@ -162,6 +165,9 @@ pub(super) struct DeclAnalysis {
     pub is_bool: bool,
     /// The element IR type for arrays (accounts for typedef'd arrays).
     pub elem_ir_ty: IrType,
+    /// Whether this is a pointer-to-function-pointer (e.g., int (**fpp)(int, int)).
+    /// Distinguished from direct function pointers despite similar CType representation.
+    pub is_ptr_to_func_ptr: bool,
 }
 
 /// Information about a VLA dimension in a function parameter type.
@@ -317,6 +323,7 @@ impl VarInfo {
             is_struct: da.is_struct,
             array_dim_strides: da.array_dim_strides.clone(),
             c_type: da.c_type.clone(),
+            is_ptr_to_func_ptr: da.is_ptr_to_func_ptr,
         }
     }
 }

@@ -721,9 +721,27 @@ impl Lowerer {
         let is_bool = self.is_type_bool(&orig_param.type_spec);
         let array_dim_strides = if ty == IrType::Ptr { self.compute_ptr_array_strides(&orig_param.type_spec) } else { vec![] };
 
+        // Detect pointer-to-function-pointer parameters: these have fptr_params
+        // AND 2+ pointer levels in the type_spec (e.g., int (**fpp)(int, int)
+        // has type_spec = Pointer(Pointer(Int)), yielding CType depth >= 2).
+        // This is needed because our CType representation can conflate
+        // pointer-to-function-pointers with direct function pointers.
+        let is_ptr_to_func_ptr = if orig_param.fptr_params.is_some() {
+            let ct = self.type_spec_to_ctype(&orig_param.type_spec);
+            let mut depth = 0usize;
+            let mut t = &ct;
+            while let CType::Pointer(inner) = t {
+                depth += 1;
+                t = inner.as_ref();
+            }
+            depth >= 2
+        } else {
+            false
+        };
+
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty, elem_size, is_array: false, pointee_type, struct_layout, is_struct: false, array_dim_strides, c_type },
+            var: VarInfo { ty, elem_size, is_array: false, pointee_type, struct_layout, is_struct: false, array_dim_strides, c_type, is_ptr_to_func_ptr },
             alloca, alloc_size: param_size, is_bool, static_global_name: None, vla_strides: vec![], vla_size: None,
         });
 
@@ -753,7 +771,7 @@ impl Lowerer {
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: layout, is_struct: true, array_dim_strides: vec![], c_type },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: layout, is_struct: true, array_dim_strides: vec![], c_type, is_ptr_to_func_ptr: false },
             alloca, alloc_size: size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
         });
     }
@@ -763,7 +781,7 @@ impl Lowerer {
         let ct = self.type_spec_to_ctype(&orig_param.type_spec);
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct) },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false },
             alloca, alloc_size: 8, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
         });
     }
@@ -790,7 +808,7 @@ impl Lowerer {
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.func_mut().locals.insert(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct) },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false },
             alloca: complex_alloca, alloc_size: complex_size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
         });
     }
@@ -1049,13 +1067,16 @@ impl Lowerer {
 
             let is_extern_decl = decl.is_extern && declarator.init.is_none();
 
+            // Register the global before evaluating its initializer so that
+            // self-referential initializers (e.g., `struct Node n = {&n}`)
+            // can resolve &n via eval_global_addr_expr.
+            self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
+
             let init = if let Some(ref initializer) = declarator.init {
                 self.lower_global_init(initializer, &decl.type_spec, da.base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
             } else {
                 GlobalInit::Zero
             };
-
-            self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
 
             let align = {
                 let c_align = self.alignof_type(&decl.type_spec);
@@ -1343,11 +1364,42 @@ impl Lowerer {
         let pointee_type = self.compute_pointee_type(type_spec, derived);
         let c_type = Some(self.build_full_ctype(type_spec, derived));
 
+        // Detect pointer-to-function-pointer: declared with 2+ consecutive Pointer
+        // entries before the first FunctionPointer (e.g., int (**fpp)(int, int)
+        // has derived=[Pointer, Pointer, FunctionPointer(...)]).
+        // This is NOT triggered for function-pointer-returning-function-pointer like
+        // int (*(*p)(int,int))(int,int) where Pointer entries are separated by
+        // FunctionPointer entries.
+        // This detection is needed because build_full_ctype absorbs extra pointer
+        // levels into the function's return type, making the CType shape ambiguous.
+        let is_ptr_to_func_ptr = {
+            // A pointer-to-function-pointer (e.g., int (**fpp)(int, int)) has derived
+            // = [Pointer, Pointer, FunctionPointer(...)]. The key distinguishing feature:
+            // exactly one FunctionPointer entry AND 2+ Pointer entries before it.
+            // Complex function pointers like int (*(*p)(int,int))(int,int) have
+            // multiple FunctionPointer entries in derived and are NOT ptr-to-fptr.
+            let fptr_count = derived.iter().filter(|d|
+                matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _))).count();
+            if fptr_count == 1 {
+                let mut consecutive_ptrs_before_fptr = 0usize;
+                for d in derived {
+                    match d {
+                        DerivedDeclarator::Pointer => consecutive_ptrs_before_fptr += 1,
+                        DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _) => break,
+                        _ => {}
+                    }
+                }
+                consecutive_ptrs_before_fptr >= 2
+            } else {
+                false
+            }
+        };
+
         DeclAnalysis {
             base_ty, var_ty, alloc_size, elem_size, is_array, is_pointer,
             array_dim_strides, is_array_of_pointers, is_array_of_func_ptrs,
             struct_layout, is_struct, actual_alloc_size, pointee_type, c_type,
-            is_bool, elem_ir_ty,
+            is_bool, elem_ir_ty, is_ptr_to_func_ptr,
         }
     }
 

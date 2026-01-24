@@ -1,0 +1,18 @@
+Fix pointer-to-function-pointer dereference generating no-op instead of load.
+
+Status: IN PROGRESS
+
+Bug: Dereferencing int (**fpp)(int, int) was treated as a no-op (like *fp for
+direct function pointers) instead of emitting a Load instruction. This caused
+segfaults when calling through dereferenced pointer-to-function-pointers.
+
+Root cause: CType representation absorbs extra pointer levels into the function
+return type, making Pointer(Pointer(Function(...))) look like
+Pointer(Function(...)). Multiple places checked CType shape to decide if deref
+was a no-op without accounting for this ambiguity.
+
+Fix: Added is_ptr_to_func_ptr flag to VarInfo, computed from derived declarator
+pointer count. Used in is_function_pointer_deref and emit_call_instruction to
+correctly identify ptr-to-fptr variables. Removed Function(_) from
+pointee_is_no_load to let is_function_pointer_deref handle all function pointer
+deref decisions.

@@ -397,16 +397,26 @@ impl Lowerer {
                 // Detect if inner is a plain function pointer (no-op deref) vs something
                 // that requires a real dereference.
                 let is_noop_deref = if let Expr::Identifier(ref name, _) = **inner {
-                    self.lookup_var_info(name)
-                        .and_then(|vi| vi.c_type.as_ref())
-                        .map(|ct| match ct {
-                            // Variable is a function pointer: *fp is no-op
-                            CType::Pointer(inner_ct) => matches!(**inner_ct, CType::Function(_)),
-                            // Variable is a function: *func is no-op
-                            CType::Function(_) => true,
-                            _ => false,
-                        })
-                        .unwrap_or(false)
+                    if let Some(vi) = self.lookup_var_info(name) {
+                        // Pointer-to-function-pointer requires a real load,
+                        // even though its CType looks like Pointer(Function(...))
+                        // due to the extra pointer being absorbed into the return type.
+                        if vi.is_ptr_to_func_ptr {
+                            false
+                        } else if let Some(ref ct) = vi.c_type {
+                            match ct {
+                                // Variable is a function pointer: *fp is no-op
+                                CType::Pointer(inner_ct) => matches!(**inner_ct, CType::Function(_)),
+                                // Variable is a function: *func is no-op
+                                CType::Function(_) => true,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };
