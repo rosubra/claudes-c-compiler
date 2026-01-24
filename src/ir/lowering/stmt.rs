@@ -1500,46 +1500,113 @@ impl Lowerer {
                     let elem_size = elem_ty.size();
                     let elem_ir_ty = IrType::from_ctype(elem_ty);
                     let arr_size = *arr_size;
-                    // Find the index designator in the remaining designators
-                    let idx = item.designators[1..].iter().find_map(|d| {
+
+                    // Find the first index designator in remaining designators
+                    let remaining = &item.designators[1..];
+                    let (first_idx_pos, idx) = remaining.iter().enumerate().find_map(|(i, d)| {
                         if let Designator::Index(ref idx_expr) = d {
-                            self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                            self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()).map(|v| (i, v))
                         } else {
                             None
                         }
-                    }).unwrap_or(0);
+                    }).unwrap_or((0, 0));
+
                     if idx < arr_size {
                         let elem_offset = field_offset + idx * elem_size;
-                        // Check if there are further nested designators (e.g., .a[2].b = val)
-                        let remaining_field_desigs: Vec<_> = item.designators[1..].iter()
+
+                        // Check for further designators after the first Index
+                        let after_first_idx = &remaining[first_idx_pos + 1..];
+                        let remaining_field_desigs: Vec<_> = after_first_idx.iter()
                             .filter(|d| matches!(d, Designator::Field(_)))
                             .cloned()
                             .collect();
+                        let remaining_index_desigs: Vec<_> = after_first_idx.iter()
+                            .filter(|d| matches!(d, Designator::Index(_)))
+                            .cloned()
+                            .collect();
+
                         if !remaining_field_desigs.is_empty() {
+                            // .a[idx].b = val - drill into struct element
                             if let CType::Struct(ref st) = elem_ty.as_ref() {
                                 let sub_layout = StructLayout::for_struct(&st.fields);
+                                // Include any remaining index designators for nested arrays
+                                let sub_desigs: Vec<_> = after_first_idx.iter().cloned().collect();
                                 let sub_item = InitializerItem {
-                                    designators: remaining_field_desigs,
+                                    designators: sub_desigs,
                                     init: item.init.clone(),
                                 };
                                 self.emit_struct_init(&[sub_item], base_alloca, &sub_layout, elem_offset);
                             }
+                        } else if !remaining_index_desigs.is_empty() {
+                            // Multi-dimensional array: .a[1][2] = val
+                            if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty.as_ref() {
+                                let inner_idx = remaining_index_desigs.iter().find_map(|d| {
+                                    if let Designator::Index(ref idx_expr) = d {
+                                        self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                                    } else {
+                                        None
+                                    }
+                                }).unwrap_or(0);
+                                if inner_idx < *inner_size {
+                                    let inner_elem_size = inner_elem_ty.size();
+                                    let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                                    let inner_offset = elem_offset + inner_idx * inner_elem_size;
+                                    if let Initializer::Expr(e) = &item.init {
+                                        if let Expr::StringLiteral(s, _) = e {
+                                            if matches!(inner_elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                                self.emit_string_to_alloca(base_alloca, s, inner_offset);
+                                            }
+                                        } else {
+                                            let expr_ty = self.get_expr_type(e);
+                                            let val = self.lower_expr(e);
+                                            let val = self.emit_implicit_cast(val, expr_ty, inner_ir_ty);
+                                            let addr = self.fresh_value();
+                                            self.emit(Instruction::GetElementPtr {
+                                                dest: addr,
+                                                base: base_alloca,
+                                                offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                                                ty: inner_ir_ty,
+                                            });
+                                            self.emit(Instruction::Store { val, ptr: addr, ty: inner_ir_ty });
+                                        }
+                                    }
+                                }
+                            }
                         } else if let Initializer::Expr(e) = &item.init {
-                            let expr_ty = self.get_expr_type(e);
-                            let val = self.lower_expr(e);
-                            let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
-                            let addr = self.fresh_value();
-                            self.emit(Instruction::GetElementPtr {
-                                dest: addr,
-                                base: base_alloca,
-                                offset: Operand::Const(IrConst::I64(elem_offset as i64)),
-                                ty: elem_ir_ty,
-                            });
-                            self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                            // No further designators - handle string literal for char array
+                            if let Expr::StringLiteral(s, _) = e {
+                                if let CType::Array(inner, Some(_inner_size)) = elem_ty.as_ref() {
+                                    if matches!(inner.as_ref(), CType::Char | CType::UChar) {
+                                        self.emit_string_to_alloca(base_alloca, s, elem_offset);
+                                    }
+                                } else {
+                                    let expr_ty = self.get_expr_type(e);
+                                    let val = self.lower_expr(e);
+                                    let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                                    let addr = self.fresh_value();
+                                    self.emit(Instruction::GetElementPtr {
+                                        dest: addr,
+                                        base: base_alloca,
+                                        offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                        ty: elem_ir_ty,
+                                    });
+                                    self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                                }
+                            } else {
+                                let expr_ty = self.get_expr_type(e);
+                                let val = self.lower_expr(e);
+                                let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                                let addr = self.fresh_value();
+                                self.emit(Instruction::GetElementPtr {
+                                    dest: addr,
+                                    base: base_alloca,
+                                    offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                    ty: elem_ir_ty,
+                                });
+                                self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                            }
                         } else if let Initializer::List(sub_items) = &item.init {
                             // Handle list init for array element (e.g., .a[1] = {1,2,3})
-                            // The element could be a sub-array (e.g., int a[3][10])
-                            // or a struct/union
                             match elem_ty.as_ref() {
                                 CType::Array(inner_elem_ty, Some(inner_size)) => {
                                     let inner_elem_size = inner_elem_ty.size();

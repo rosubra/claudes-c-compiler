@@ -642,6 +642,82 @@ impl Lowerer {
         max_idx.max(items.len())
     }
 
+    /// Compute the number of struct elements in a flat initializer list for an unsized
+    /// array of structs. Handles both braced (each item is one struct) and flat (items
+    /// fill struct fields sequentially) initialization styles, as well as [idx] designators.
+    /// E.g., struct {int a; char b;} x[] = {1, 'c', 2, 'd'} -> 2 elements
+    ///       struct {int a; char b;} x[] = {{1,'c'}, {2,'d'}} -> 2 elements
+    ///       struct {int a; char b;} x[] = {[2] = {1,'c'}} -> 3 elements (indices 0,1,2)
+    pub(super) fn compute_struct_array_init_count(
+        &self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+    ) -> usize {
+        let num_fields = layout.fields.len();
+        if num_fields == 0 {
+            return items.len();
+        }
+
+        let mut max_idx = 0usize;
+        let mut current_idx = 0usize;
+        let mut fields_consumed = 0usize;
+
+        for item in items {
+            // Check for [idx] designator (array index)
+            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {
+                    current_idx = idx;
+                    fields_consumed = 0; // Reset field counter for new struct element
+                }
+            }
+
+            // Check if this item starts a new struct element (braced or designator)
+            let is_braced = matches!(item.init, Initializer::List(_));
+            let has_field_designator = item.designators.iter().any(|d| matches!(d, Designator::Field(_)));
+
+            if is_braced || has_field_designator {
+                // Each braced item or field-designated item is one struct element
+                // (or part of the current struct element if field-designated)
+                if has_field_designator {
+                    // .field = val stays in current struct element
+                } else {
+                    // Braced list is one complete struct element
+                    if fields_consumed > 0 {
+                        // We were in the middle of a flat init - advance to next
+                        current_idx += 1;
+                        fields_consumed = 0;
+                    }
+                }
+                if current_idx >= max_idx {
+                    max_idx = current_idx + 1;
+                }
+                if !has_field_designator {
+                    current_idx += 1;
+                }
+            } else {
+                // Flat init: this scalar fills one field of the current struct element
+                fields_consumed += 1;
+                if fields_consumed >= num_fields {
+                    // Completed one struct element
+                    if current_idx >= max_idx {
+                        max_idx = current_idx + 1;
+                    }
+                    current_idx += 1;
+                    fields_consumed = 0;
+                }
+            }
+        }
+
+        // If there are remaining fields consumed, count the partial struct element
+        if fields_consumed > 0 {
+            if current_idx >= max_idx {
+                max_idx = current_idx + 1;
+            }
+        }
+
+        max_idx
+    }
+
     /// Evaluate a constant expression and return as usize (for array index designators).
     pub(super) fn eval_const_expr_for_designator(&self, expr: &Expr) -> Option<usize> {
         self.eval_const_expr(expr).and_then(|v| v.to_usize())
@@ -720,6 +796,25 @@ impl Lowerer {
                 }
                 false
             }
+            Expr::CompoundLiteral(type_spec, _, _) => {
+                // (struct foo){...} is a struct value
+                let resolved = self.resolve_type_spec(type_spec);
+                matches!(resolved, TypeSpecifier::Struct(_, _, _) | TypeSpecifier::Union(_, _, _))
+            }
+            Expr::FunctionCall(_, _, _) => {
+                // Function returning struct
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Struct(_) | CType::Union(_));
+                }
+                false
+            }
+            Expr::Conditional(_, _, _, _) => {
+                // Ternary returning struct
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Struct(_) | CType::Union(_));
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -761,6 +856,15 @@ impl Lowerer {
                 8
             }
             Expr::Deref(_, _) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return ctype.size();
+                }
+                8
+            }
+            Expr::CompoundLiteral(type_spec, _, _) => {
+                self.sizeof_type(type_spec)
+            }
+            Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _) => {
                 if let Some(ctype) = self.get_expr_ctype(expr) {
                     return ctype.size();
                 }

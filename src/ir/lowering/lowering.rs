@@ -1861,7 +1861,13 @@ impl Lowerer {
                     }
                 }
                 Initializer::List(items) => {
-                    let actual_count = self.compute_init_list_array_size_for_char_array(items, da.base_ty);
+                    let actual_count = if let Some(ref layout) = da.struct_layout {
+                        // Array of structs: need to figure out how many struct
+                        // elements the flat initializer list fills
+                        self.compute_struct_array_init_count(items, layout)
+                    } else {
+                        self.compute_init_list_array_size_for_char_array(items, da.base_ty)
+                    };
                     if da.elem_size > 0 {
                         da.alloc_size = actual_count * da.elem_size;
                         da.actual_alloc_size = da.alloc_size;

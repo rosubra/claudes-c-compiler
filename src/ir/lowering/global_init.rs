@@ -876,20 +876,56 @@ impl Lowerer {
     ) -> usize {
         let elem_size = elem_ty.size();
         let elem_ir_ty = IrType::from_ctype(elem_ty);
-        let idx = item.designators[1..].iter().find_map(|d| {
+
+        // Collect all Index and Field designators after the first (which is Field("name"))
+        // For .a[1][2].b we have designators: [Field("a"), Index(1), Index(2), Field("b")]
+        // After stripping Field("a"), remaining: [Index(1), Index(2), Field("b")]
+        let remaining = &item.designators[1..];
+
+        // Find first Index designator (outer array index)
+        let (first_idx_pos, idx) = remaining.iter().enumerate().find_map(|(i, d)| {
             if let Designator::Index(ref idx_expr) = d {
-                self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()).map(|v| (i, v))
             } else {
                 None
             }
-        }).unwrap_or(0);
-        if idx < arr_size {
-            let elem_offset = field_offset + idx * elem_size;
-            let remaining_field_desigs: Vec<_> = item.designators[1..].iter()
-                .filter(|d| matches!(d, Designator::Field(_)))
-                .cloned()
-                .collect();
-            if !remaining_field_desigs.is_empty() {
+        }).unwrap_or((0, 0));
+
+        if idx >= arr_size {
+            return idx;
+        }
+
+        let elem_offset = field_offset + idx * elem_size;
+
+        // Check for further designators after the first Index
+        let after_first_idx = &remaining[first_idx_pos + 1..];
+
+        // Collect remaining Field designators for struct drilling
+        let remaining_field_desigs: Vec<_> = after_first_idx.iter()
+            .filter(|d| matches!(d, Designator::Field(_)))
+            .cloned()
+            .collect();
+
+        // Collect remaining Index designators for multi-dimensional array drilling
+        let remaining_index_desigs: Vec<_> = after_first_idx.iter()
+            .filter(|d| matches!(d, Designator::Index(_)))
+            .cloned()
+            .collect();
+
+        if !remaining_field_desigs.is_empty() {
+            // Drill into struct element: .a[1].b = val
+            if !remaining_index_desigs.is_empty() {
+                // .a[1].b[2] - remaining has both field and index
+                // Build designator list with fields and indices from after_first_idx
+                let sub_desigs: Vec<_> = after_first_idx.iter().cloned().collect();
+                if let Some(sub_layout) = self.get_struct_layout_for_ctype(elem_ty) {
+                    let sub_item = InitializerItem {
+                        designators: sub_desigs,
+                        init: item.init.clone(),
+                    };
+                    self.fill_struct_global_bytes(&[sub_item], &sub_layout, bytes, elem_offset);
+                }
+            } else {
                 if let Some(sub_layout) = self.get_struct_layout_for_ctype(elem_ty) {
                     let sub_item = InitializerItem {
                         designators: remaining_field_desigs,
@@ -897,30 +933,106 @@ impl Lowerer {
                     };
                     self.fill_struct_global_bytes(&[sub_item], &sub_layout, bytes, elem_offset);
                 }
-            } else if let Initializer::Expr(ref expr) = item.init {
-                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
-            } else if let Initializer::List(ref sub_items) = item.init {
-                // Handle list init for array element (e.g., .a[1] = {1,2,3})
-                match elem_ty {
-                    CType::Array(inner_elem_ty, Some(inner_size)) => {
-                        let inner_elem_size = inner_elem_ty.size();
-                        let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
-                        for (si, sub_item) in sub_items.iter().enumerate() {
-                            if si >= *inner_size { break; }
-                            if let Initializer::Expr(ref expr) = sub_item.init {
+            }
+        } else if !remaining_index_desigs.is_empty() {
+            // Multi-dimensional array: .a[1][2] = val
+            // elem_ty is the inner array type (e.g., float[10] for float a[3][10])
+            if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty {
+                // Recursively handle the inner array with the remaining index designators
+                let inner_idx = remaining_index_desigs.iter().find_map(|d| {
+                    if let Designator::Index(ref idx_expr) = d {
+                        self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                    } else {
+                        None
+                    }
+                }).unwrap_or(0);
+                if inner_idx < *inner_size {
+                    let inner_elem_size = inner_elem_ty.size();
+                    let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                    let inner_offset = elem_offset + inner_idx * inner_elem_size;
+
+                    // Check for even more Index designators (3D+ arrays)
+                    let further_indices: Vec<_> = remaining_index_desigs[1..].to_vec();
+                    if !further_indices.is_empty() {
+                        if let CType::Array(deeper_elem, Some(deeper_size)) = inner_elem_ty.as_ref() {
+                            // Build sub-item with remaining indices as [Field("dummy"), Index(...)]
+                            // Actually we can recursively call ourselves
+                            let sub_item = InitializerItem {
+                                designators: {
+                                    let mut d = vec![Designator::Field(String::new())]; // dummy field
+                                    d.extend(further_indices);
+                                    d
+                                },
+                                init: item.init.clone(),
+                            };
+                            self.fill_nested_designator_array(
+                                &sub_item, inner_elem_ty, *inner_size,
+                                bytes, elem_offset,
+                            );
+                        }
+                    } else if let Initializer::Expr(ref expr) = item.init {
+                        if let Expr::StringLiteral(s, _) = expr {
+                            if let CType::Array(deep_inner, Some(deep_size)) = inner_elem_ty.as_ref() {
+                                if matches!(deep_inner.as_ref(), CType::Char | CType::UChar) {
+                                    Self::write_string_to_bytes(bytes, inner_offset, s, *deep_size);
+                                } else {
+                                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                    self.write_const_to_bytes(bytes, inner_offset, &val, inner_ir_ty);
+                                }
+                            } else {
                                 let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                                let inner_offset = elem_offset + si * inner_elem_size;
                                 self.write_const_to_bytes(bytes, inner_offset, &val, inner_ir_ty);
                             }
+                        } else {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            self.write_const_to_bytes(bytes, inner_offset, &val, inner_ir_ty);
                         }
                     }
-                    CType::Struct(ref st) => {
-                        let sub_layout = StructLayout::for_struct(&st.fields);
-                        self.fill_struct_global_bytes(sub_items, &sub_layout, bytes, elem_offset);
-                    }
-                    _ => {}
                 }
+            }
+        } else if let Initializer::Expr(ref expr) = item.init {
+            // No further designators - store value at elem_offset
+            // Handle string literal initializing a char array element
+            // (e.g., .a[1] = "abc" where a is char a[3][10])
+            if let Expr::StringLiteral(s, _) = expr {
+                if let CType::Array(inner, Some(inner_size)) = elem_ty {
+                    if matches!(inner.as_ref(), CType::Char | CType::UChar) {
+                        Self::write_string_to_bytes(bytes, elem_offset, s, *inner_size);
+                    } else {
+                        let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                    }
+                } else if matches!(elem_ty, CType::Char | CType::UChar) {
+                    let val = s.as_bytes().first().map(|&b| IrConst::I8(b as i8)).unwrap_or(IrConst::I8(0));
+                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                } else {
+                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                }
+            } else {
+                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+            }
+        } else if let Initializer::List(ref sub_items) = item.init {
+            // Handle list init for array element (e.g., .a[1] = {1,2,3})
+            match elem_ty {
+                CType::Array(inner_elem_ty, Some(inner_size)) => {
+                    let inner_elem_size = inner_elem_ty.size();
+                    let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                    for (si, sub_item) in sub_items.iter().enumerate() {
+                        if si >= *inner_size { break; }
+                        if let Initializer::Expr(ref expr) = sub_item.init {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let inner_offset = elem_offset + si * inner_elem_size;
+                            self.write_const_to_bytes(bytes, inner_offset, &val, inner_ir_ty);
+                        }
+                    }
+                }
+                CType::Struct(ref st) => {
+                    let sub_layout = StructLayout::for_struct(&st.fields);
+                    self.fill_struct_global_bytes(sub_items, &sub_layout, bytes, elem_offset);
+                }
+                _ => {}
             }
         }
         idx
