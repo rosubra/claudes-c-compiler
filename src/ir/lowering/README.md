@@ -44,15 +44,34 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
   Used by both local and global lowering to avoid duplicating type analysis
 - **`FuncSig`** - Consolidated function signature (return type, param types, sret/two-reg info)
 - **`FunctionMeta`** - Maps function names to `FuncSig` (direct calls) and `ptr_sigs` (function pointers)
+- **`FunctionTypedefInfo`** - Extracted function/fptr typedef metadata (return type, params, variadic)
+- **`ParamKind`** - Classifies how each C parameter maps to IR params after ABI decomposition
+  (Normal, Struct, ComplexDecomposed, ComplexFloatPacked)
+- **`IrParamBuildResult`** - Result of `build_ir_params`: IR param list, param kinds, sret flag
 - **`ScopeFrame`** - Records additions/shadows per block scope. `pop_scope()` undoes
   changes in O(changes) rather than cloning entire HashMaps
 
 ### Key Helpers
 
+- `extract_func_typedef_info(base, derived)` - Extract function typedef info from declarator (shared by pass 0 and stmt.rs)
+- `extract_fptr_typedef_info(base, derived)` - Extract function-pointer typedef info (shared by pass 0 and stmt.rs)
+- `collect_all_typedefs(tu)` - Pass 0: collect all global typedefs into type maps
 - `shadow_local_for_scope(name)` - Remove local and track for scope restoration
 - `register_block_func_meta(name, ...)` - Register function metadata for block-scope declarations
 - `lower_return_expr(e)` - Handles all return conventions (sret, two-reg, complex, scalar)
 - `lower_local_init_expr(...)` / `lower_local_init_list(...)` - Dispatch init by type
+
+### Function Lowering Pipeline
+
+`lower_function` orchestrates function lowering via focused sub-methods:
+
+1. `compute_function_return_type` - Resolve return type, register complex return CType
+2. `build_ir_params` - Build IR parameter list with ABI decomposition (complex → real/imag,
+   struct pass-by-value, packed complex float)
+3. `allocate_function_params` - 3-phase parameter alloca emission: (1) sret pointer,
+   (2) normal/struct params, (3) complex decomposed/packed reconstruction
+4. `handle_kr_float_promotion` - K&R float→double narrowing stores
+5. `finalize_function` - Emit implicit return, register IR function
 
 ### Global Initialization Subsystem
 

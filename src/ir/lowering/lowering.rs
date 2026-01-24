@@ -203,6 +203,66 @@ pub(super) struct FunctionTypedefInfo {
     pub variadic: bool,
 }
 
+/// Extract function typedef info from a declarator with `Function` derived declarators.
+///
+/// For typedefs like `typedef int func_t(int x);`, finds the `Function` derived
+/// and builds the return type by counting leading `Pointer` deriveds. Returns None
+/// if no `Function` derived is present or if `FunctionPointer` is also present.
+pub(super) fn extract_func_typedef_info(
+    base_type: &TypeSpecifier,
+    derived: &[DerivedDeclarator],
+) -> Option<FunctionTypedefInfo> {
+    let has_func = derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)));
+    let has_fptr = derived.iter().any(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
+    if !has_func || has_fptr {
+        return None;
+    }
+    let (params, variadic) = derived.iter().find_map(|d| {
+        if let DerivedDeclarator::Function(p, v) = d { Some((p, v)) } else { None }
+    })?;
+    let ptr_count = derived.iter()
+        .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+        .count();
+    let mut return_type = base_type.clone();
+    for _ in 0..ptr_count {
+        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+    }
+    Some(FunctionTypedefInfo {
+        return_type,
+        params: params.clone(),
+        variadic: *variadic,
+    })
+}
+
+/// Extract function pointer typedef info from a declarator with `FunctionPointer`
+/// derived declarators.
+///
+/// For typedefs like `typedef void *(*lua_Alloc)(void *, ...)`, finds the
+/// `FunctionPointer` derived and builds the return type. The last `Pointer` before
+/// `FunctionPointer` is the `(*)` indirection, not a return-type pointer.
+pub(super) fn extract_fptr_typedef_info(
+    base_type: &TypeSpecifier,
+    derived: &[DerivedDeclarator],
+) -> Option<FunctionTypedefInfo> {
+    let (params, variadic) = derived.iter().find_map(|d| {
+        if let DerivedDeclarator::FunctionPointer(p, v) = d { Some((p, v)) } else { None }
+    })?;
+    let ptr_count_before_fptr = derived.iter()
+        .take_while(|d| !matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
+        .filter(|d| matches!(d, DerivedDeclarator::Pointer))
+        .count();
+    let ret_ptr_count = ptr_count_before_fptr.saturating_sub(1);
+    let mut return_type = base_type.clone();
+    for _ in 0..ret_ptr_count {
+        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+    }
+    Some(FunctionTypedefInfo {
+        return_type,
+        params: params.clone(),
+        variadic: *variadic,
+    })
+}
+
 /// Consolidated function signature metadata.
 /// Replaces 10 parallel HashMaps with a single struct per function.
 #[derive(Debug, Clone)]
@@ -680,6 +740,35 @@ pub struct Lowerer {
     pub(super) emitted_global_names: HashSet<String>,
 }
 
+/// Tracks how each original C parameter maps to IR parameters after ABI decomposition.
+///
+/// Used by `build_ir_params` to record what happened to each original parameter,
+/// so `allocate_function_params` knows which registration method to call.
+#[derive(Debug)]
+enum ParamKind {
+    /// Normal parameter: 1 IR param at the given index
+    Normal(usize),
+    /// Struct/union or non-decomposed complex parameter passed by value
+    Struct(usize),
+    /// Complex parameter passed as two decomposed FP params (real_ir_idx, imag_ir_idx)
+    ComplexDecomposed(usize, usize),
+    /// Complex float packed into single F64 (x86-64 only)
+    ComplexFloatPacked(usize),
+}
+
+/// Result of building the IR parameter list for a function.
+///
+/// Produced by `build_ir_params`, consumed by `allocate_function_params` and
+/// `finalize_function`.
+struct IrParamBuildResult {
+    /// The IR parameters to use for the function signature
+    params: Vec<IrParam>,
+    /// Per-original-parameter: how it maps to IR params (indexed by original param index)
+    param_kinds: Vec<ParamKind>,
+    /// Whether the function uses sret (hidden first pointer param)
+    uses_sret: bool,
+}
+
 impl Lowerer {
     pub fn new(target: Target) -> Self {
         Self {
@@ -817,79 +906,7 @@ impl Lowerer {
 
         // Pass 0: Collect all global typedef declarations so that function return
         // types and parameter types that use typedefs can be resolved in pass 1.
-        for decl in &tu.decls {
-            if let ExternalDecl::Declaration(decl) = decl {
-                if decl.is_typedef {
-                    for declarator in &decl.declarators {
-                        if !declarator.name.is_empty() {
-                            // Check if this typedef defines a function type
-                            // (e.g., typedef int func_t(int, int);)
-                            let has_func_derived = declarator.derived.iter().any(|d|
-                                matches!(d, DerivedDeclarator::Function(_, _)));
-                            let has_fptr_derived = declarator.derived.iter().any(|d|
-                                matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
-
-                            if has_func_derived && !has_fptr_derived {
-                                // This is a function typedef like typedef int func_t(int x);
-                                // Extract params and variadic from the Function derived
-                                if let Some(DerivedDeclarator::Function(params, variadic)) =
-                                    declarator.derived.iter().find(|d| matches!(d, DerivedDeclarator::Function(_, _)))
-                                {
-                                    // Count pointer levels before the Function derived
-                                    let ptr_count = declarator.derived.iter()
-                                        .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
-                                        .count();
-                                    let mut return_type = decl.type_spec.clone();
-                                    for _ in 0..ptr_count {
-                                        return_type = TypeSpecifier::Pointer(Box::new(return_type));
-                                    }
-                                    self.types.function_typedefs.insert(declarator.name.clone(), FunctionTypedefInfo {
-                                        return_type,
-                                        params: params.clone(),
-                                        variadic: *variadic,
-                                    });
-                                }
-                            }
-
-                            // Track function pointer typedefs (e.g., typedef void *(*lua_Alloc)(void *, ...))
-                            // These have a FunctionPointer derived declarator
-                            if has_fptr_derived {
-                                if let Some(fptr_derived) = declarator.derived.iter().find(|d|
-                                    matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-                                {
-                                    if let DerivedDeclarator::FunctionPointer(params, variadic) = fptr_derived {
-                                        // Build the return type from the base type spec + any
-                                        // pointer deriveds before the FunctionPointer.
-                                        // The last Pointer before FunctionPointer is the function
-                                        // pointer indirection (*), not a return type pointer.
-                                        let ptr_count_before_fptr = declarator.derived.iter()
-                                            .take_while(|d| !matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-                                            .filter(|d| matches!(d, DerivedDeclarator::Pointer))
-                                            .count();
-                                        let mut return_type = decl.type_spec.clone();
-                                        for _ in 0..ptr_count_before_fptr.saturating_sub(1) {
-                                            return_type = TypeSpecifier::Pointer(Box::new(return_type));
-                                        }
-                                        self.types.func_ptr_typedefs.insert(declarator.name.clone());
-                                        self.types.func_ptr_typedef_info.insert(declarator.name.clone(), FunctionTypedefInfo {
-                                            return_type,
-                                            params: params.clone(),
-                                            variadic: *variadic,
-                                        });
-                                    }
-                                }
-                            }
-
-                            // Store CType directly in typedefs map
-                            let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
-                            self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
-                        }
-                    }
-                }
-                // Also register struct/union type definitions so sizeof works for typedefs
-                self.register_struct_type(&decl.type_spec);
-            }
-        }
+        self.collect_all_typedefs(tu);
 
         // First pass: collect all function signatures (return types, param types,
         // variadic status, sret) so we can distinguish functions from globals and
@@ -1248,97 +1265,94 @@ impl Lowerer {
         self.func_mut().instrs.clear();
     }
 
+    /// Lower a function definition to IR.
+    ///
+    /// Orchestrates the function lowering pipeline:
+    /// 1. Set up return type (handling sret, two-reg, complex ABI overrides)
+    /// 2. Build IR parameter list (decomposing complex params for ABI)
+    /// 3. Allocate parameters as locals (3-phase: basic allocas, struct setup, complex reconstruction)
+    /// 4. Handle K&R float promotion
+    /// 5. Lower the function body
+    /// 6. Finalize (implicit return, emit IrFunction)
     fn lower_function(&mut self, func: &FunctionDef) {
-        // Skip duplicate function definitions (can happen with static inline in headers)
         if self.defined_functions.contains(&func.name) {
             return;
         }
         self.defined_functions.insert(func.name.clone());
 
-        let mut return_type = self.type_spec_to_ir(&func.return_type);
         let return_is_bool = self.is_type_bool(&func.return_type);
-
-        // Create fresh per-function build state
+        let base_return_type = self.type_spec_to_ir(&func.return_type);
         self.func_state = Some(FunctionBuildState::new(
-            func.name.clone(),
-            return_type,
-            return_is_bool,
+            func.name.clone(), base_return_type, return_is_bool,
         ));
-        // Push a function-level scope to track enum constants declared inside
-        // function bodies (they shouldn't leak to subsequent functions).
         self.push_scope();
 
-        // Record return CType for complex-returning functions
-        let ret_ctype = self.type_spec_to_ctype(&func.return_type);
-        if ret_ctype.is_complex() {
-            self.types.func_return_ctypes.insert(func.name.clone(), ret_ctype);
-        }
-
-        // Check if this function uses sret (returns struct > 16 bytes via hidden pointer)
-        let uses_sret = self.func_meta.sigs.get(&func.name).and_then(|s| s.sret_size).is_some();
-        // Check if this function returns a 9-16 byte struct via two registers
-        let uses_two_reg_return = self.func_meta.sigs.get(&func.name).and_then(|s| s.two_reg_ret_size).is_some();
-
-        // For two-register struct returns (9-16 bytes), use I128 as the IR return type
-        if uses_two_reg_return {
-            return_type = IrType::I128;
-        }
-
-        // Complex returns via FP registers, not sret. Override return type.
-        // _Complex double: real in first FP reg, imag in second (both F64)
-        // _Complex float:
-        //   x86-64: two packed F32 in one xmm0 -> F64
-        //   ARM/RISC-V: real in first FP reg (F32), imag in second FP reg (F32)
-        if !uses_sret && !uses_two_reg_return {
-            let ret_ct = self.type_spec_to_ctype(&func.return_type);
-            if matches!(ret_ct, CType::ComplexDouble) {
-                return_type = IrType::F64;
-            } else if matches!(ret_ct, CType::ComplexFloat) {
-                if self.uses_packed_complex_float() {
-                    return_type = IrType::F64;
-                } else {
-                    return_type = IrType::F32;
-                }
-            }
-        }
+        // Step 1: Compute ABI-adjusted return type
+        let return_type = self.compute_function_return_type(func);
         self.func_mut().return_type = return_type;
 
+        // Step 2: Build IR parameter list with ABI decomposition
+        let param_info = self.build_ir_params(func);
+
+        // Step 3: Allocate parameters as locals (3-phase)
+        self.start_block("entry".to_string());
+        self.func_mut().sret_ptr = None;
+        self.allocate_function_params(func, &param_info);
+
+        // Step 4: K&R float promotion
+        self.handle_kr_float_promotion(func);
+
+        // Step 5: Lower body
+        self.lower_compound_stmt(&func.body);
+
+        // Step 6: Finalize
+        self.finalize_function(func, return_type, param_info.params);
+    }
+
+    /// Compute the IR return type for a function, applying ABI overrides.
+    fn compute_function_return_type(&mut self, func: &FunctionDef) -> IrType {
+        let return_type = self.type_spec_to_ir(&func.return_type);
+
+        let ret_ctype = self.type_spec_to_ctype(&func.return_type);
+        if ret_ctype.is_complex() {
+            self.types.func_return_ctypes.insert(func.name.clone(), ret_ctype.clone());
+        }
+        return_type
+    }
+
+    /// Build the IR parameter list for a function, handling ABI decomposition.
+    fn build_ir_params(&mut self, func: &FunctionDef) -> IrParamBuildResult {
+        let uses_sret = self.func_meta.sigs.get(&func.name).and_then(|s| s.sret_size).is_some();
+        let uses_packed_cf = self.uses_packed_complex_float();
         let mut params: Vec<IrParam> = Vec::new();
-        // If sret, prepend hidden pointer parameter
+        let mut param_kinds: Vec<ParamKind> = Vec::new();
+
         if uses_sret {
             params.push(IrParam { name: "__sret_ptr".to_string(), ty: IrType::Ptr, struct_size: None });
         }
-        // Build IR params, decomposing complex double/float into two FP params for ABI compliance.
-        // ir_param_to_orig[ir_idx] = original func.params index
-        // complex_decomposed: set of original indices that were decomposed
-        let mut ir_param_to_orig: Vec<Option<usize>> = Vec::new();
-        let mut complex_decomposed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        if uses_sret {
-            ir_param_to_orig.push(None); // sret param has no original
-        }
-        let mut complex_float_params: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let uses_packed_cf = self.uses_packed_complex_float();
-        for (orig_idx, p) in func.params.iter().enumerate() {
+
+        for (_orig_idx, p) in func.params.iter().enumerate() {
             let param_ct = self.type_spec_to_ctype(&p.type_spec);
+            let name = p.name.clone().unwrap_or_default();
+
             let is_complex_decomposed = if uses_packed_cf {
                 matches!(param_ct, CType::ComplexDouble | CType::ComplexLongDouble)
             } else {
                 param_ct.is_complex()
             };
-            let is_complex_float = uses_packed_cf && matches!(param_ct, CType::ComplexFloat);
+            let is_complex_float_packed = uses_packed_cf && matches!(param_ct, CType::ComplexFloat);
+
             if is_complex_decomposed {
                 let comp_ty = Self::complex_component_ir_type(&param_ct);
-                let name = p.name.clone().unwrap_or_default();
+                let real_idx = params.len();
                 params.push(IrParam { name: format!("{}_real", name), ty: comp_ty, struct_size: None });
-                ir_param_to_orig.push(Some(orig_idx));
+                let imag_idx = params.len();
                 params.push(IrParam { name: format!("{}_imag", name), ty: comp_ty, struct_size: None });
-                ir_param_to_orig.push(Some(orig_idx));
-                complex_decomposed.insert(orig_idx);
-            } else if is_complex_float {
-                let name = p.name.clone().unwrap_or_default();
+                param_kinds.push(ParamKind::ComplexDecomposed(real_idx, imag_idx));
+            } else if is_complex_float_packed {
+                let ir_idx = params.len();
                 params.push(IrParam { name: format!("{}_packed", name), ty: IrType::F64, struct_size: None });
-                ir_param_to_orig.push(Some(orig_idx));
-                complex_float_params.insert(orig_idx);
+                param_kinds.push(ParamKind::ComplexFloatPacked(ir_idx));
             } else {
                 let ty = self.type_spec_to_ir(&p.type_spec);
                 let ty = if func.is_kr && ty == IrType::F32 { IrType::F64 } else { ty };
@@ -1347,452 +1361,181 @@ impl Lowerer {
                 } else {
                     None
                 };
-                params.push(IrParam {
-                    name: p.name.clone().unwrap_or_default(),
-                    ty,
-                    struct_size,
-                });
-                ir_param_to_orig.push(Some(orig_idx));
+                let ir_idx = params.len();
+                params.push(IrParam { name, ty, struct_size });
+                if struct_size.is_some() || param_ct.is_complex() {
+                    param_kinds.push(ParamKind::Struct(ir_idx));
+                } else {
+                    param_kinds.push(ParamKind::Normal(ir_idx));
+                }
             }
         }
 
-        // Start entry block
-        self.start_block("entry".to_string());
-        self.func_mut().sret_ptr = None;
+        IrParamBuildResult { params, param_kinds, uses_sret }
+    }
 
-        // Allocate params as local variables.
-        //
-        // For struct/union pass-by-value params, the caller passes a pointer to its struct.
-        // We use a two-phase approach:
-        // Phase 1: Emit one alloca per param (ptr-sized for struct params, normal for others).
-        //          This ensures find_param_alloca(n) returns the nth param's receiving alloca.
-        // Phase 2: Emit struct-sized allocas and Memcpy for struct params.
-
-        // Phase 1: one alloca per parameter for receiving the argument register value
-        struct StructParamInfo {
-            ptr_alloca: Value,
-            struct_size: usize,
-            struct_layout: Option<StructLayout>,
-            param_name: String,
-            c_type: Option<CType>,
-        }
-        let mut struct_params: Vec<StructParamInfo> = Vec::new();
-
-        // Track decomposed complex param allocas for Phase 3 reconstruction
-        struct ComplexDecompInfo {
-            real_alloca: Value,
-            imag_alloca: Value,
-            orig_name: String,
-            c_type: CType,
-        }
-        let mut complex_decomp_params: Vec<ComplexDecompInfo> = Vec::new();
-        // Map: orig_idx -> (real_alloca, imag_alloca) built during Phase 1
-        let mut decomp_real_allocas: std::collections::HashMap<usize, Value> = std::collections::HashMap::new();
-        let mut decomp_imag_allocas: std::collections::HashMap<usize, Value> = std::collections::HashMap::new();
-
-        for (i, param) in params.iter().enumerate() {
-            // For sret, index 0 is the hidden sret pointer param
-            if uses_sret && i == 0 {
-                // Emit alloca for hidden sret pointer, don't register as local
-                let alloca = self.fresh_value();
+    /// Allocate function parameters as local variables (3-phase process).
+    fn allocate_function_params(&mut self, func: &FunctionDef, info: &IrParamBuildResult) {
+        // Phase 1: Emit allocas for all IR params
+        let mut ir_allocas: Vec<Value> = Vec::new();
+        for param in &info.params {
+            let alloca = self.fresh_value();
+            if info.uses_sret && ir_allocas.is_empty() {
                 self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
                 self.func_mut().sret_ptr = Some(alloca);
+                ir_allocas.push(alloca);
                 continue;
             }
+            let size = param.ty.size().max(param.struct_size.unwrap_or(param.ty.size()));
+            self.emit(Instruction::Alloca { dest: alloca, ty: param.ty, size, align: 0 });
+            ir_allocas.push(alloca);
+        }
 
-            let orig_idx = match ir_param_to_orig.get(i) {
-                Some(Some(idx)) => *idx,
-                _ => continue, // shouldn't happen
-            };
-
-            // Check if this IR param is a packed complex float param
-            if complex_float_params.contains(&orig_idx) {
-                // _Complex float: F64 param holding two packed F32s in one XMM register.
-                // Emit an 8-byte alloca. emit_store_params will store the F64 value here.
-                // Since F64 and complex float are both 8 bytes with the same bit layout,
-                // we can use this alloca directly as the complex local variable.
-                let alloca = self.fresh_value();
-                self.emit(Instruction::Alloca {
-                    dest: alloca,
-                    ty: IrType::F64,
-                    size: 8,
-                    align: 0,
-                });
-                let orig_name = func.params[orig_idx].name.clone().unwrap_or_default();
-                let ct = self.type_spec_to_ctype(&func.params[orig_idx].type_spec);
-                self.insert_local_scoped(orig_name, LocalInfo {
-                    var: VarInfo {
-                        ty: IrType::Ptr,
-                        elem_size: 0,
-                        is_array: false,
-                        pointee_type: None,
-                        struct_layout: None,
-                        is_struct: true,
-                        array_dim_strides: vec![],
-                        c_type: Some(ct),
-                    },
-                    alloca,
-                    alloc_size: 8,
-                    is_bool: false,
-                    static_global_name: None,
-                    vla_strides: vec![],
-                    vla_size: None,
-                });
-                continue;
-            }
-
-            // Check if this IR param is part of a decomposed complex param
-            let is_decomposed = complex_decomposed.contains(&orig_idx);
-
-            if is_decomposed {
-                // This is a decomposed complex FP param (real or imag part).
-                // Emit a simple FP alloca for it - don't register as local yet.
-                let alloca = self.fresh_value();
-                let ty = param.ty; // F32 or F64
-                self.emit(Instruction::Alloca {
-                    dest: alloca,
-                    ty,
-                    size: ty.size(),
-                    align: 0,
-                });
-
-                // Determine if this is the real or imag part based on the param name suffix
-                let is_real = param.name.ends_with("_real");
-                if is_real {
-                    decomp_real_allocas.insert(orig_idx, alloca);
-                } else {
-                    decomp_imag_allocas.insert(orig_idx, alloca);
+        // Phase 2 & 3: Process each original parameter by kind
+        for (orig_idx, kind) in info.param_kinds.iter().enumerate() {
+            let orig_param = &func.params[orig_idx];
+            match kind {
+                ParamKind::Normal(ir_idx) => {
+                    self.register_normal_param(orig_param, &info.params[*ir_idx], ir_allocas[*ir_idx]);
                 }
-                continue;
-            }
-
-            if !param.name.is_empty() {
-                let is_struct_param = if let Some(orig_param) = func.params.get(orig_idx) {
-                    self.is_type_struct_or_union(&orig_param.type_spec)
-                } else {
-                    false
-                };
-
-                let is_complex_param = if let Some(orig_param) = func.params.get(orig_idx) {
-                    self.is_type_complex(&orig_param.type_spec)
-                } else {
-                    false
-                };
-
-                // Emit the alloca that receives the argument value from the register
-                let alloca = self.fresh_value();
-                let ty = param.ty;
-                // Use sizeof from TypeSpecifier for correct long double size (16 bytes)
-                let param_size = func.params.get(orig_idx)
-                    .map(|p| self.sizeof_type(&p.type_spec))
-                    .unwrap_or(ty.size())
-                    .max(ty.size());
-                self.emit(Instruction::Alloca {
-                    dest: alloca,
-                    ty,
-                    size: param_size,
-                    align: 0,
-                });
-
-                if is_struct_param || is_complex_param {
-                    // Record that we need to create a struct/complex copy for this param
-                    let layout = if is_struct_param {
-                        func.params.get(orig_idx)
-                            .and_then(|p| self.get_struct_layout_for_type(&p.type_spec))
-                    } else {
-                        None
-                    };
-                    let struct_size = if is_complex_param {
-                        func.params.get(orig_idx)
-                            .map(|p| self.sizeof_type(&p.type_spec))
-                            .unwrap_or(16)
-                    } else {
-                        layout.as_ref().map_or(8, |l| l.size)
-                    };
-                    let param_ctype = func.params.get(orig_idx).map(|p| self.type_spec_to_ctype(&p.type_spec));
-                    struct_params.push(StructParamInfo {
-                        ptr_alloca: alloca,
-                        struct_size,
-                        struct_layout: layout,
-                        param_name: param.name.clone(),
-                        c_type: param_ctype,
-                    });
-                } else {
-                    // Normal parameter: register as local immediately
-                    let elem_size = if ty == IrType::Ptr {
-                        func.params.get(orig_idx).map_or(0, |p| self.pointee_elem_size(&p.type_spec))
-                    } else { 0 };
-
-                    let pointee_type = if ty == IrType::Ptr {
-                        func.params.get(orig_idx).and_then(|p| self.pointee_ir_type(&p.type_spec))
-                    } else { None };
-
-                    let struct_layout = if ty == IrType::Ptr {
-                        func.params.get(orig_idx).and_then(|p| self.get_struct_layout_for_pointer_param(&p.type_spec))
-                    } else { None };
-
-                    let c_type = func.params.get(orig_idx).map(|p| self.param_ctype(p));
-                    let is_bool = func.params.get(orig_idx).map_or(false, |p| {
-                        self.is_type_bool(&p.type_spec)
-                    });
-
-                    // For pointer-to-array params (e.g., int (*)[3] from int arr[N][3]),
-                    // compute array_dim_strides so multi-dim subscripts work.
-                    let array_dim_strides = if ty == IrType::Ptr {
-                        func.params.get(orig_idx).map_or(vec![], |p| self.compute_ptr_array_strides(&p.type_spec))
-                    } else { vec![] };
-
-                    self.insert_local_scoped(param.name.clone(), LocalInfo {
-                        var: VarInfo {
-                            ty,
-                            elem_size,
-                            is_array: false,
-                            pointee_type,
-                            struct_layout,
-                            is_struct: false,
-                            array_dim_strides,
-                            c_type,
-                        },
-                        alloca,
-                        alloc_size: param_size,
-                        is_bool,
-                        static_global_name: None,
-                        vla_strides: vec![],
-                        vla_size: None,
-                    });
-
-                    // For function pointer parameters, register their return type and
-                    // parameter types so indirect calls can perform correct argument casts
-                    if let Some(p) = func.params.get(orig_idx) {
-                        if let Some(ref fptr_params) = p.fptr_params {
-                            let ret_ty = self.type_spec_to_ir(&p.type_spec);
-                            // Strip the Pointer wrapper: type_spec is Pointer(ReturnType)
-                            let ret_ty = match &p.type_spec {
-                                TypeSpecifier::Pointer(inner) => self.type_spec_to_ir(inner),
-                                _ => ret_ty,
-                            };
-                            if let Some(ref name) = p.name {
-                                let param_tys: Vec<IrType> = fptr_params.iter().map(|fp| {
-                                    self.type_spec_to_ir(&fp.type_spec)
-                                }).collect();
-                                self.func_meta.ptr_sigs.insert(name.clone(), FuncSig {
-                                    return_type: ret_ty,
-                                    return_ctype: None,
-                                    param_types: param_tys,
-                                    param_ctypes: Vec::new(),
-                                    param_bool_flags: Vec::new(),
-                                    is_variadic: false,
-                                    sret_size: None,
-                                    two_reg_ret_size: None,
-                                    param_struct_sizes: Vec::new(),
-                                });
-                            }
-                        }
-                    }
+                ParamKind::Struct(ir_idx) => {
+                    self.register_struct_or_complex_param(orig_param, ir_allocas[*ir_idx]);
+                }
+                ParamKind::ComplexFloatPacked(ir_idx) => {
+                    self.register_packed_complex_float_param(orig_param, ir_allocas[*ir_idx]);
+                }
+                ParamKind::ComplexDecomposed(real_ir_idx, imag_ir_idx) => {
+                    self.reconstruct_decomposed_complex_param(
+                        orig_param, ir_allocas[*real_ir_idx], ir_allocas[*imag_ir_idx],
+                    );
                 }
             }
         }
 
-        // Collect decomposed complex param info for Phase 3
-        for &orig_idx in &complex_decomposed {
-            if let (Some(&real_alloca), Some(&imag_alloca)) = (decomp_real_allocas.get(&orig_idx), decomp_imag_allocas.get(&orig_idx)) {
-                let orig_name = func.params[orig_idx].name.clone().unwrap_or_default();
-                let ct = self.type_spec_to_ctype(&func.params[orig_idx].type_spec);
-                complex_decomp_params.push(ComplexDecompInfo {
-                    real_alloca,
-                    imag_alloca,
-                    orig_name,
-                    c_type: ct,
-                });
-            }
-        }
-
-        // Phase 2: For struct params, set up local variable.
-        // Both small structs (<= 16 bytes, passed in registers) and large structs
-        // (> 16 bytes, MEMORY class, passed on stack) have their data stored directly
-        // into the Phase 1 alloca by emit_store_params. No extra alloca or copy needed.
-        for sp in struct_params {
-            let struct_alloca = sp.ptr_alloca;
-
-            // Register the struct alloca as the local variable
-            self.insert_local_scoped(sp.param_name, LocalInfo {
-                var: VarInfo {
-                    ty: IrType::Ptr,
-                    elem_size: 0,
-                    is_array: false,
-                    pointee_type: None,
-                    struct_layout: sp.struct_layout,
-                    is_struct: true,
-                    array_dim_strides: vec![],
-                    c_type: sp.c_type,
-                },
-                alloca: struct_alloca,
-                alloc_size: sp.struct_size,
-                is_bool: false,
-                static_global_name: None,
-                vla_strides: vec![],
-                vla_size: None,
-            });
-        }
-
-        // Phase 3: For decomposed complex params, create a complex alloca and store
-        // the real/imag FP values (loaded from their Phase 1 allocas) into it.
-        for cdp in complex_decomp_params {
-            let comp_ty = Self::complex_component_ir_type(&cdp.c_type);
-            let comp_size = Self::complex_component_size(&cdp.c_type);
-            let complex_size = cdp.c_type.size();
-
-            // Allocate complex-sized stack slot
-            let complex_alloca = self.fresh_value();
-            self.emit(Instruction::Alloca {
-                dest: complex_alloca,
-                ty: IrType::Ptr,
-                size: complex_size,
-                align: 0,
-            });
-
-            // Load real part from its param alloca
-            let real_val = self.fresh_value();
-            self.emit(Instruction::Load {
-                dest: real_val,
-                ptr: cdp.real_alloca,
-                ty: comp_ty,
-            });
-
-            // Store real part into complex alloca at offset 0
-            self.emit(Instruction::Store {
-                val: Operand::Value(real_val),
-                ptr: complex_alloca,
-                ty: comp_ty,
-            });
-
-            // Load imag part from its param alloca
-            let imag_val = self.fresh_value();
-            self.emit(Instruction::Load {
-                dest: imag_val,
-                ptr: cdp.imag_alloca,
-                ty: comp_ty,
-            });
-
-            // Store imag part into complex alloca at offset comp_size
-            let imag_ptr = self.fresh_value();
-            self.emit(Instruction::GetElementPtr {
-                dest: imag_ptr,
-                base: complex_alloca,
-                offset: Operand::Const(IrConst::I64(comp_size as i64)),
-                ty: IrType::I8,
-            });
-            self.emit(Instruction::Store {
-                val: Operand::Value(imag_val),
-                ptr: imag_ptr,
-                ty: comp_ty,
-            });
-
-            // Register the complex alloca as the local variable
-            self.func_mut().locals.insert(cdp.orig_name, LocalInfo {
-                var: VarInfo {
-                    ty: IrType::Ptr,
-                    elem_size: 0,
-                    is_array: false,
-                    pointee_type: None,
-                    struct_layout: None,
-                    is_struct: true,
-                    array_dim_strides: vec![],
-                    c_type: Some(cdp.c_type),
-                },
-                alloca: complex_alloca,
-                alloc_size: complex_size,
-                is_bool: false,
-                static_global_name: None,
-                vla_strides: vec![],
-                vla_size: None,
-            });
-        }
-
-        // VLA stride computation: for pointer-to-array parameters with runtime dimensions
-        // (e.g., int m[rows][cols]), compute strides at runtime using the dimension parameters.
         self.compute_vla_param_strides(func);
+    }
 
-        // K&R float promotion: for K&R functions with float params (promoted to double for ABI),
-        // load the double value, narrow to float, and update the local to use the float alloca.
-        if func.is_kr {
-            for (i, param) in func.params.iter().enumerate() {
-                let declared_ty = self.type_spec_to_ir(&param.type_spec);
-                if declared_ty == IrType::F32 {
-                    // The param alloca currently holds an F64 (double) value
-                    if let Some(local_info) = self.func_mut().locals.get(&param.name.clone().unwrap_or_default()).cloned() {
-                        let f64_alloca = local_info.alloca;
-                        // Load the F64 value
-                        let f64_val = self.fresh_value();
-                        self.emit(Instruction::Load {
-                            dest: f64_val,
-                            ptr: f64_alloca,
-                            ty: IrType::F64,
-                        });
-                        // Cast F64 -> F32
-                        let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
-                        // Create a new F32 alloca
-                        let f32_alloca = self.fresh_value();
-                        self.emit(Instruction::Alloca {
-                            dest: f32_alloca,
-                            ty: IrType::F32,
-                            size: 4,
-                            align: 0,
-                        });
-                        // Store F32 value
-                        self.emit(Instruction::Store {
-                            val: Operand::Value(f32_val),
-                            ptr: f32_alloca,
-                            ty: IrType::F32,
-                        });
-                        // Update local to point to F32 alloca
-                        let name = param.name.clone().unwrap_or_default();
-                        if let Some(local) = self.func_mut().locals.get_mut(&name) {
-                            local.alloca = f32_alloca;
-                            local.ty = IrType::F32;
-                            local.alloc_size = 4;
-                        }
-                    }
-                }
+    /// Register a normal (non-struct, non-complex) parameter as a local variable.
+    fn register_normal_param(&mut self, orig_param: &ParamDecl, ir_param: &IrParam, alloca: Value) {
+        let ty = ir_param.ty;
+        let param_size = self.sizeof_type(&orig_param.type_spec).max(ty.size());
+        let elem_size = if ty == IrType::Ptr { self.pointee_elem_size(&orig_param.type_spec) } else { 0 };
+        let pointee_type = if ty == IrType::Ptr { self.pointee_ir_type(&orig_param.type_spec) } else { None };
+        let struct_layout = if ty == IrType::Ptr { self.get_struct_layout_for_pointer_param(&orig_param.type_spec) } else { None };
+        let c_type = Some(self.param_ctype(orig_param));
+        let is_bool = self.is_type_bool(&orig_param.type_spec);
+        let array_dim_strides = if ty == IrType::Ptr { self.compute_ptr_array_strides(&orig_param.type_spec) } else { vec![] };
+
+        let name = orig_param.name.clone().unwrap_or_default();
+        self.insert_local_scoped(name, LocalInfo {
+            var: VarInfo { ty, elem_size, is_array: false, pointee_type, struct_layout, is_struct: false, array_dim_strides, c_type },
+            alloca, alloc_size: param_size, is_bool, static_global_name: None, vla_strides: vec![], vla_size: None,
+        });
+
+        // Register function pointer parameter signatures for indirect calls
+        if let Some(ref fptr_params) = orig_param.fptr_params {
+            let ret_ty = match &orig_param.type_spec {
+                TypeSpecifier::Pointer(inner) => self.type_spec_to_ir(inner),
+                _ => self.type_spec_to_ir(&orig_param.type_spec),
+            };
+            if let Some(ref name) = orig_param.name {
+                let param_tys: Vec<IrType> = fptr_params.iter().map(|fp| self.type_spec_to_ir(&fp.type_spec)).collect();
+                self.func_meta.ptr_sigs.insert(name.clone(), FuncSig {
+                    return_type: ret_ty, return_ctype: None, param_types: param_tys,
+                    param_ctypes: Vec::new(), param_bool_flags: Vec::new(), is_variadic: false,
+                    sret_size: None, two_reg_ret_size: None, param_struct_sizes: Vec::new(),
+                });
             }
         }
+    }
 
-        // Lower body
-        self.lower_compound_stmt(&func.body);
+    /// Register a struct/union or non-decomposed complex parameter as a local variable.
+    fn register_struct_or_complex_param(&mut self, orig_param: &ParamDecl, alloca: Value) {
+        let is_struct = self.is_type_struct_or_union(&orig_param.type_spec);
+        let layout = if is_struct { self.get_struct_layout_for_type(&orig_param.type_spec) } else { None };
+        let size = if is_struct { layout.as_ref().map_or(8, |l| l.size) } else { self.sizeof_type(&orig_param.type_spec) };
+        let c_type = Some(self.type_spec_to_ctype(&orig_param.type_spec));
 
-        // If no terminator, add implicit return
+        let name = orig_param.name.clone().unwrap_or_default();
+        self.insert_local_scoped(name, LocalInfo {
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: layout, is_struct: true, array_dim_strides: vec![], c_type },
+            alloca, alloc_size: size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
+        });
+    }
+
+    /// Register a packed complex float parameter (x86-64 only) as a local variable.
+    fn register_packed_complex_float_param(&mut self, orig_param: &ParamDecl, alloca: Value) {
+        let ct = self.type_spec_to_ctype(&orig_param.type_spec);
+        let name = orig_param.name.clone().unwrap_or_default();
+        self.insert_local_scoped(name, LocalInfo {
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct) },
+            alloca, alloc_size: 8, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
+        });
+    }
+
+    /// Reconstruct a decomposed complex parameter from its real/imag Phase 1 allocas.
+    fn reconstruct_decomposed_complex_param(&mut self, orig_param: &ParamDecl, real_alloca: Value, imag_alloca: Value) {
+        let ct = self.type_spec_to_ctype(&orig_param.type_spec);
+        let comp_ty = Self::complex_component_ir_type(&ct);
+        let comp_size = Self::complex_component_size(&ct);
+        let complex_size = ct.size();
+
+        let complex_alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: complex_alloca, ty: IrType::Ptr, size: complex_size, align: 0 });
+
+        let real_val = self.fresh_value();
+        self.emit(Instruction::Load { dest: real_val, ptr: real_alloca, ty: comp_ty });
+        self.emit(Instruction::Store { val: Operand::Value(real_val), ptr: complex_alloca, ty: comp_ty });
+
+        let imag_val = self.fresh_value();
+        self.emit(Instruction::Load { dest: imag_val, ptr: imag_alloca, ty: comp_ty });
+        let imag_ptr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr { dest: imag_ptr, base: complex_alloca, offset: Operand::Const(IrConst::I64(comp_size as i64)), ty: IrType::I8 });
+        self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: comp_ty });
+
+        let name = orig_param.name.clone().unwrap_or_default();
+        self.func_mut().locals.insert(name, LocalInfo {
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct) },
+            alloca: complex_alloca, alloc_size: complex_size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None,
+        });
+    }
+
+    /// Handle K&R float promotion: narrow double params back to declared float type.
+    fn handle_kr_float_promotion(&mut self, func: &FunctionDef) {
+        if !func.is_kr { return; }
+        for param in &func.params {
+            if self.type_spec_to_ir(&param.type_spec) != IrType::F32 { continue; }
+            let name = param.name.clone().unwrap_or_default();
+            let local_info = match self.func_mut().locals.get(&name).cloned() { Some(i) => i, None => continue };
+            let f64_val = self.fresh_value();
+            self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 });
+            let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
+            let f32_alloca = self.fresh_value();
+            self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0 });
+            self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 });
+            if let Some(local) = self.func_mut().locals.get_mut(&name) {
+                local.alloca = f32_alloca; local.ty = IrType::F32; local.alloc_size = 4;
+            }
+        }
+    }
+
+    /// Finalize a function: add implicit return, build IrFunction, push to module.
+    fn finalize_function(&mut self, func: &FunctionDef, return_type: IrType, params: Vec<IrParam>) {
         if !self.func_mut().instrs.is_empty() || self.func_mut().blocks.is_empty()
            || !matches!(self.func_mut().blocks.last().map(|b| &b.terminator), Some(Terminator::Return(_)))
         {
-            let ret_op = if return_type == IrType::Void {
-                None
-            } else {
-                Some(Operand::Const(IrConst::I32(0)))
-            };
+            let ret_op = if return_type == IrType::Void { None } else { Some(Operand::Const(IrConst::I32(0))) };
             self.terminate(Terminator::Return(ret_op));
         }
 
-        // A function has internal linkage if it was declared static anywhere
-        // in the translation unit (C99 6.2.2p5: once declared with internal
-        // linkage, all subsequent declarations also have internal linkage).
         let is_static = func.is_static || self.static_functions.contains(&func.name);
         let ir_func = IrFunction {
-            name: func.name.clone(),
-            return_type,
-            params,
+            name: func.name.clone(), return_type, params,
             blocks: std::mem::take(&mut self.func_mut().blocks),
-            is_variadic: func.variadic,
-            is_declaration: false,
-            is_static,
-            stack_size: 0,
+            is_variadic: func.variadic, is_declaration: false, is_static, stack_size: 0,
         };
         self.module.functions.push(ir_func);
-
-        // Pop function-level scope to remove function-body enum constants
-        // and any other scoped additions.
         self.pop_scope();
-
-        // Clear function build state — we're between functions now.
         self.func_state = None;
     }
 
@@ -2109,6 +1852,32 @@ impl Lowerer {
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
             });
+        }
+    }
+
+    /// Collect all global typedef declarations so function return types and
+    /// parameter types that use typedefs can be resolved in later passes.
+    fn collect_all_typedefs(&mut self, tu: &TranslationUnit) {
+        for decl in &tu.decls {
+            if let ExternalDecl::Declaration(decl) = decl {
+                if decl.is_typedef {
+                    for declarator in &decl.declarators {
+                        if declarator.name.is_empty() {
+                            continue;
+                        }
+                        if let Some(fti) = extract_func_typedef_info(&decl.type_spec, &declarator.derived) {
+                            self.types.function_typedefs.insert(declarator.name.clone(), fti);
+                        }
+                        if let Some(fti) = extract_fptr_typedef_info(&decl.type_spec, &declarator.derived) {
+                            self.types.func_ptr_typedefs.insert(declarator.name.clone());
+                            self.types.func_ptr_typedef_info.insert(declarator.name.clone(), fti);
+                        }
+                        let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                        self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
+                    }
+                }
+                self.register_struct_type(&decl.type_spec);
+            }
         }
     }
 

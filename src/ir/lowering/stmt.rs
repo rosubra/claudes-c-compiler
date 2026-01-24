@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType, StructLayout};
-use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, FunctionTypedefInfo};
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, extract_fptr_typedef_info};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -61,35 +61,10 @@ impl Lowerer {
         if decl.is_typedef {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
-                    // Track function pointer typedefs for correct CType resolution
-                    let has_fptr_derived = declarator.derived.iter().any(|d|
-                        matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
-                    if has_fptr_derived {
-                        if let Some(DerivedDeclarator::FunctionPointer(params, variadic)) =
-                            declarator.derived.iter().find(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-                        {
-                            // Build the return type from the base type spec + any
-                            // pointer deriveds before the FunctionPointer.
-                            // The last Pointer before FunctionPointer is the function
-                            // pointer indirection (*), not a return type pointer.
-                            let ptr_count_before_fptr = declarator.derived.iter()
-                                .take_while(|d| !matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-                                .filter(|d| matches!(d, DerivedDeclarator::Pointer))
-                                .count();
-                            let mut return_type = decl.type_spec.clone();
-                            for _ in 0..ptr_count_before_fptr.saturating_sub(1) {
-                                return_type = TypeSpecifier::Pointer(Box::new(return_type));
-                            }
-                            self.types.func_ptr_typedefs.insert(declarator.name.clone());
-                            self.types.func_ptr_typedef_info.insert(declarator.name.clone(), FunctionTypedefInfo {
-                                return_type,
-                                params: params.clone(),
-                                variadic: *variadic,
-                            });
-                        }
+                    if let Some(fti) = extract_fptr_typedef_info(&decl.type_spec, &declarator.derived) {
+                        self.types.func_ptr_typedefs.insert(declarator.name.clone());
+                        self.types.func_ptr_typedef_info.insert(declarator.name.clone(), fti);
                     }
-
-                    // Store CType directly in typedefs map (with scope tracking)
                     let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                     self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
                 }
