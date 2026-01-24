@@ -56,6 +56,15 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Unify type computation between sema and lowering**: Extracted the duplicated
+  `build_full_ctype`, `find_function_pointer_core`, and `convert_param_decls_to_ctypes`
+  functions into a new shared `common/type_builder.rs` module. Both sema and lowering now
+  delegate to these canonical implementations via a `TypeConvertContext` trait, eliminating
+  the correctness timebomb where the two modules could diverge on declarator application
+  logic. This also fixed sema's `build_full_ctype` which had a latent bug in prefix pointer
+  handling for function pointer return types (applying them as outer wrappers instead of
+  folding into the return type). Sema's `FunctionPointer` type spec case now produces full
+  `Pointer(Function(...))` types matching the lowerer.
 - **Fix function pointer struct field return type prefix pointers**: In `build_full_ctype`,
   Pointer declarators before the function pointer core (e.g., `Page *(*xFetch)(...)`)
   were incorrectly applied as outer wrappers on the function pointer type instead of

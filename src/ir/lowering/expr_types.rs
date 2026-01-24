@@ -94,7 +94,9 @@ impl Lowerer {
             }
             Expr::ArraySubscript(_, _, _) | Expr::Deref(_, _)
             | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _)
-            | Expr::GnuConditional(_, _, _) => {
+            | Expr::GnuConditional(_, _, _)
+            | Expr::Assign(_, _, _) | Expr::CompoundAssign(_, _, _, _)
+            | Expr::Comma(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
                     Some(ctype.size_ctx(&self.types.struct_layouts))

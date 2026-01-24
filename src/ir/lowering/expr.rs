@@ -955,11 +955,82 @@ impl Lowerer {
                 if self.known_functions.contains(name.as_str()) {
                     return true;
                 }
+                // Check if this is a function pointer variable.
+                // Peel through Pointer layers to find if the innermost type is
+                // a function type. In C, dereferencing a function pointer (or
+                // pointer to function pointer) at any depth is always a no-op.
+                if let Some(vi) = self.lookup_var_info(name) {
+                    if let Some(ref ct) = vi.c_type {
+                        let mut t = ct;
+                        while let CType::Pointer(inner) = t {
+                            t = inner.as_ref();
+                        }
+                        if matches!(t, CType::Function(_)) {
+                            return true;
+                        }
+                    }
+                    // Also check ptr_sigs (function pointer metadata)
+                    if self.func_meta.ptr_sigs.contains_key(name.as_str()) {
+                        return true;
+                    }
+                }
                 false
             }
             // For nested derefs: *(*f) where *f is also a no-op → check recursively
             Expr::Deref(deeper_inner, _) => self.is_function_pointer_deref(deeper_inner),
+            // For function calls that return a function pointer: *(p(args))
+            // If the callee is a function pointer variable whose return type is
+            // itself a function pointer, then dereferencing the result is a no-op.
+            Expr::FunctionCall(func, _, _) => {
+                // Strip deref layers from the callee (since *p, **p are equivalent for fptrs)
+                let mut callee: &Expr = func.as_ref();
+                while let Expr::Deref(inner, _) = callee {
+                    callee = inner;
+                }
+                if let Expr::Identifier(name, _) = callee {
+                    // Check if the callee returns a function pointer by examining its CType
+                    if let Some(vi) = self.lookup_var_info(name) {
+                        if let Some(ref ct) = vi.c_type {
+                            // Extract the return type of the function pointer
+                            if let Some(ret_ct) = Self::extract_func_ptr_return_ctype_static(ct) {
+                                // If the return type is a function pointer, deref is no-op
+                                if matches!(&ret_ct, CType::Pointer(p) if matches!(p.as_ref(), CType::Function(_))) {
+                                    return true;
+                                }
+                                if matches!(&ret_ct, CType::Function(_)) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    // Also check known function signatures
+                    if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
+                        if let Some(ref ret_ct) = sig.return_ctype {
+                            if matches!(ret_ct, CType::Pointer(p) if matches!(p.as_ref(), CType::Function(_))) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
             _ => false,
+        }
+    }
+
+    /// Static version of extract_func_ptr_return_ctype for use in is_function_pointer_deref
+    fn extract_func_ptr_return_ctype_static(ctype: &CType) -> Option<CType> {
+        match ctype {
+            CType::Pointer(inner) => match inner.as_ref() {
+                CType::Function(ft) => Some(ft.return_type.clone()),
+                CType::Pointer(inner2) => match inner2.as_ref() {
+                    CType::Function(ft) => Some(ft.return_type.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            CType::Function(ft) => Some(ft.return_type.clone()),
+            _ => None,
         }
     }
 

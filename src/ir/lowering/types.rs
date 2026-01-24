@@ -1,3 +1,4 @@
+use crate::common::type_builder;
 use crate::frontend::parser::ast::*;
 use crate::common::types::{IrType, StructField, StructLayout, CType, FunctionType};
 use super::lowering::{Lowerer, FuncSig};
@@ -1283,180 +1284,28 @@ impl Lowerer {
     }
 
     /// Build a full CType from a TypeSpecifier and DerivedDeclarator chain.
-    ///
-    /// The derived list is produced by parse_declarator's combine_declarator_parts,
-    /// which stores declarators outer-to-inner. For building the CType, we need to
-    /// process inner-to-outer (inside-out rule).
-    ///
-    /// Examples (derived list -> CType):
-    /// - `int **p`: [Pointer, Pointer] -> Pointer(Pointer(Int))
-    /// - `int *arr[3]`: [Pointer, Array(3)] -> Array(Pointer(Int), 3)
-    /// - `int (*fp)(int)`: [Pointer, FunctionPointer([int])] -> Pointer(Function(Int->Int))
-    /// - `int (*fp[3])(int)`: [Array(3), Pointer, FunctionPointer([int])] -> Array(Pointer(Function(Int->Int)), 3)
+    /// Delegates to the shared type_builder module for canonical inside-out
+    /// declarator application logic.
     pub(super) fn build_full_ctype(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
-        // Use type_spec_to_ctype on the ORIGINAL type spec (not resolved) so that
-        // function pointer typedefs are correctly detected and expanded.
-        let base = self.type_spec_to_ctype(type_spec);
-
-        // Process derived declarators. The list is ordered outer-to-inner:
-        // outermost wrapping (e.g. Array) first, innermost (closest to base type, e.g.
-        // FunctionPointer) last. We need to build inside-out: first build the
-        // inner type from the base, then wrap with outer layers.
-        //
-        // Strategy: find the innermost function pointer group first (Pointer+FunctionPointer),
-        // build the function pointer type from the base, then apply remaining outer
-        // wrappers (Array, Pointer).
-
-        // Separate into prefix (outer wrappers) and suffix (Pointer+FunctionPointer core)
-        // Look for the pattern: [outer...] [Pointer] [FunctionPointer]
-        // where the Pointer+FunctionPointer pair is the function pointer core.
-        let fptr_idx = self.find_function_pointer_core(derived);
-
-        if let Some(fp_start) = fptr_idx {
-            // Build the function pointer type.
-            // Pointer declarators in the prefix (before fp_start) are part of the
-            // return type, not outer wrappers.  E.g. for `Page *(*xFetch)(int)`:
-            //   derived = [Pointer, Pointer, FunctionPointer([int])]
-            //   prefix  = [Pointer]  — the `*` on return type `Page *`
-            //   core    = [Pointer, FunctionPointer] — the `(*)(int)` syntax
-            // We fold prefix Pointer declarators into the base to form the return type.
-            let mut result = base;
-            for d in &derived[..fp_start] {
-                if matches!(d, DerivedDeclarator::Pointer) {
-                    result = CType::Pointer(Box::new(result));
-                }
-                // Array declarators in prefix are outer wrappers, handled after the core.
-            }
-
-            // Process from fp_start to end (the function pointer core and any
-            // additional inner wrappers after it)
-            let mut i = fp_start;
-            while i < derived.len() {
-                match &derived[i] {
-                    DerivedDeclarator::Pointer => {
-                        if i + 1 < derived.len() && matches!(&derived[i + 1], DerivedDeclarator::FunctionPointer(_params, _) | DerivedDeclarator::Function(_params, _)) {
-                            let (params, variadic) = match &derived[i + 1] {
-                                DerivedDeclarator::FunctionPointer(p, v) | DerivedDeclarator::Function(p, v) => (p, *v),
-                                _ => unreachable!(),
-                            };
-                            let param_types = self.convert_param_decls_to_ctypes(params);
-                            let func_type = CType::Function(Box::new(crate::common::types::FunctionType {
-                                return_type: result,
-                                params: param_types,
-                                variadic,
-                            }));
-                            result = CType::Pointer(Box::new(func_type));
-                            i += 2;
-                        } else {
-                            result = CType::Pointer(Box::new(result));
-                            i += 1;
-                        }
-                    }
-                    DerivedDeclarator::FunctionPointer(params, variadic) => {
-                        let param_types = self.convert_param_decls_to_ctypes(params);
-                        let func_type = CType::Function(Box::new(crate::common::types::FunctionType {
-                            return_type: result,
-                            params: param_types,
-                            variadic: *variadic,
-                        }));
-                        result = CType::Pointer(Box::new(func_type));
-                        i += 1;
-                    }
-                    DerivedDeclarator::Function(params, variadic) => {
-                        let param_types = self.convert_param_decls_to_ctypes(params);
-                        let func_type = CType::Function(Box::new(crate::common::types::FunctionType {
-                            return_type: result,
-                            params: param_types,
-                            variadic: *variadic,
-                        }));
-                        result = func_type;
-                        i += 1;
-                    }
-                    _ => { i += 1; }
-                }
-            }
-
-            // Apply outer wrappers from the prefix (before fp_start).
-            // Only Array declarators in the prefix are true outer wrappers
-            // (e.g., `int (*fp[10])(void)` = array of function pointers).
-            // Pointer declarators in the prefix are NOT outer wrappers — they
-            // were already folded into the return type above when we initialized
-            // `result` from `base` with prefix pointers applied.
-            let prefix = &derived[..fp_start];
-            for d in prefix.iter().rev() {
-                match d {
-                    DerivedDeclarator::Array(size_expr) => {
-                        let size = size_expr.as_ref().and_then(|e| {
-                            self.expr_as_array_size(e).map(|n| n as usize)
-                        });
-                        result = CType::Array(Box::new(result), size);
-                    }
-                    // Pointer declarators in prefix are part of the return type,
-                    // already applied to `result` before the function pointer core.
-                    _ => {}
-                }
-            }
-
-            result
-        } else {
-            // No function pointer - simple case
-            let mut result = base;
-            let mut i = 0;
-            while i < derived.len() {
-                match &derived[i] {
-                    DerivedDeclarator::Pointer => {
-                        result = CType::Pointer(Box::new(result));
-                        i += 1;
-                    }
-                    DerivedDeclarator::Array(_) => {
-                        let start = i;
-                        while i < derived.len() && matches!(&derived[i], DerivedDeclarator::Array(_)) {
-                            i += 1;
-                        }
-                        for j in (start..i).rev() {
-                            if let DerivedDeclarator::Array(size_expr) = &derived[j] {
-                                let size = size_expr.as_ref().and_then(|e| {
-                                    self.expr_as_array_size(e).map(|n| n as usize)
-                                });
-                                result = CType::Array(Box::new(result), size);
-                            }
-                        }
-                    }
-                    _ => { i += 1; }
-                }
-            }
-            result
-        }
-    }
-
-    /// Find the start index of the function pointer core in a derived declarator list.
-    /// The function pointer core is [Pointer, FunctionPointer] or standalone FunctionPointer.
-    fn find_function_pointer_core(&self, derived: &[DerivedDeclarator]) -> Option<usize> {
-        // Look for Pointer followed by FunctionPointer
-        for i in 0..derived.len() {
-            if matches!(&derived[i], DerivedDeclarator::Pointer) {
-                if i + 1 < derived.len() && matches!(&derived[i + 1], DerivedDeclarator::FunctionPointer(_, _)) {
-                    return Some(i);
-                }
-            }
-            // Standalone FunctionPointer
-            if matches!(&derived[i], DerivedDeclarator::FunctionPointer(_, _)) {
-                return Some(i);
-            }
-            // Standalone Function (for function declarations)
-            if matches!(&derived[i], DerivedDeclarator::Function(_, _)) {
-                return Some(i);
-            }
-        }
-        None
+        type_builder::build_full_ctype(self, type_spec, derived)
     }
 
     /// Convert ParamDecl list to CType list for function types.
+    /// Delegates to the shared type_builder module.
     fn convert_param_decls_to_ctypes(&self, params: &[ParamDecl]) -> Vec<(CType, Option<String>)> {
-        params.iter().map(|p| {
-            let ty = self.type_spec_to_ctype(&p.type_spec);
-            (ty, p.name.clone())
-        }).collect()
+        type_builder::convert_param_decls_to_ctypes(self, params)
     }
 
+}
+
+/// Implement TypeConvertContext so shared type_builder functions can call back
+/// into the lowerer for type resolution and constant expression evaluation.
+impl type_builder::TypeConvertContext for Lowerer {
+    fn resolve_type_spec_to_ctype(&self, spec: &TypeSpecifier) -> CType {
+        self.type_spec_to_ctype(spec)
+    }
+
+    fn eval_const_expr_as_usize(&self, expr: &Expr) -> Option<usize> {
+        self.expr_as_array_size(expr).map(|n| n as usize)
+    }
 }

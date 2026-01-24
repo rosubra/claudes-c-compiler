@@ -211,6 +211,33 @@ impl Parser {
             return result;
         }
 
+        // Handle nested function pointer variables like `int (*(*p)(int a, int b))(int c, int d)`.
+        // The inner declarator produces [Pointer, Pointer, FunctionPointer(...)], and the
+        // outer adds Function(...). We keep inner_derived intact and convert the outer
+        // Function to Pointer + FunctionPointer, yielding:
+        //   [Pointer, Pointer, FunctionPointer([int,int]), Pointer, FunctionPointer([int,int])]
+        //
+        // This does NOT match function definitions returning function pointers like
+        // `int (*g(int))(int)`, where inner has Function (not FunctionPointer).
+        let inner_starts_with_pointer = matches!(inner_derived.first(), Some(DerivedDeclarator::Pointer));
+        let inner_has_fptr = inner_derived.iter().any(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
+        if inner_starts_with_pointer && inner_has_fptr && outer_starts_with_function {
+            let mut result = outer_pointers;
+            // Keep inner_derived in its existing order
+            result.extend(inner_derived);
+            // The outer Function becomes a Pointer + FunctionPointer pair
+            for suffix in outer_suffixes {
+                match suffix {
+                    DerivedDeclarator::Function(params, variadic) => {
+                        result.push(DerivedDeclarator::Pointer);
+                        result.push(DerivedDeclarator::FunctionPointer(params, variadic));
+                    }
+                    other => result.push(other),
+                }
+            }
+            return result;
+        }
+
         // General case: outer_pointers ++ outer_suffixes ++ inner_derived
         outer_pointers.extend(outer_suffixes);
         outer_pointers.extend(inner_derived);

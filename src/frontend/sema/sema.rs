@@ -11,12 +11,14 @@
 //! information for the lowerer. Full type checking is TODO.
 
 use crate::common::symbol_table::{Symbol, SymbolTable, StorageClass};
+use crate::common::type_builder;
 use crate::common::types::{CType, FunctionType, StructLayout};
 use crate::common::source::Span;
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins;
 use crate::ir::lowering::{TypeContext, FunctionTypedefInfo};
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// Information about a function collected during semantic analysis.
@@ -60,7 +62,8 @@ pub struct SemanticAnalyzer {
     /// Current enum counter for auto-incrementing enum values.
     enum_counter: i64,
     /// Counter for generating unique anonymous struct/union keys.
-    anon_struct_counter: usize,
+    /// Uses Cell for interior mutability so type_spec_to_ctype can take &self.
+    anon_struct_counter: Cell<usize>,
 }
 
 impl SemanticAnalyzer {
@@ -69,7 +72,7 @@ impl SemanticAnalyzer {
             symbol_table: SymbolTable::new(),
             result: SemaResult::default(),
             enum_counter: 0,
-            anon_struct_counter: 0,
+            anon_struct_counter: Cell::new(0),
         };
         // Pre-populate with common implicit declarations
         analyzer.declare_implicit_functions();
@@ -250,7 +253,11 @@ impl SemanticAnalyzer {
         }
 
         for init_decl in &decl.declarators {
-            let full_type = self.apply_derived_declarators(&base_type, &init_decl.derived);
+            let full_type = if init_decl.derived.is_empty() {
+                base_type.clone()
+            } else {
+                type_builder::build_full_ctype(self, &decl.type_spec, &init_decl.derived)
+            };
             let storage = if decl.is_extern {
                 StorageClass::Extern
             } else if decl.is_static {
@@ -563,7 +570,8 @@ impl SemanticAnalyzer {
     // === Type conversion utilities ===
 
     /// Convert an AST TypeSpecifier to a CType.
-    fn type_spec_to_ctype(&mut self, spec: &TypeSpecifier) -> CType {
+    /// Takes &self (uses Cell for anon_struct_counter, interior mutability for struct_layouts).
+    fn type_spec_to_ctype(&self, spec: &TypeSpecifier) -> CType {
         match spec {
             TypeSpecifier::Void => CType::Void,
             TypeSpecifier::Char => CType::Char,
@@ -606,16 +614,14 @@ impl SemanticAnalyzer {
                 let key = if let Some(tag) = name {
                     format!("struct.{}", tag)
                 } else {
-                    let id = self.anon_struct_counter;
-                    self.anon_struct_counter += 1;
+                    let id = self.anon_struct_counter.get();
+                    self.anon_struct_counter.set(id + 1);
                     format!("__anon_struct_{}", id)
                 };
                 if !struct_fields.is_empty() {
-                    // Full definition: compute and register the layout
                     let mut layout = StructLayout::for_struct_with_packing(
                         &struct_fields, max_field_align, &self.result.type_context.struct_layouts
                     );
-                    // Apply __attribute__((aligned(N))) min alignment
                     if let Some(a) = struct_aligned {
                         if *a > layout.align {
                             layout.align = *a;
@@ -623,17 +629,15 @@ impl SemanticAnalyzer {
                             layout.size = (layout.size + mask) & !mask;
                         }
                     }
-                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
-                } else if !self.result.type_context.struct_layouts.contains_key(&key) {
-                    // Forward declaration: only register if no layout exists yet
-                    // (don't overwrite a full definition with an empty forward decl)
+                    self.result.type_context.insert_struct_layout_from_ref(&key, layout);
+                } else if self.result.type_context.struct_layouts.get(&key).is_none() {
                     let layout = StructLayout {
                         fields: Vec::new(),
                         size: 0,
                         align: 1,
                         is_union: false,
                     };
-                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
+                    self.result.type_context.insert_struct_layout_from_ref(&key, layout);
                 }
                 CType::Struct(key)
             }
@@ -642,14 +646,12 @@ impl SemanticAnalyzer {
                 let key = if let Some(tag) = name {
                     format!("union.{}", tag)
                 } else {
-                    let id = self.anon_struct_counter;
-                    self.anon_struct_counter += 1;
+                    let id = self.anon_struct_counter.get();
+                    self.anon_struct_counter.set(id + 1);
                     format!("__anon_struct_{}", id)
                 };
                 if !union_fields.is_empty() {
-                    // Full definition: compute and register the layout
                     let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
-                    // For packed unions, cap alignment
                     if *is_packed {
                         layout.align = 1;
                         layout.size = layout.fields.iter().map(|f| f.ty.size_ctx(&self.result.type_context.struct_layouts)).max().unwrap_or(0);
@@ -660,7 +662,6 @@ impl SemanticAnalyzer {
                             layout.size = (layout.size + mask) & !mask;
                         }
                     }
-                    // Apply __attribute__((aligned(N))) min alignment
                     if let Some(a) = struct_aligned {
                         if *a > layout.align {
                             layout.align = *a;
@@ -668,61 +669,60 @@ impl SemanticAnalyzer {
                             layout.size = (layout.size + mask) & !mask;
                         }
                     }
-                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
-                } else if !self.result.type_context.struct_layouts.contains_key(&key) {
-                    // Forward declaration: only register if no layout exists yet
+                    self.result.type_context.insert_struct_layout_from_ref(&key, layout);
+                } else if self.result.type_context.struct_layouts.get(&key).is_none() {
                     let layout = StructLayout {
                         fields: Vec::new(),
                         size: 0,
                         align: 1,
                         is_union: true,
                     };
-                    self.result.type_context.struct_layouts.insert(key.clone(), layout);
+                    self.result.type_context.insert_struct_layout_from_ref(&key, layout);
                 }
                 CType::Union(key)
             }
-            TypeSpecifier::Enum(name, variants) => {
-                if let Some(variants) = variants {
-                    self.process_enum_variants(variants);
-                }
+            TypeSpecifier::Enum(name, _variants) => {
+                // Note: enum variant processing is done separately via process_enum_variants
+                // which requires &mut self. This method only returns the type.
                 CType::Enum(crate::common::types::EnumType {
                     name: name.clone(),
                     variants: Vec::new(), // TODO: carry variant info
                 })
             }
             TypeSpecifier::TypedefName(name) => {
-                // Look up the typedef
                 if let Some(resolved) = self.result.type_context.typedefs.get(name) {
                     resolved.clone()
                 } else {
-                    // Unknown typedef - treat as int (common fallback)
                     CType::Int
                 }
             }
             TypeSpecifier::Typeof(_expr) => {
-                // typeof(expr): would need expression type inference
-                // For now, treat as int (sema doesn't have full expr type resolution)
+                // typeof(expr): sema doesn't have full expr type resolution yet
                 CType::Int
             }
             TypeSpecifier::TypeofType(inner) => {
-                // typeof(type-name): just resolve the inner type
                 self.type_spec_to_ctype(inner)
             }
-            TypeSpecifier::FunctionPointer(return_type, _params, _variadic) => {
-                // Function pointer type: treat as pointer for sema purposes
-                CType::Pointer(Box::new(self.type_spec_to_ctype(return_type)))
+            TypeSpecifier::FunctionPointer(return_type, params, variadic) => {
+                // Full function pointer type construction (matches lowering behavior)
+                let ret_ctype = self.type_spec_to_ctype(return_type);
+                let param_ctypes = type_builder::convert_param_decls_to_ctypes(self, params);
+                CType::Pointer(Box::new(CType::Function(Box::new(FunctionType {
+                    return_type: ret_ctype,
+                    params: param_ctypes,
+                    variadic: *variadic,
+                }))))
             }
         }
     }
 
-    fn convert_struct_fields(&mut self, fields: &[StructFieldDecl]) -> Vec<crate::common::types::StructField> {
+    fn convert_struct_fields(&self, fields: &[StructFieldDecl]) -> Vec<crate::common::types::StructField> {
         fields.iter().filter_map(|f| {
             let ty = if f.derived.is_empty() {
                 self.type_spec_to_ctype(&f.type_spec)
             } else {
-                // Complex declarator (function pointer, array, etc.):
-                // Use build_full_ctype for correct inside-out type construction
-                self.build_full_ctype(&f.type_spec, &f.derived)
+                // Delegate to shared build_full_ctype for correct inside-out type construction
+                type_builder::build_full_ctype(self, &f.type_spec, &f.derived)
             };
             let name = f.name.clone().unwrap_or_default();
             let bit_width = f.bit_width.as_ref().and_then(|bw| {
@@ -737,165 +737,11 @@ impl SemanticAnalyzer {
         }).collect()
     }
 
-    /// Apply derived declarators (pointers, arrays, function params) to a base type.
-    fn apply_derived_declarators(&mut self, base: &CType, derived: &[DerivedDeclarator]) -> CType {
-        // For multi-dimensional arrays like int arr[N][M], the derived list
-        // contains [Array(N), Array(M)]. To build the correct type
-        // Array(Array(int, M), N), we must apply consecutive array dimensions
-        // in reverse order (innermost/rightmost first).
-        let mut ty = base.clone();
-        let mut i = 0;
-        while i < derived.len() {
-            match &derived[i] {
-                DerivedDeclarator::Pointer => {
-                    ty = CType::Pointer(Box::new(ty));
-                    i += 1;
-                }
-                DerivedDeclarator::Array(_) => {
-                    // Collect consecutive array dimensions
-                    let _start = i;
-                    let mut array_sizes: Vec<Option<usize>> = Vec::new();
-                    while i < derived.len() {
-                        if let DerivedDeclarator::Array(size_expr) = &derived[i] {
-                            let size = size_expr.as_ref()
-                                .and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
-                            array_sizes.push(size);
-                            i += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    // Apply in reverse: innermost (rightmost) dimension wraps first
-                    for size in array_sizes.into_iter().rev() {
-                        ty = CType::Array(Box::new(ty), size);
-                    }
-                }
-                DerivedDeclarator::Function(params, variadic)
-                | DerivedDeclarator::FunctionPointer(params, variadic) => {
-                    let param_types: Vec<(CType, Option<String>)> = params.iter().map(|p| {
-                        let pt = self.type_spec_to_ctype(&p.type_spec);
-                        (pt, p.name.clone())
-                    }).collect();
-                    let variadic = *variadic;
-                    ty = CType::Function(Box::new(FunctionType {
-                        return_type: ty,
-                        params: param_types,
-                        variadic,
-                    }));
-                    i += 1;
-                }
-            }
-        }
-        ty
-    }
-
     /// Build a full CType from a TypeSpecifier + derived declarators.
-    /// This mirrors the lowerer's build_full_ctype logic for correct function pointer
-    /// type construction (where the declarator ordering is inside-out).
-    fn build_full_ctype(&mut self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
-        let base = self.type_spec_to_ctype(type_spec);
-
-        let fptr_idx = Self::find_function_pointer_core(derived);
-
-        if let Some(fp_start) = fptr_idx {
-            let mut result = base;
-
-            // Process from fp_start to end (function pointer core and inner wrappers)
-            let mut i = fp_start;
-            while i < derived.len() {
-                match &derived[i] {
-                    DerivedDeclarator::Pointer => {
-                        if i + 1 < derived.len() && matches!(&derived[i + 1],
-                            DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _))
-                        {
-                            let (params, variadic) = match &derived[i + 1] {
-                                DerivedDeclarator::FunctionPointer(p, v) | DerivedDeclarator::Function(p, v) => (p, *v),
-                                _ => unreachable!(),
-                            };
-                            let param_types = self.convert_param_decls_to_ctypes(params);
-                            let func_type = CType::Function(Box::new(FunctionType {
-                                return_type: result,
-                                params: param_types,
-                                variadic,
-                            }));
-                            result = CType::Pointer(Box::new(func_type));
-                            i += 2;
-                        } else {
-                            result = CType::Pointer(Box::new(result));
-                            i += 1;
-                        }
-                    }
-                    DerivedDeclarator::FunctionPointer(params, variadic) => {
-                        let param_types = self.convert_param_decls_to_ctypes(params);
-                        let func_type = CType::Function(Box::new(FunctionType {
-                            return_type: result,
-                            params: param_types,
-                            variadic: *variadic,
-                        }));
-                        result = CType::Pointer(Box::new(func_type));
-                        i += 1;
-                    }
-                    DerivedDeclarator::Function(params, variadic) => {
-                        let param_types = self.convert_param_decls_to_ctypes(params);
-                        let func_type = CType::Function(Box::new(FunctionType {
-                            return_type: result,
-                            params: param_types,
-                            variadic: *variadic,
-                        }));
-                        result = func_type;
-                        i += 1;
-                    }
-                    _ => { i += 1; }
-                }
-            }
-
-            // Apply outer wrappers (prefix before fp_start) in reverse order
-            let prefix = &derived[..fp_start];
-            for d in prefix.iter().rev() {
-                match d {
-                    DerivedDeclarator::Array(size_expr) => {
-                        let size = size_expr.as_ref()
-                            .and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
-                        result = CType::Array(Box::new(result), size);
-                    }
-                    DerivedDeclarator::Pointer => {
-                        result = CType::Pointer(Box::new(result));
-                    }
-                    _ => {}
-                }
-            }
-
-            result
-        } else {
-            // No function pointer - use apply_derived_declarators
-            self.apply_derived_declarators(&base, derived)
-        }
-    }
-
-    /// Find the start index of the function pointer core in a derived declarator list.
-    fn find_function_pointer_core(derived: &[DerivedDeclarator]) -> Option<usize> {
-        for i in 0..derived.len() {
-            if matches!(&derived[i], DerivedDeclarator::Pointer) {
-                if i + 1 < derived.len() && matches!(&derived[i + 1], DerivedDeclarator::FunctionPointer(_, _)) {
-                    return Some(i);
-                }
-            }
-            if matches!(&derived[i], DerivedDeclarator::FunctionPointer(_, _)) {
-                return Some(i);
-            }
-            if matches!(&derived[i], DerivedDeclarator::Function(_, _)) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Convert ParamDecl list to CType list for function types.
-    fn convert_param_decls_to_ctypes(&mut self, params: &[ParamDecl]) -> Vec<(CType, Option<String>)> {
-        params.iter().map(|p| {
-            let ty = self.type_spec_to_ctype(&p.type_spec);
-            (ty, p.name.clone())
-        }).collect()
+    /// Delegates to the shared type_builder module for canonical inside-out
+    /// declarator application logic.
+    fn build_full_ctype(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
+        type_builder::build_full_ctype(self, type_spec, derived)
     }
 
     // === Constant expression evaluation ===
@@ -1069,6 +915,18 @@ impl SemanticAnalyzer {
             };
             self.result.functions.insert(name.to_string(), func_info);
         }
+    }
+}
+
+/// Implement TypeConvertContext so shared type_builder functions can call back
+/// into sema for type resolution and constant expression evaluation.
+impl type_builder::TypeConvertContext for SemanticAnalyzer {
+    fn resolve_type_spec_to_ctype(&self, spec: &TypeSpecifier) -> CType {
+        self.type_spec_to_ctype(spec)
+    }
+
+    fn eval_const_expr_as_usize(&self, expr: &Expr) -> Option<usize> {
+        self.eval_const_expr(expr).map(|v| v as usize)
     }
 }
 
