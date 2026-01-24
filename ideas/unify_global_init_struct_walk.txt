@@ -1,0 +1,24 @@
+Unify global init struct traversal with trait-based emitter pattern
+
+The global init subsystem has the same struct-field-traversal algorithm implemented
+in 3 separate functions, each targeting a different output format:
+
+1. fill_struct_global_bytes() -> writes to &mut [u8] byte buffer
+2. lower_struct_global_init_compound() -> writes to Vec<GlobalInit> elements
+3. fill_struct_array_sequential() + fill_nested_struct_with_ptrs() ->
+   writes scalars to bytes + collects pointer relocations in Vec<(usize, GlobalInit)>
+
+All three independently implement: field index resolution via designators, union
+single-field semantics, bitfield packing, padding/zero-fill, and nested struct
+recursion. Every bug fix or new designator feature must be applied in 3+ places.
+
+Recommended approach: Create an InitEmitter trait with methods for emitting scalars,
+pointers, and zero-fill. Implement ByteEmitter, CompoundEmitter, and HybridEmitter.
+Write one walk_struct_init function that works with any emitter.
+
+The drill_designators() shared helper was already extracted (replacing 5 duplicated
+designator chain walkers). This next step would unify the remaining ~300 lines of
+duplicated field traversal logic.
+
+Estimated savings: ~200-300 lines net reduction, plus correctness-by-construction
+benefit of having one traversal algorithm instead of three.
