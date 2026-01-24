@@ -1845,8 +1845,16 @@ impl Lowerer {
                 self.sizeof_expr(rhs)
             }
 
-            // Function call: default to int (4 bytes)
-            Expr::FunctionCall(_, _, _) => 4,
+            // Function call: use the actual return type
+            Expr::FunctionCall(_, _, _) => {
+                // Prefer CType which has correct struct/union sizes
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    ctype.size()
+                } else {
+                    let ret_ty = self.get_expr_type(expr);
+                    ret_ty.size()
+                }
+            }
 
             // Compound literal: size of the type
             Expr::CompoundLiteral(ts, _, _) => self.sizeof_type(ts),
