@@ -110,8 +110,14 @@ impl Lowerer {
             let n_fixed = if variadic {
                 if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
                     if !sig.param_ctypes.is_empty() {
+                        let decomposes_cld = self.decomposes_complex_long_double();
                         sig.param_ctypes.iter().map(|ct| {
-                            if matches!(ct, CType::ComplexDouble) { 2 } else { 1 }
+                            match ct {
+                                CType::ComplexDouble => 2,
+                                CType::ComplexFloat if !self.uses_packed_complex_float() => 2,
+                                CType::ComplexLongDouble if decomposes_cld => 2,
+                                _ => 1,
+                            }
                         }).sum()
                     } else if !sig.param_types.is_empty() {
                         sig.param_types.len()
@@ -331,11 +337,15 @@ impl Lowerer {
             }).collect()
         } else {
             // Infer from argument expressions
+            let decomposes_cld = self.decomposes_complex_long_double();
             args.iter().map(|a| {
                 let ctype = self.get_expr_ctype(a);
                 match ctype {
                     Some(CType::Struct(_)) | Some(CType::Union(_)) => {
                         self.struct_value_size(a)
+                    }
+                    Some(CType::ComplexLongDouble) if !decomposes_cld => {
+                        Some(32) // 2 x 16-byte long double components
                     }
                     _ => None,
                 }

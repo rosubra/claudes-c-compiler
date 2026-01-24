@@ -931,16 +931,21 @@ impl Lowerer {
             }
 
             // On ARM/RISC-V, ComplexFloat is decomposed like ComplexDouble.
+            // ComplexLongDouble is only decomposed on ARM64 (HFA in Q regs);
+            // on x86-64 it goes on stack, on RISC-V it goes by reference.
+            let decomposes_cld = self.decomposes_complex_long_double();
             let should_decompose = match ctype {
                 Some(CType::ComplexFloat) => !uses_packed_cf,
-                Some(CType::ComplexDouble) | Some(CType::ComplexLongDouble) => true,
+                Some(CType::ComplexDouble) => true,
+                Some(CType::ComplexLongDouble) => decomposes_cld,
                 Some(_) => false,
                 None => {
                     if *ty == IrType::Ptr && i < args.len() {
                         let arg_ct = self.expr_ctype(&args[i]);
                         match arg_ct {
                             CType::ComplexFloat => !uses_packed_cf,
-                            CType::ComplexDouble | CType::ComplexLongDouble => true,
+                            CType::ComplexDouble => true,
+                            CType::ComplexLongDouble => decomposes_cld,
                             _ => false,
                         }
                     } else {

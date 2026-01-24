@@ -93,6 +93,16 @@ impl Lowerer {
         self.target == Target::X86_64
     }
 
+    /// Returns true if the target decomposes _Complex long double into 2 F128 scalar
+    /// components for function argument/parameter passing.
+    /// On ARM64 (AAPCS64): _Complex long double is an HFA passed in Q0/Q1 registers,
+    ///   so we decompose into 2 F128 values.
+    /// On x86-64: _Complex long double is passed on the stack (MEMORY class), not decomposed.
+    /// On RISC-V: _Complex long double is passed by reference (pointer), not decomposed.
+    pub(super) fn decomposes_complex_long_double(&self) -> bool {
+        self.target == Target::Aarch64
+    }
+
     /// Look up the shared type metadata for a variable by name.
     ///
     /// Checks locals first, then globals. Returns `&VarInfo` which provides
@@ -375,10 +385,16 @@ impl Lowerer {
             }
         }
 
-        // Collect parameter types, with K&R float->double promotion
+        // Collect parameter types, with K&R default argument promotions
         let param_tys: Vec<IrType> = params.iter().map(|p| {
             let ty = self.type_spec_to_ir(&p.type_spec);
-            if is_kr && ty == IrType::F32 { IrType::F64 } else { ty }
+            if is_kr {
+                match ty {
+                    IrType::F32 => IrType::F64,
+                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
+                    other => other,
+                }
+            } else { ty }
         }).collect();
         let param_bool_flags: Vec<bool> = params.iter().map(|p| {
             self.is_type_bool(&p.type_spec)
@@ -388,9 +404,14 @@ impl Lowerer {
             self.type_spec_to_ctype(&p.type_spec)
         }).collect();
 
-        // Collect per-parameter struct sizes for by-value struct passing ABI
+        // Collect per-parameter struct sizes for by-value struct passing ABI.
+        // ComplexLongDouble is included as a struct on platforms that don't decompose it
+        // (x86-64, RISC-V) since it's passed like a struct (on stack / by reference).
+        let decomposes_cld = self.decomposes_complex_long_double();
         let param_struct_sizes: Vec<Option<usize>> = params.iter().map(|p| {
             if self.is_type_struct_or_union(&p.type_spec) {
+                Some(self.sizeof_type(&p.type_spec))
+            } else if !decomposes_cld && matches!(self.type_spec_to_ctype(&p.type_spec), CType::ComplexLongDouble) {
                 Some(self.sizeof_type(&p.type_spec))
             } else {
                 None
@@ -630,25 +651,33 @@ impl Lowerer {
             let param_ctype = self.type_spec_to_ctype(&param.type_spec);
 
             // Complex parameter decomposition
-            if param_ctype.is_complex() && !matches!(param_ctype, CType::ComplexLongDouble) {
-                if matches!(param_ctype, CType::ComplexFloat) && self.uses_packed_complex_float() {
+            let decompose_cld = self.decomposes_complex_long_double();
+            if param_ctype.is_complex() {
+                // ComplexLongDouble: only decompose on ARM64 (HFA in Q regs);
+                // on x86-64/RISC-V it's passed as a struct (on stack / by reference).
+                if matches!(param_ctype, CType::ComplexLongDouble) && !decompose_cld {
+                    // Fall through to struct handling below
+                } else if matches!(param_ctype, CType::ComplexFloat) && self.uses_packed_complex_float() {
                     // x86-64: _Complex float packed into single F64
                     let ir_idx = params.len();
                     params.push(IrParam { name: param_name, ty: IrType::F64, struct_size: None });
                     param_kinds.push(ParamKind::ComplexFloatPacked(ir_idx));
+                    continue;
                 } else {
-                    // Decompose into two FP params
+                    // Decompose into two FP params (ComplexFloat/ComplexDouble on all,
+                    // ComplexLongDouble on ARM64 only)
                     let comp_ty = Self::complex_component_ir_type(&param_ctype);
                     let real_idx = params.len();
                     params.push(IrParam { name: format!("{}.real", param_name), ty: comp_ty, struct_size: None });
                     let imag_idx = params.len();
                     params.push(IrParam { name: format!("{}.imag", param_name), ty: comp_ty, struct_size: None });
                     param_kinds.push(ParamKind::ComplexDecomposed(real_idx, imag_idx));
+                    continue;
                 }
-                continue;
             }
 
-            // Struct/union parameter (pass by value)
+            // Struct/union parameter (pass by value), including ComplexLongDouble
+            // on x86-64/RISC-V where it's not decomposed
             if self.is_type_struct_or_union(&param.type_spec)
                 || matches!(param_ctype, CType::ComplexLongDouble)
             {
@@ -661,7 +690,15 @@ impl Lowerer {
 
             // Normal scalar parameter
             let ir_idx = params.len();
-            let ty = self.type_spec_to_ir(&param.type_spec);
+            let mut ty = self.type_spec_to_ir(&param.type_spec);
+            // K&R default argument promotions: float->double, char/short->int
+            if func.is_kr {
+                ty = match ty {
+                    IrType::F32 => IrType::F64,
+                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => IrType::I32,
+                    other => other,
+                };
+            }
             params.push(IrParam { name: param_name, ty, struct_size: None });
             param_kinds.push(ParamKind::Normal(ir_idx));
         }
@@ -813,21 +850,42 @@ impl Lowerer {
         });
     }
 
-    /// Handle K&R float promotion: narrow double params back to declared float type.
+    /// Handle K&R default argument promotions: narrow promoted params back to declared types.
+    /// float->double promotion: narrow double back to float.
+    /// char/short->int promotion: narrow int back to char/short.
     fn handle_kr_float_promotion(&mut self, func: &FunctionDef) {
         if !func.is_kr { return; }
         for param in &func.params {
-            if self.type_spec_to_ir(&param.type_spec) != IrType::F32 { continue; }
+            let declared_ty = self.type_spec_to_ir(&param.type_spec);
             let name = param.name.clone().unwrap_or_default();
             let local_info = match self.func_mut().locals.get(&name).cloned() { Some(i) => i, None => continue };
-            let f64_val = self.fresh_value();
-            self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 });
-            let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
-            let f32_alloca = self.fresh_value();
-            self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0 });
-            self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 });
-            if let Some(local) = self.func_mut().locals.get_mut(&name) {
-                local.alloca = f32_alloca; local.ty = IrType::F32; local.alloc_size = 4;
+            match declared_ty {
+                IrType::F32 => {
+                    // Received as F64, narrow to F32
+                    let f64_val = self.fresh_value();
+                    self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 });
+                    let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
+                    let f32_alloca = self.fresh_value();
+                    self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0 });
+                    self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 });
+                    if let Some(local) = self.func_mut().locals.get_mut(&name) {
+                        local.alloca = f32_alloca; local.ty = IrType::F32; local.alloc_size = 4;
+                    }
+                }
+                IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => {
+                    // Received as I32, narrow to declared type
+                    let i32_val = self.fresh_value();
+                    self.emit(Instruction::Load { dest: i32_val, ptr: local_info.alloca, ty: IrType::I32 });
+                    let narrow_val = self.emit_cast_val(Operand::Value(i32_val), IrType::I32, declared_ty);
+                    let narrow_alloca = self.fresh_value();
+                    let size = declared_ty.size().max(1);
+                    self.emit(Instruction::Alloca { dest: narrow_alloca, ty: declared_ty, size, align: 0 });
+                    self.emit(Instruction::Store { val: Operand::Value(narrow_val), ptr: narrow_alloca, ty: declared_ty });
+                    if let Some(local) = self.func_mut().locals.get_mut(&name) {
+                        local.alloca = narrow_alloca; local.ty = declared_ty; local.alloc_size = size;
+                    }
+                }
+                _ => {}
             }
         }
     }
