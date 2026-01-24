@@ -1,0 +1,6 @@
+Task: split_riscv_codegen
+Status: in_progress
+
+Split RISC-V codegen.rs (2346 lines) into submodules:
+- Extract inline asm substitution logic
+- Extract subword atomic and builtin helpers
