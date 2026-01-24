@@ -1,0 +1,24 @@
+Task: Fix global struct array initialization with pointer-array fields
+Status: In progress
+
+Problem:
+When a global array of structs is initialized, and the struct contains pointer-array
+fields (e.g., int *ptrs[2] or int (*fptrs[2])()), the address relocations for those
+pointer elements were being dropped - emitted as zero bytes instead of .quad symbol
+directives.
+
+Root cause:
+1. has_ptr_fields check in global_init.rs only matched CType::Pointer(_) and
+   CType::Function(_), missing CType::Array(Pointer, _) (pointer array fields)
+2. lower_struct_array_with_ptrs in global_init_compound.rs only handled
+   Initializer::Expr sub-items, but pointer array field initializers produce
+   Initializer::List (braced lists like {f1, f2, f3})
+
+Fix:
+1. Updated has_ptr_fields to use type_has_pointer_elements() which recursively
+   checks Array(Pointer) types
+2. Added Initializer::List handling in lower_struct_array_with_ptrs for pointer
+   array fields, emitting GlobalAddr for each element
+
+This fixes compiler_suite_0011_0144 (segfault in global struct array with function
+pointer arrays) and similar tests.
