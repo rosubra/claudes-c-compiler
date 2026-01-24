@@ -956,21 +956,32 @@ impl Lowerer {
                             return if self.current_return_is_bool { self.emit_bool_normalize(val) } else { val };
                         }
                     }
-                    // Check if return type is complex but expression is not
-                    // (scalar-to-complex conversion at function return)
-                    let ret_ct = self.func_return_ctypes.get(&self.current_function_name.clone()).cloned();
-                    if let Some(ref rct) = ret_ct {
-                        if rct.is_complex() && !expr_ct.is_complex() {
-                            let val = self.lower_expr(e);
-                            let complex_val = self.real_to_complex(val, &expr_ct, rct);
-                            // For non-sret complex float, pack into I64 for register return
-                            if *rct == CType::ComplexFloat && !self.func_meta.sret_functions.contains_key(&self.current_function_name) {
-                                let ptr = self.operand_to_value(complex_val);
-                                let packed = self.fresh_value();
-                                self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::I64 });
-                                return Operand::Value(packed);
+                    // Non-complex expression returned from a complex-returning function:
+                    // convert scalar to complex (real=scalar, imag=0)
+                    {
+                        let ret_ct = self.func_return_ctypes.get(&self.current_function_name.clone()).cloned();
+                        if let Some(ref rct) = ret_ct {
+                            if rct.is_complex() && !expr_ct.is_complex() {
+                                let val = self.lower_expr(e);
+                                let complex_val = self.real_to_complex(val, &expr_ct, rct);
+                                // For sret returns, copy to the hidden pointer
+                                if let Some(sret_alloca) = self.current_sret_ptr {
+                                    let src_addr = self.operand_to_value(complex_val);
+                                    let complex_size = rct.size();
+                                    let sret_ptr = self.fresh_value();
+                                    self.emit(Instruction::Load { dest: sret_ptr, ptr: sret_alloca, ty: IrType::Ptr });
+                                    self.emit(Instruction::Memcpy { dest: sret_ptr, src: src_addr, size: complex_size });
+                                    return Operand::Value(sret_ptr);
+                                }
+                                // For non-sret complex float, pack into I64 for register return
+                                if *rct == CType::ComplexFloat && !self.func_meta.sret_functions.contains_key(&self.current_function_name) {
+                                    let ptr = self.operand_to_value(complex_val);
+                                    let packed = self.fresh_value();
+                                    self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::I64 });
+                                    return Operand::Value(packed);
+                                }
+                                return complex_val;
                             }
-                            return complex_val;
                         }
                     }
                     let val = self.lower_expr(e);

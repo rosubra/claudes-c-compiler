@@ -2627,18 +2627,29 @@ impl Lowerer {
         // to a pointer to its first element (same address). No load needed.
         // Dereferencing a pointer-to-struct/union yields the struct address
         // (aggregate values are represented by their addresses in the IR).
+        // Dereferencing a pointer-to-complex: return the address (like struct deref).
+        // Complex values are aggregates passed by pointer, so *ptr just yields the address.
         if let Some(ctype) = self.get_expr_ctype(inner) {
             if let CType::Pointer(ref pointee) = ctype {
                 if matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_)) {
                     return self.lower_expr(inner);
                 }
-                // Dereferencing a pointer-to-struct/union yields the struct/union
-                // value, which is represented by its address. No load needed.
-                if matches!(pointee.as_ref(), CType::Struct(_) | CType::Union(_)) {
+                if pointee.is_complex() {
                     return self.lower_expr(inner);
                 }
-                // Dereferencing a pointer-to-complex: return the address (like struct deref).
-                // Complex values are aggregates passed by pointer, so *ptr just yields the address.
+            }
+        }
+
+        // Fallback: use expr_ctype which handles more expression forms (e.g. when
+        // get_expr_ctype returns None because c_type wasn't set in LocalInfo).
+        // This ensures complex/struct/array types accessed via pointer deref are
+        // correctly treated as aggregates (address-only, no scalar load).
+        {
+            let inner_ct = self.expr_ctype(inner);
+            if let CType::Pointer(ref pointee) = inner_ct {
+                if matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_)) {
+                    return self.lower_expr(inner);
+                }
                 if pointee.is_complex() {
                     return self.lower_expr(inner);
                 }

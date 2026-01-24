@@ -450,10 +450,11 @@ impl Lowerer {
             }
             Expr::Deref(inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
-                if let CType::Pointer(pointee) = inner_ct {
-                    *pointee
-                } else {
-                    CType::Int
+                match inner_ct {
+                    CType::Pointer(pointee) => *pointee,
+                    // Arrays decay to pointers, so *array yields the element type
+                    CType::Array(elem, _) => *elem,
+                    _ => CType::Int,
                 }
             }
             Expr::ArraySubscript(base, _, _) => {
@@ -497,11 +498,33 @@ impl Lowerer {
 
     /// Get a function's return CType.
     pub(super) fn get_function_return_ctype(&self, name: &str) -> CType {
+        // Check complex return types first
         if let Some(ctype) = self.func_return_ctypes.get(name) {
-            ctype.clone()
-        } else {
-            CType::Int
+            return ctype.clone();
         }
+        // Check pointer/struct return CTypes
+        if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
+            return ctype.clone();
+        }
+        // Derive CType from IR return type
+        if let Some(&ir_ty) = self.func_meta.return_types.get(name) {
+            return match ir_ty {
+                IrType::F32 => CType::Float,
+                IrType::F64 => CType::Double,
+                IrType::F128 => CType::LongDouble,
+                IrType::I8 => CType::Char,
+                IrType::U8 => CType::UChar,
+                IrType::I16 => CType::Short,
+                IrType::U16 => CType::UShort,
+                IrType::I32 => CType::Int,
+                IrType::U32 => CType::UInt,
+                IrType::I64 => CType::Long,
+                IrType::U64 => CType::ULong,
+                IrType::Ptr => CType::Pointer(Box::new(CType::Void)),
+                _ => CType::Int,
+            };
+        }
+        CType::Int
     }
 
     /// Resolve struct field type.
