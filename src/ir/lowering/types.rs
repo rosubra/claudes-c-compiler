@@ -89,14 +89,14 @@ impl Lowerer {
             CType::Struct(st) => {
                 // Return as struct tag reference if possible
                 if let Some(name) = &st.name {
-                    TypeSpecifier::Struct(Some(name.clone()), None, false, None)
+                    TypeSpecifier::Struct(Some(name.clone()), None, false, None, None)
                 } else {
                     TypeSpecifier::Int // anonymous struct fallback
                 }
             }
             CType::Union(st) => {
                 if let Some(name) = &st.name {
-                    TypeSpecifier::Union(Some(name.clone()), None, false, None)
+                    TypeSpecifier::Union(Some(name.clone()), None, false, None, None)
                 } else {
                     TypeSpecifier::Int // anonymous union fallback
                 }
@@ -331,7 +331,7 @@ impl Lowerer {
             TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble => IrType::Ptr,
             TypeSpecifier::Pointer(_) => IrType::Ptr,
             TypeSpecifier::Array(_, _) => IrType::Ptr,
-            TypeSpecifier::Struct(_, _, _, _) | TypeSpecifier::Union(_, _, _, _) => IrType::Ptr,
+            TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => IrType::Ptr,
             TypeSpecifier::Enum(_, _) => IrType::I32,
             TypeSpecifier::TypedefName(_) => IrType::I64, // fallback for unresolved typedef
             TypeSpecifier::Signed => IrType::I32,
@@ -377,7 +377,7 @@ impl Lowerer {
     /// Handles both inline field definitions and tag-only forward references.
     fn struct_union_layout(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
         match ts {
-            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged structs
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("struct.{}", tag)) {
@@ -387,7 +387,7 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 Some(self.compute_struct_union_layout_packed(fields, false, max_field_align))
             }
-            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged unions
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("union.{}", tag)) {
@@ -397,9 +397,9 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 Some(self.compute_struct_union_layout_packed(fields, true, max_field_align))
             }
-            TypeSpecifier::Struct(Some(tag), None, _, _) =>
+            TypeSpecifier::Struct(Some(tag), None, _, _, _) =>
                 self.get_struct_union_layout_by_tag("struct", tag).cloned(),
-            TypeSpecifier::Union(Some(tag), None, _, _) =>
+            TypeSpecifier::Union(Some(tag), None, _, _, _) =>
                 self.get_struct_union_layout_by_tag("union", tag).cloned(),
             _ => None,
         }
@@ -415,6 +415,7 @@ impl Lowerer {
                 name: f.name.clone().unwrap_or_default(),
                 ty,
                 bit_width,
+                alignment: f.alignment,
             }
         }).collect();
         if is_union {
@@ -724,10 +725,10 @@ impl Lowerer {
                 });
                 CType::Array(Box::new(elem_ctype), size)
             }
-            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack) => {
+            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack, _) => {
                 self.struct_or_union_to_ctype(name, fields, false, *is_packed, *pragma_pack)
             }
-            TypeSpecifier::Union(name, fields, is_packed, pragma_pack) => {
+            TypeSpecifier::Union(name, fields, is_packed, pragma_pack, _) => {
                 self.struct_or_union_to_ctype(name, fields, true, *is_packed, *pragma_pack)
             }
             TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
@@ -787,6 +788,7 @@ impl Lowerer {
                     name: f.name.clone().unwrap_or_default(),
                     ty,
                     bit_width,
+                    alignment: f.alignment,
                 }
             }).collect();
             let st = if is_union {
@@ -813,6 +815,7 @@ impl Lowerer {
                         name: f.name.clone(),
                         ty: f.ty.clone(),
                         bit_width: f.bit_width,
+                        alignment: None,
                     }
                 }).collect();
                 let st = if is_union {

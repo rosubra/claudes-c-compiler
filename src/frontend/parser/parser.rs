@@ -35,6 +35,9 @@ pub struct Parser {
     pub(super) parsing_constructor: bool,
     /// Set to true when parse_type_specifier encounters __attribute__((destructor)).
     pub(super) parsing_destructor: bool,
+    /// Set when parse_type_specifier or consume_post_type_qualifiers encounters _Alignas(N).
+    /// Consumed and reset by callers that need it (e.g., struct field parsing).
+    pub(super) parsed_alignas: Option<usize>,
     /// Stack for #pragma pack alignment values.
     /// Current effective alignment is the last element (or None for default).
     pub(super) pragma_pack_stack: Vec<Option<usize>>,
@@ -58,6 +61,7 @@ impl Parser {
             parsing_const: false,
             parsing_constructor: false,
             parsing_destructor: false,
+            parsed_alignas: None,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
             error_count: 0,

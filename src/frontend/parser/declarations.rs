@@ -78,7 +78,7 @@ impl Parser {
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
         self.consume_post_type_qualifiers();
 
-        let (name, derived, decl_mode_ti, decl_common) = self.parse_declarator_with_attrs();
+        let (name, derived, decl_mode_ti, decl_common, _) = self.parse_declarator_with_attrs();
         let (post_ctor, post_dtor, post_mode_ti, post_common) = self.parse_asm_and_attributes();
         let mode_ti = decl_mode_ti || post_mode_ti;
         let is_common = decl_common || post_common;
@@ -384,7 +384,7 @@ impl Parser {
 
         let mut mode_ti = false;
         loop {
-            let (name, derived, decl_mode_ti, _) = self.parse_declarator_with_attrs();
+            let (name, derived, decl_mode_ti, _, _) = self.parse_declarator_with_attrs();
             mode_ti = decl_mode_ti || self.skip_asm_and_attributes() || mode_ti;
             let init = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
@@ -501,7 +501,24 @@ impl Parser {
                 TokenKind::Alignas => {
                     self.advance();
                     if matches!(self.peek(), TokenKind::LParen) {
-                        self.skip_balanced_parens();
+                        self.advance(); // consume (
+                        if let TokenKind::IntLiteral(n) = self.peek() {
+                            self.parsed_alignas = Some(*n as usize);
+                            self.advance();
+                        }
+                        // Skip remaining tokens to closing paren
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            match self.peek() {
+                                TokenKind::LParen => { depth += 1; self.advance(); }
+                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
+                                TokenKind::Eof => break,
+                                _ => { self.advance(); }
+                            }
+                        }
+                        if matches!(self.peek(), TokenKind::RParen) {
+                            self.advance();
+                        }
                     }
                 }
                 TokenKind::Attribute => {

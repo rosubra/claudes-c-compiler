@@ -9,7 +9,7 @@ impl Lowerer {
     /// nested struct/union types defined in the fields.
     pub(super) fn register_struct_type(&mut self, ts: &TypeSpecifier) {
         match ts {
-            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Recursively register nested struct/union types in fields
                 self.register_nested_struct_types(fields);
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
@@ -17,7 +17,7 @@ impl Lowerer {
                 let key = self.struct_layout_key(tag, false);
                 self.struct_layouts.insert(key, layout);
             }
-            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Recursively register nested struct/union types in fields
                 self.register_nested_struct_types(fields);
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
@@ -42,11 +42,11 @@ impl Lowerer {
     /// Walk a TypeSpecifier and register any struct/union definitions found within it.
     fn register_nested_in_type_spec(&mut self, ts: &TypeSpecifier) {
         match ts {
-            TypeSpecifier::Struct(tag, Some(_fields), _, _) if tag.is_some() => {
+            TypeSpecifier::Struct(tag, Some(_fields), _, _, _) if tag.is_some() => {
                 // This is a named struct definition inside a field - register it
                 self.register_struct_type(ts);
             }
-            TypeSpecifier::Union(tag, Some(_fields), _, _) if tag.is_some() => {
+            TypeSpecifier::Union(tag, Some(_fields), _, _, _) if tag.is_some() => {
                 // This is a named union definition inside a field - register it
                 self.register_struct_type(ts);
             }
@@ -78,7 +78,7 @@ impl Lowerer {
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
         let ts = self.resolve_type_spec(ts);
         match ts {
-            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("struct.{}", tag)) {
                         return Some(layout.clone());
@@ -87,10 +87,10 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 Some(self.compute_struct_union_layout_packed(&fields, false, max_field_align))
             }
-            TypeSpecifier::Struct(Some(tag), None, _, _) => {
+            TypeSpecifier::Struct(Some(tag), None, _, _, _) => {
                 self.struct_layouts.get(&format!("struct.{}", tag)).cloned()
             }
-            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack) => {
+            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
                     if let Some(layout) = self.struct_layouts.get(&format!("union.{}", tag)) {
                         return Some(layout.clone());
@@ -99,7 +99,7 @@ impl Lowerer {
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
                 Some(self.compute_struct_union_layout_packed(&fields, true, max_field_align))
             }
-            TypeSpecifier::Union(Some(tag), None, _, _) => {
+            TypeSpecifier::Union(Some(tag), None, _, _, _) => {
                 self.struct_layouts.get(&format!("union.{}", tag)).cloned()
             }
             // For typedef'd array types like `typedef S arr_t[4]`, peel the

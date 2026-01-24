@@ -136,10 +136,10 @@ pub enum TypeSpecifier {
     ComplexFloat,
     ComplexDouble,
     ComplexLongDouble,
-    /// Struct: (name, fields, is_packed, max_field_align from #pragma pack)
-    Struct(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>),
-    /// Union: (name, fields, is_packed, max_field_align from #pragma pack)
-    Union(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>),
+    /// Struct: (name, fields, is_packed, max_field_align from #pragma pack, struct-level aligned attribute)
+    Struct(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>, Option<usize>),
+    /// Union: (name, fields, is_packed, max_field_align from #pragma pack, struct-level aligned attribute)
+    Union(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>, Option<usize>),
     Enum(Option<String>, Option<Vec<EnumVariant>>),
     TypedefName(String),
     Pointer(Box<TypeSpecifier>),
@@ -161,6 +161,8 @@ pub struct StructFieldDecl {
     /// For complex declarators like `void (*(*fp)(int))(void)`, this carries the full
     /// derived declarator chain that must be applied to type_spec to get the final type.
     pub derived: Vec<DerivedDeclarator>,
+    /// Per-field alignment from _Alignas(N) or __attribute__((aligned(N))).
+    pub alignment: Option<usize>,
 }
 
 /// An enum variant.

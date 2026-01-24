@@ -101,7 +101,24 @@ impl Parser {
                 TokenKind::Alignas => {
                     self.advance();
                     if matches!(self.peek(), TokenKind::LParen) {
-                        self.skip_balanced_parens();
+                        self.advance(); // consume (
+                        if let TokenKind::IntLiteral(n) = self.peek() {
+                            self.parsed_alignas = Some(*n as usize);
+                            self.advance();
+                        }
+                        // Skip remaining tokens to closing paren (handles sizeof/alignof expressions)
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            match self.peek() {
+                                TokenKind::LParen => { depth += 1; self.advance(); }
+                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
+                                TokenKind::Eof => break,
+                                _ => { self.advance(); }
+                            }
+                        }
+                        if matches!(self.peek(), TokenKind::RParen) {
+                            self.advance();
+                        }
                     }
                 }
                 // Type specifier tokens
@@ -343,28 +360,30 @@ impl Parser {
 
     /// Parse a struct or union definition/reference.
     fn parse_struct_or_union(&mut self, is_struct: bool) -> TypeSpecifier {
-        let (mut is_packed, _aligned, _, _) = self.parse_gcc_attributes();
+        let (mut is_packed, mut struct_aligned, _, _) = self.parse_gcc_attributes();
         let name = if let TokenKind::Identifier(n) = self.peek().clone() {
             self.advance();
             Some(n)
         } else {
             None
         };
-        let (packed2, _, _, _) = self.parse_gcc_attributes();
+        let (packed2, aligned2, _, _) = self.parse_gcc_attributes();
         is_packed = is_packed || packed2;
+        if aligned2.is_some() { struct_aligned = aligned2; }
         let fields = if matches!(self.peek(), TokenKind::LBrace) {
             Some(self.parse_struct_fields())
         } else {
             None
         };
-        let (packed3, _, _, _) = self.parse_gcc_attributes();
+        let (packed3, aligned3, _, _) = self.parse_gcc_attributes();
         is_packed = is_packed || packed3;
+        if aligned3.is_some() { struct_aligned = aligned3; }
         // Apply current #pragma pack alignment to struct definition
         let max_field_align = self.pragma_pack_align;
         if is_struct {
-            TypeSpecifier::Struct(name, fields, is_packed, max_field_align)
+            TypeSpecifier::Struct(name, fields, is_packed, max_field_align, struct_aligned)
         } else {
-            TypeSpecifier::Union(name, fields, is_packed, max_field_align)
+            TypeSpecifier::Union(name, fields, is_packed, max_field_align, struct_aligned)
         }
     }
 
@@ -468,7 +487,8 @@ impl Parser {
             if let Some(type_spec) = self.parse_type_specifier() {
                 if matches!(self.peek(), TokenKind::Semicolon) {
                     // Anonymous field (e.g., anonymous struct/union)
-                    fields.push(StructFieldDecl { type_spec, name: None, bit_width: None, derived: Vec::new() });
+                    let alignment = self.parsed_alignas.take();
+                    fields.push(StructFieldDecl { type_spec, name: None, bit_width: None, derived: Vec::new(), alignment });
                 } else {
                     self.parse_struct_field_declarators(&type_spec, &mut fields);
                 }
@@ -491,6 +511,13 @@ impl Parser {
         type_spec: &TypeSpecifier,
         fields: &mut Vec<StructFieldDecl>,
     ) {
+        // Capture _Alignas value that was parsed during type specifier parsing
+        let mut alignas_from_type = self.parsed_alignas.take();
+
+        // Consume post-type qualifiers that may appear between type and declarator
+        // in struct field declarations: e.g., "char _Alignas(32) c;"
+        self.consume_struct_field_qualifiers(&mut alignas_from_type);
+
         loop {
             // Handle unnamed bitfield: `: constant-expr`
             if matches!(self.peek(), TokenKind::Colon) {
@@ -503,6 +530,7 @@ impl Parser {
                     name: None,
                     bit_width,
                     derived: Vec::new(),
+                    alignment: alignas_from_type,
                 });
                 if !self.consume_if(&TokenKind::Comma) { break; }
                 continue;
@@ -511,7 +539,9 @@ impl Parser {
             // Use the general-purpose declarator parser. This handles all cases:
             // simple pointers, arrays, function pointers, and nested function
             // pointer declarators of arbitrary depth.
-            let (name, derived) = self.parse_declarator();
+            // parse_declarator_with_attrs also consumes trailing __attribute__ and
+            // returns the aligned value from __attribute__((aligned(N))).
+            let (name, derived, _, _, decl_aligned) = self.parse_declarator_with_attrs();
 
             // Parse optional bitfield width (constant-expression, not full expr with comma)
             let bit_width = if self.consume_if(&TokenKind::Colon) {
@@ -520,8 +550,12 @@ impl Parser {
                 None
             };
 
-            // Skip any trailing GCC __attribute__
-            self.skip_gcc_extensions();
+            // Parse any additional trailing GCC __attribute__ (e.g., after bitfield width)
+            let (_, extra_aligned, _, _) = self.parse_gcc_attributes();
+
+            // Combine alignment sources: explicit attribute on declarator,
+            // extra attribute after bitfield, or _Alignas from type specifier
+            let alignment = decl_aligned.or(extra_aligned).or(alignas_from_type);
 
             // For backward compatibility with downstream code that reads type_spec
             // directly, fold simple derived declarators (pointers, arrays) into
@@ -534,9 +568,53 @@ impl Parser {
                 name,
                 bit_width,
                 derived: field_derived,
+                alignment,
             });
 
             if !self.consume_if(&TokenKind::Comma) { break; }
+        }
+    }
+
+    /// Consume qualifiers that may appear between type specifier and declarator
+    /// in struct field declarations. Handles _Alignas, const, volatile, etc.
+    fn consume_struct_field_qualifiers(&mut self, alignas: &mut Option<usize>) {
+        loop {
+            match self.peek() {
+                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                    self.advance();
+                }
+                TokenKind::Alignas => {
+                    self.advance();
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.advance(); // consume (
+                        if let TokenKind::IntLiteral(n) = self.peek() {
+                            *alignas = Some(*n as usize);
+                            self.advance();
+                        }
+                        // Skip remaining tokens to closing paren
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            match self.peek() {
+                                TokenKind::LParen => { depth += 1; self.advance(); }
+                                TokenKind::RParen => { depth -= 1; if depth > 0 { self.advance(); } }
+                                TokenKind::Eof => break,
+                                _ => { self.advance(); }
+                            }
+                        }
+                        if matches!(self.peek(), TokenKind::RParen) {
+                            self.advance();
+                        }
+                    }
+                }
+                TokenKind::Attribute => {
+                    let (_, attr_aligned, _, _) = self.parse_gcc_attributes();
+                    if attr_aligned.is_some() {
+                        *alignas = attr_aligned;
+                    }
+                }
+                TokenKind::Extension => { self.advance(); }
+                _ => break,
+            }
         }
     }
 

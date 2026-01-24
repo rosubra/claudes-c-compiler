@@ -106,6 +106,15 @@ impl StructType {
         }
     }
 
+    /// Apply a struct-level `__attribute__((aligned(N)))` minimum alignment.
+    /// This can only increase alignment (never decrease it), and re-pads size accordingly.
+    pub fn apply_min_alignment(&mut self, min_align: usize) {
+        if min_align > self.cached_align {
+            self.cached_align = min_align;
+            self.cached_size = align_up(self.cached_size, self.cached_align);
+        }
+    }
+
     /// Get the cached size in bytes.
     pub fn size(&self) -> usize {
         self.cached_size
@@ -146,7 +155,11 @@ impl StructType {
                     continue;
                 }
                 let natural_align = field.ty.align();
-                let field_align = if let Some(max_a) = max_field_align {
+                // Per-field alignment override from _Alignas or __attribute__((aligned))
+                let field_align = if let Some(explicit) = field.alignment {
+                    // Explicit alignment overrides packing
+                    natural_align.max(explicit)
+                } else if let Some(max_a) = max_field_align {
                     natural_align.min(max_a)
                 } else {
                     natural_align
@@ -182,6 +195,9 @@ pub struct StructField {
     pub name: String,
     pub ty: CType,
     pub bit_width: Option<u32>,
+    /// Per-field alignment override from _Alignas(N) or __attribute__((aligned(N))).
+    /// When set, this overrides the natural alignment of the field's type.
+    pub alignment: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,8 +253,20 @@ impl StructLayout {
 
         for field in fields {
             let natural_align = field.ty.align();
-            // Apply packing: cap alignment to max_field_align if specified
-            let field_align = if let Some(max_a) = max_field_align {
+            // Per-field alignment override: _Alignas(N) or __attribute__((aligned(N)))
+            // sets a minimum alignment (can only increase, per C11 6.7.5).
+            let overridden_align = if let Some(explicit) = field.alignment {
+                natural_align.max(explicit)
+            } else {
+                natural_align
+            };
+            // Apply packing: cap alignment to max_field_align if specified.
+            // Note: _Alignas / __attribute__((aligned)) on a field overrides packing
+            // per GCC behavior — an explicit alignment attribute takes precedence.
+            let field_align = if field.alignment.is_some() {
+                // Explicit alignment attribute overrides packing
+                overridden_align
+            } else if let Some(max_a) = max_field_align {
                 natural_align.min(max_a)
             } else {
                 natural_align
@@ -394,7 +422,13 @@ impl StructLayout {
         let mut field_layouts = Vec::with_capacity(fields.len());
 
         for field in fields {
-            let field_align = field.ty.align();
+            let natural_align = field.ty.align();
+            // Per-field alignment override from _Alignas(N) or __attribute__((aligned(N)))
+            let field_align = if let Some(explicit) = field.alignment {
+                natural_align.max(explicit)
+            } else {
+                natural_align
+            };
             let field_size = field.ty.size();
             max_align = max_align.max(field_align);
             max_size = max_size.max(field_size);

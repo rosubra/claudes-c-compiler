@@ -503,7 +503,7 @@ impl SemanticAnalyzer {
                 let size = size_expr.as_ref().and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
                 CType::Array(Box::new(elem_type), size)
             }
-            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack_align) => {
+            TypeSpecifier::Struct(name, fields, is_packed, pragma_pack_align, struct_aligned) => {
                 let struct_fields = fields.as_ref().map(|f| self.convert_struct_fields(f)).unwrap_or_default();
                 let effective_align = if *is_packed {
                     Some(1)
@@ -511,12 +511,20 @@ impl SemanticAnalyzer {
                     *pragma_pack_align
                 };
                 if struct_fields.is_empty() {
-                    CType::Struct(std::sync::Arc::new(crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align)))
+                    let mut st = crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align);
+                    if let Some(a) = struct_aligned {
+                        st.apply_min_alignment(*a);
+                    }
+                    CType::Struct(std::sync::Arc::new(st))
                 } else {
-                    CType::Struct(std::sync::Arc::new(crate::common::types::StructType::new_struct(name.clone(), struct_fields, *is_packed, effective_align)))
+                    let mut st = crate::common::types::StructType::new_struct(name.clone(), struct_fields, *is_packed, effective_align);
+                    if let Some(a) = struct_aligned {
+                        st.apply_min_alignment(*a);
+                    }
+                    CType::Struct(std::sync::Arc::new(st))
                 }
             }
-            TypeSpecifier::Union(name, fields, is_packed, pragma_pack_align) => {
+            TypeSpecifier::Union(name, fields, is_packed, pragma_pack_align, struct_aligned) => {
                 let union_fields = fields.as_ref().map(|f| self.convert_struct_fields(f)).unwrap_or_default();
                 let effective_align = if *is_packed {
                     Some(1)
@@ -524,9 +532,17 @@ impl SemanticAnalyzer {
                     *pragma_pack_align
                 };
                 if union_fields.is_empty() {
-                    CType::Union(std::sync::Arc::new(crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align)))
+                    let mut st = crate::common::types::StructType::new_empty(name.clone(), *is_packed, effective_align);
+                    if let Some(a) = struct_aligned {
+                        st.apply_min_alignment(*a);
+                    }
+                    CType::Union(std::sync::Arc::new(st))
                 } else {
-                    CType::Union(std::sync::Arc::new(crate::common::types::StructType::new_union(name.clone(), union_fields, *is_packed, effective_align)))
+                    let mut st = crate::common::types::StructType::new_union(name.clone(), union_fields, *is_packed, effective_align);
+                    if let Some(a) = struct_aligned {
+                        st.apply_min_alignment(*a);
+                    }
+                    CType::Union(std::sync::Arc::new(st))
                 }
             }
             TypeSpecifier::Enum(name, variants) => {
@@ -576,6 +592,7 @@ impl SemanticAnalyzer {
                 name,
                 ty,
                 bit_width,
+                alignment: f.alignment,
             })
         }).collect()
     }

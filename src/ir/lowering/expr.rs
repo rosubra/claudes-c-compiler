@@ -3297,7 +3297,7 @@ impl Lowerer {
                     IrType::I64
                 }
             }
-            TypeSpecifier::Struct(_, _, _, _) | TypeSpecifier::Union(_, _, _, _) => {
+            TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => {
                 // Structs passed via va_arg: for simplicity, treat as pointer-sized
                 // The backend will load the appropriate amount of data
                 IrType::I64
