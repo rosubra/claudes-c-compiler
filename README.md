@@ -56,6 +56,15 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix function pointer struct field return type prefix pointers**: In `build_full_ctype`,
+  Pointer declarators before the function pointer core (e.g., `Page *(*xFetch)(...)`)
+  were incorrectly applied as outer wrappers on the function pointer type instead of
+  being folded into the function's return type. This produced
+  `Pointer(Pointer(Function(ret=Struct)))` instead of `Pointer(Function(ret=Pointer(Struct)))`,
+  causing calls through struct member function pointers returning pointers to be classified
+  as struct-by-value returns. This was the root cause of both the SQLite regression
+  (622 tests segfaulting in sqlite3PcacheFetchFinish via pcache vtable) and the
+  libjpeg-turbo regression.
 - **Fix typedef function pointer return type signedness**: When calling through a
   typedef'd function pointer (e.g., `typedef int (*cmp_fn)(...)`), the `(*)` syntax
   marker in derived declarators was incorrectly included in the return type, making it
