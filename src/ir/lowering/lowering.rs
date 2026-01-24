@@ -841,16 +841,17 @@ impl Lowerer {
                                 {
                                     if let DerivedDeclarator::FunctionPointer(params, variadic) = fptr_derived {
                                         // Build the return type from the base type spec + any
-                                        // pointer deriveds before the FunctionPointer
+                                        // pointer deriveds before the FunctionPointer.
+                                        // The last Pointer before FunctionPointer is the
+                                        // function-pointer indirection (* in (*name)), not a
+                                        // return-type pointer, so skip it.
+                                        let ptr_count = declarator.derived.iter()
+                                            .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+                                            .count();
+                                        let ret_ptr_count = if ptr_count > 0 { ptr_count - 1 } else { 0 };
                                         let mut return_type = decl.type_spec.clone();
-                                        for d in &declarator.derived {
-                                            match d {
-                                                DerivedDeclarator::Pointer => {
-                                                    return_type = TypeSpecifier::Pointer(Box::new(return_type));
-                                                }
-                                                DerivedDeclarator::FunctionPointer(_, _) => break,
-                                                _ => break,
-                                            }
+                                        for _ in 0..ret_ptr_count {
+                                            return_type = TypeSpecifier::Pointer(Box::new(return_type));
                                         }
                                         self.types.func_ptr_typedefs.insert(declarator.name.clone());
                                         self.types.func_ptr_typedef_info.insert(declarator.name.clone(), FunctionTypedefInfo {

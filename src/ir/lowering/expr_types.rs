@@ -180,12 +180,12 @@ impl Lowerer {
             _ => self.get_expr_ctype(func),
         };
 
-        if let Some(ctype) = func_ctype {
+        if let Some(ref ctype) = func_ctype {
             // Navigate through CType to find the return type
-            let ret_ctype = Self::extract_func_ptr_return_ctype(&ctype);
+            let ret_ctype = Self::extract_func_ptr_return_ctype(ctype);
             if let Some(ret_ct) = ret_ctype {
                 if matches!(ret_ct, CType::Struct(_) | CType::Union(_)) {
-                    return Some(ret_ct.size());
+                    return Some(ret_ct.size_ctx(&self.types.struct_layouts));
                 }
             }
         }

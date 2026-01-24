@@ -1,26 +1,30 @@
-Fix jq regression: function pointer dereference through typedef'd pointers
+Fix jq remaining segfaults (9 of 12 tests still fail with SIGSEGV)
 
-jq was passing all 12 tests but now only passes 1 (--version). All other tests
-segfault with exit -11. This is a pre-existing regression from recent merges
-(present before the stmt-expr-float-type fix).
+Status: 3 tests now pass (--version, .a, {x:.a, y:.b}) after fixing
+the struct member array subscript stride bug (commit fix_member_array_subscript_stride).
+The original SIGABRT from hash table corruption is fixed. The remaining 9 failures
+are SIGSEGV in more complex jq operations (add, interpolation, regex, map/select,
+keys, group_by, recursive descent, try-catch, reduce).
 
-Root cause: jq uses typedef'd function pointer callbacks extensively. The
-resolve_typedef_derived function discards FunctionPointer derived declarators
-(the _ => arm at line 40 of lowering.rs), so typedef'd function pointers like
-`typedef void (*jv_free_func)(void*)` get stored as CType::Pointer(Void)
-instead of CType::Pointer(Function(...)). This causes is_function_pointer_deref
-to not detect them, and lower_deref incorrectly loads from the function address.
+The original theory about typedef'd function pointer dereference was partially wrong.
+The root cause of the SIGABRT was that get_member_array_elem_size() in lvalue.rs
+called elem_ty.size() on struct CTypes which returns 0 (since CType::Struct only
+stores a key). This made all flexible array member subscripts (obj->elements[i])
+compute offset 0, corrupting jq's hash table buckets.
 
-The emit_call_instruction fix (using lower_expr(inner) for Expr::Deref) handles
-the call context, but jq may have non-call-context function pointer dereferences
-that still fail, or there may be additional issues.
+Remaining SIGSEGV issues to investigate:
+1. Nested typedef function pointer dereference: `typedef op_func my_op; (*mop)(10)`
+   crashes because my_op isn't tracked in func_ptr_typedefs (need transitive typedef
+   propagation for function pointer typedefs)
+2. There may be additional codegen issues in jq's bytecode interpreter (execute.c)
+   which uses complex struct-heavy control flow, computed gotos (switch-heavy dispatch),
+   and function pointer callbacks
 
 To investigate:
-1. Build jq with mixed GCC/CCC compilation to find the miscompiled source files
-2. Create minimal reproducer from the problematic pattern
-3. Consider fixing resolve_typedef_derived to preserve function type info
-   (would need to add a Function variant to TypeSpecifier)
-4. Or add typedef'd function pointer detection to is_function_pointer_deref
-   (e.g., check if VarInfo has a func_ptr_sig stored)
+1. Use the bisection approach (build baseline with gcc, replace one .o at a time with
+   ccc) to find which miscompiled .c file(s) cause the remaining segfaults
+2. Fix nested typedef function pointer tracking in stmt.rs and lowering.rs typedef
+   processing (check if base type_spec resolves to a known func_ptr_typedef and
+   propagate the func_ptr_typedef_info entry)
 
-Priority: HIGH - this is a regression from previously passing tests.
+Priority: MEDIUM - partially fixed, remaining issues are separate bugs.
