@@ -1,0 +1,10 @@
+Fix two PostgreSQL build blockers:
+
+1. Register __atomic_* and __sync_* builtins in sema to suppress implicit declaration warnings.
+   These are handled by pattern matching in expr_atomics.rs but not registered in builtins.rs,
+   causing configure scripts and PostgreSQL to emit spurious warnings.
+
+2. Implement -fPIC codegen: when -fPIC/-fpic is set, emit @PLT suffix on function calls and
+   use @GOTPCREL for external global data access. Required for PostgreSQL's shared library
+   modules (dict_snowball.so etc.) which fail with "relocation R_X86_64_PC32 against undefined
+   symbol cannot be used when making a shared object".
