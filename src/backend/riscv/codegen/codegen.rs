@@ -539,6 +539,16 @@ impl ArchCodegen for RiscvCodegen {
     fn jump_mnemonic(&self) -> &'static str { "j" }
     fn trap_instruction(&self) -> &'static str { "ebreak" }
 
+    /// Override emit_branch to use `jump <label>, t6` instead of `j <label>`.
+    /// The `j` pseudo (JAL with rd=x0) has only ±1MB range. For large functions
+    /// (e.g., oniguruma's match_at), intra-function branches can exceed this.
+    /// The `jump` pseudo generates `auipc t6, ... ; jr t6` with ±2GB range.
+    /// t6 is safe to clobber here because emit_branch is only called at block
+    /// terminators where all scratch registers are dead.
+    fn emit_branch(&mut self, label: &str) {
+        self.state.emit(&format!("    jump {}, t6", label));
+    }
+
     fn emit_branch_nonzero(&mut self, label: &str) {
         self.state.emit(&format!("    bnez t0, {}", label));
     }

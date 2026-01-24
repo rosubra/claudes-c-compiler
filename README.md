@@ -65,6 +65,11 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   non-temporal stores (`movnti`, `movntdq`, `movntpd`), fences (`lfence`, `mfence`, `sfence`),
   and CRC32 (`crc32b/w/l/q`). Adds `X86SseOp` IR instruction that carries target-specific ops
   through optimization passes. Fixes PostgreSQL build's SSE-related link errors.
+- **RISC-V far jump for large functions**: Fixed R_RISCV_JAL relocation overflow that prevented
+  building large functions (like oniguruma's `match_at` in jq). The `j` pseudo-instruction
+  (JAL with rd=x0) has only ±1MB range, which overflows in large functions. Replaced inter-block
+  unconditional branches with `jump <label>, t6` pseudo which generates `auipc + jr` with ±2GB range.
+  This fixed jq RISC-V build failure (relocation truncated to fit: R_RISCV_JAL).
 - **Fix union pointer arithmetic with stale CType sizes**: Fixed pointer arithmetic on union
   members accessed through forward-declared union pointers (e.g., `(&obj->ts) + 1`). The
   `AddressOf` handler in `get_pointer_elem_size_from_expr` was using `get_expr_type().size()`
@@ -214,7 +219,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 |---------|--------|-------|
 | lua | PASS | All 6 tests pass |
 | zlib | PASS | Build + self-test + minigzip roundtrip all pass |
-| mbedtls | PASS | Library builds; selftest passes |
+| mbedtls | PASS | All 7 selftests pass (md5, sha256, sha512, aes, rsa, ecp) |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PASS | All 12 tests pass |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |
