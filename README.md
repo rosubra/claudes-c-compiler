@@ -4,7 +4,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional with SSA.** ~97% of tests passing across all architectures.
+**Basic compilation pipeline functional with SSA.** ~93.6% of tests passing across all architectures (full suite, 29906 tests).
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
@@ -15,10 +15,10 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Optimization passes (constant folding, DCE, GVN, algebraic simplification) operating on SSA form
 - Three backend targets with correct ABI handling
 
-### Test Results (10% sample, ratio 10)
-- x86-64: ~97.2% passing (2907/2991)
-- AArch64: ~97.1% passing (2787/2869)
-- RISC-V 64: ~97.8% passing (2797/2861)
+### Test Results (full suite)
+- x86-64: 93.6% passing (27989/29906)
+- AArch64: 94.1% passing (2699/2869, ratio 10 sample)
+- RISC-V 64: 93.6% passing (2677/2861, ratio 10 sample)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -56,6 +56,16 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix sret hidden pointer not stored to stack (all 3 backends)**: The hidden
+  struct-return pointer parameter (for returns > 16 bytes) was never stored from
+  its argument register (%rdi/x0/a0) to the stack alloca because `emit_store_params`
+  skipped unnamed parameters. The return path then loaded garbage from the
+  uninitialized stack slot, segfaulting on all large struct returns. Fixed all three
+  backends (x86, ARM, RISC-V). Fixes 205+ tests.
+- **Fix typedef _Complex global array/scalar init**: `resolve_type_spec` only resolves
+  `TypeofType`, not `TypedefName`, so dispatching complex init on its result misrouted
+  typedef'd `_Complex float` to the default F64 path. Switched to use resolved `CType`
+  for correct size dispatch.
 - **Fix pointer-to-function-pointer dereference calls**: Calling through a
   dereferenced pointer-to-function-pointer (`(*fpp)(a,b)` where `fpp` is
   `int (**)()`) was segfaulting due to three interacting bugs: (1) the parser's
