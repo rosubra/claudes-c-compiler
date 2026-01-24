@@ -80,10 +80,16 @@ impl Parser {
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
         self.consume_post_type_qualifiers();
 
-        let (name, derived, decl_mode_ti, decl_common, _) = self.parse_declarator_with_attrs();
-        let (post_ctor, post_dtor, post_mode_ti, post_common) = self.parse_asm_and_attributes();
+        let (name, derived, decl_mode_ti, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
+        let (post_ctor, post_dtor, post_mode_ti, post_common, post_aligned) = self.parse_asm_and_attributes();
         let mode_ti = decl_mode_ti || post_mode_ti;
         let is_common = decl_common || post_common;
+        // Merge alignment from _Alignas (type specifier), declarator attrs, and post-declarator attrs.
+        // Per C11, alignment can only increase (6.7.5), so take the maximum.
+        let mut merged_alignment = self.parsed_alignas.take();
+        for a in [decl_aligned, post_aligned].iter().copied().flatten() {
+            merged_alignment = Some(merged_alignment.map_or(a, |prev| prev.max(a)));
+        }
         // Merge all sources of constructor/destructor: type-level attrs, declarator-level attrs, post-declarator attrs
         let is_constructor = type_level_ctor || self.parsing_constructor || post_ctor;
         let is_destructor = type_level_dtor || self.parsing_destructor || post_dtor;
@@ -103,7 +109,7 @@ impl Parser {
         if is_funcdef {
             self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment)
         }
     }
 
@@ -299,6 +305,7 @@ impl Parser {
         is_constructor: bool,
         is_destructor: bool,
         mut is_common: bool,
+        mut alignment: Option<usize>,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
         let init = if self.consume_if(&TokenKind::Assign) {
@@ -315,7 +322,7 @@ impl Parser {
             span: start,
         });
 
-        let (extra_ctor, extra_dtor, _, extra_common) = self.parse_asm_and_attributes();
+        let (extra_ctor, extra_dtor, _, extra_common, extra_aligned) = self.parse_asm_and_attributes();
         if extra_ctor {
             declarators.last_mut().unwrap().is_constructor = true;
         }
@@ -323,11 +330,14 @@ impl Parser {
             declarators.last_mut().unwrap().is_destructor = true;
         }
         is_common = is_common || extra_common;
+        if let Some(a) = extra_aligned {
+            alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
+        }
 
         // Parse additional declarators separated by commas
         while self.consume_if(&TokenKind::Comma) {
             let (dname, dderived) = self.parse_declarator();
-            let (d_ctor, d_dtor, _, d_common) = self.parse_asm_and_attributes();
+            let (d_ctor, d_dtor, _, d_common, _) = self.parse_asm_and_attributes();
             is_common = is_common || d_common;
             let dinit = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
@@ -342,7 +352,10 @@ impl Parser {
                 is_destructor: d_dtor,
                 span: start,
             });
-            self.skip_asm_and_attributes();
+            let (_, skip_aligned) = self.skip_asm_and_attributes();
+            if let Some(a) = skip_aligned {
+                alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
+            }
         }
 
         // Register typedef names
@@ -358,7 +371,7 @@ impl Parser {
             is_typedef,
             is_const: self.parsing_const,
             is_common,
-            alignment: None,
+            alignment,
             span: start,
         }))
     }
@@ -386,9 +399,15 @@ impl Parser {
         }
 
         let mut mode_ti = false;
+        let mut alignment: Option<usize> = None;
         loop {
-            let (name, derived, decl_mode_ti, _, _) = self.parse_declarator_with_attrs();
-            mode_ti = decl_mode_ti || self.skip_asm_and_attributes() || mode_ti;
+            let (name, derived, decl_mode_ti, _, decl_aligned) = self.parse_declarator_with_attrs();
+            let (skip_mode_ti, skip_aligned) = self.skip_asm_and_attributes();
+            mode_ti = decl_mode_ti || skip_mode_ti || mode_ti;
+            // Merge alignment from declarator and post-declarator attributes
+            for a in [decl_aligned, skip_aligned].iter().copied().flatten() {
+                alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
+            }
             let init = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
             } else {
@@ -402,7 +421,10 @@ impl Parser {
                 is_destructor: false,
                 span: start,
             });
-            self.skip_asm_and_attributes();
+            let (_, post_init_aligned) = self.skip_asm_and_attributes();
+            if let Some(a) = post_init_aligned {
+                alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
+            }
             if !self.consume_if(&TokenKind::Comma) {
                 break;
             }
@@ -436,7 +458,11 @@ impl Parser {
         }
 
         self.expect(&TokenKind::Semicolon);
-        let alignment = self.parsed_alignas.take();
+        // Merge alignment from _Alignas (captured in parsed_alignas during type specifier parsing)
+        // with alignment from __attribute__((aligned(N))) on declarators
+        if let Some(a) = self.parsed_alignas.take() {
+            alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
+        }
         Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, alignment, span: start })
     }
 

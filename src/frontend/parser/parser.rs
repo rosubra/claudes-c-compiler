@@ -379,19 +379,20 @@ impl Parser {
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns true if __attribute__((mode(TI))) was found (128-bit integer mode).
-    pub(super) fn skip_asm_and_attributes(&mut self) -> bool {
-        let (_, _, mode_ti, _) = self.parse_asm_and_attributes();
-        mode_ti
+    /// Returns (has_mode_ti, aligned_value).
+    pub(super) fn skip_asm_and_attributes(&mut self) -> (bool, Option<usize>) {
+        let (_, _, mode_ti, _, aligned) = self.parse_asm_and_attributes();
+        (mode_ti, aligned)
     }
 
     /// Parse __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (is_constructor, is_destructor, has_mode_ti, is_common).
-    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, bool, bool) {
+    /// Returns (is_constructor, is_destructor, has_mode_ti, is_common, aligned_value).
+    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, bool, bool, Option<usize>) {
         let mut is_constructor = false;
         let mut is_destructor = false;
         let mut has_mode_ti = false;
         let mut has_common = false;
+        let mut aligned: Option<usize> = None;
         loop {
             match self.peek() {
                 TokenKind::Asm => {
@@ -402,9 +403,12 @@ impl Parser {
                     }
                 }
                 TokenKind::Attribute => {
-                    let (_, _, mode_ti, common) = self.parse_gcc_attributes();
+                    let (_, attr_aligned, mode_ti, common) = self.parse_gcc_attributes();
                     has_mode_ti = has_mode_ti || mode_ti;
                     has_common = has_common || common;
+                    if let Some(a) = attr_aligned {
+                        aligned = Some(aligned.map_or(a, |prev| prev.max(a)));
+                    }
                     if self.parsing_constructor { is_constructor = true; }
                     if self.parsing_destructor { is_destructor = true; }
                 }
@@ -414,7 +418,7 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_constructor, is_destructor, has_mode_ti, has_common)
+        (is_constructor, is_destructor, has_mode_ti, has_common, aligned)
     }
 
     /// Parse the ((...)) parameter list of __attribute__.

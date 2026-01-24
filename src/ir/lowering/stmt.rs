@@ -71,15 +71,18 @@ impl Lowerer {
                         if let Some(DerivedDeclarator::FunctionPointer(params, variadic)) =
                             declarator.derived.iter().find(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
                         {
+                            // Build the return type from the base type spec + any
+                            // pointer deriveds before the FunctionPointer.
+                            // The last Pointer before FunctionPointer is the
+                            // function-pointer indirection (* in (*name)), not a
+                            // return-type pointer, so skip it.
+                            let ptr_count = declarator.derived.iter()
+                                .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+                                .count();
+                            let ret_ptr_count = if ptr_count > 0 { ptr_count - 1 } else { 0 };
                             let mut return_type = decl.type_spec.clone();
-                            for d in &declarator.derived {
-                                match d {
-                                    DerivedDeclarator::Pointer => {
-                                        return_type = TypeSpecifier::Pointer(Box::new(return_type));
-                                    }
-                                    DerivedDeclarator::FunctionPointer(_, _) => break,
-                                    _ => break,
-                                }
+                            for _ in 0..ret_ptr_count {
+                                return_type = TypeSpecifier::Pointer(Box::new(return_type));
                             }
                             self.types.func_ptr_typedefs.insert(declarator.name.clone());
                             self.types.func_ptr_typedef_info.insert(declarator.name.clone(), FunctionTypedefInfo {
@@ -222,7 +225,12 @@ impl Lowerer {
             GlobalInit::Zero
         };
 
-        let align = da.var_ty.align();
+        // Respect explicit __attribute__((aligned(N))) / _Alignas(N) on static locals
+        let align = if let Some(explicit) = decl.alignment {
+            da.var_ty.align().max(explicit)
+        } else {
+            da.var_ty.align()
+        };
 
         // For struct initializers emitted as byte arrays, set element type to I8
         let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {

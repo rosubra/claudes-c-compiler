@@ -2055,10 +2055,16 @@ impl Lowerer {
             // Track this global variable
             self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
 
-            // Use C type alignment for long double (16) instead of IrType::F64 alignment (8)
+            // Use C type alignment for long double (16) instead of IrType::F64 alignment (8).
+            // Also respect explicit __attribute__((aligned(N))) or _Alignas(N) overrides.
             let align = {
                 let c_align = self.alignof_type(&decl.type_spec);
-                if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() }
+                let natural = if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() };
+                if let Some(explicit) = decl.alignment {
+                    natural.max(explicit)
+                } else {
+                    natural
+                }
             };
 
             let is_static = decl.is_static;

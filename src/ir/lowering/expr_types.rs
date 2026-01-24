@@ -112,48 +112,29 @@ impl Lowerer {
     }
 
     /// Extract the return IrType from a function pointer's CType.
-    /// Handles the spurious Pointer wrapper that build_full_ctype adds for (*fp)() syntax.
-    /// For `double (*fp)(void)`, the CType is Function { return_type: Pointer(Double) }
-    /// and we need to unwrap the Pointer to get F64.
+    /// The function pointer CType can be:
+    ///   - Pointer(Function(ft)): ft.return_type is the actual C return type
+    ///   - Pointer(X): typedef lost the Function node; X is the return type
+    ///   - Function(ft): direct function type
     fn extract_func_ptr_return_type(ctype: &CType) -> IrType {
         match ctype {
             CType::Pointer(inner) => match inner.as_ref() {
-                CType::Function(ft) => Self::peel_ptr_from_return_type(&ft.return_type),
+                CType::Function(ft) => IrType::from_ctype(&ft.return_type),
                 // For parameter function pointers, CType is just Pointer(ReturnType)
-                // without the Function wrapper (type_spec_to_ctype doesn't generate Function nodes)
-                CType::Float => IrType::F32,
-                CType::Double | CType::LongDouble => IrType::F64,
-                // Pointer(Pointer(X)) means returning a pointer type
-                CType::Pointer(_) => IrType::Ptr,
-                _ => IrType::I64,
+                // without the Function wrapper
+                other => IrType::from_ctype(other),
             },
-            CType::Function(ft) => Self::peel_ptr_from_return_type(&ft.return_type),
+            CType::Function(ft) => IrType::from_ctype(&ft.return_type),
             _ => IrType::I64,
         }
     }
 
-    /// Peel one Pointer layer from a function's return_type CType.
-    /// This compensates for build_full_ctype wrapping the return type in Pointer
-    /// due to the (*fp) declarator syntax.
+    /// Convert a function's return_type CType to the corresponding IrType.
+    /// The return_type CType directly represents the C return type (no spurious
+    /// Pointer wrapper -- all typedef registration paths now skip the (*name)
+    /// indirection pointer).
     pub(super) fn peel_ptr_from_return_type(return_type: &CType) -> IrType {
-        match return_type {
-            CType::Pointer(inner) => match inner.as_ref() {
-                CType::Float => IrType::F32,
-                CType::Double | CType::LongDouble => IrType::F64,
-                CType::Void => IrType::I64,
-                CType::Char | CType::UChar | CType::Short | CType::UShort
-                | CType::Int | CType::UInt | CType::Bool => IrType::I32,
-                CType::Long | CType::ULong | CType::LongLong | CType::ULongLong => IrType::I64,
-                // Pointer(Pointer(...)) means actual pointer return type
-                CType::Pointer(_) => IrType::Ptr,
-                CType::Struct(_) | CType::Union(_) => IrType::Ptr,
-                CType::Function(_) => IrType::Ptr,
-                CType::Array(_, _) => IrType::Ptr,
-                _ => IrType::I64,
-            },
-            // No Pointer wrapper - direct conversion
-            _ => IrType::from_ctype(return_type),
-        }
+        IrType::from_ctype(return_type)
     }
 
     /// For indirect calls (function pointer calls), determine if the return type is a struct
@@ -194,67 +175,31 @@ impl Lowerer {
 
     /// Extract the return CType from a function pointer CType.
     ///
-    /// FunctionTypedefInfo.return_type gets a spurious Pointer wrapper because
-    /// stmt.rs lines 74-83 (and lowering.rs line 865) treat the `Pointer` derived
-    /// declarator from `(*name)` syntax as part of the return type.  For example,
-    /// `typedef int (*cmp_fn)(int, int)` stores return_type = Pointer(Int).
-    /// This propagates through build_function_pointer_ctype_from_typedef into the
-    /// FunctionType stored in vi.c_type.
+    /// The ft.return_type directly represents the C return type (all typedef
+    /// registration paths now skip the (*name) indirection pointer).
     ///
-    /// Three CType shapes arise for function pointer variables:
-    ///
-    /// 1. `Pointer(Function(ft))` - the common case.  ft.return_type carries the
-    ///    spurious Pointer so we peel it.  E.g. `int (*fp)()` has ft.return_type =
-    ///    Pointer(Int) → peel → Int.  For `char *(*fp)()`, ft.return_type =
-    ///    Pointer(Pointer(Char)) → peel → Pointer(Char).
-    ///
-    /// 2. `Pointer(Pointer(Function(ft)))` - same as Shape 1 but with an extra
-    ///    outer Pointer layer (pointer-to-function-pointer).  Peel ft.return_type.
-    ///
-    /// 3. `Pointer(X)` where X is not Function - typedef'd function pointer where
-    ///    resolve_typedef_derived lost the Function node.  X is already the correct
-    ///    return type (no spurious Pointer because it never went through the
-    ///    FunctionTypedefInfo path).
+    /// CType shapes for function pointer variables:
+    ///   1. Pointer(Function(ft)) - ft.return_type is the actual return CType
+    ///   2. Pointer(Pointer(Function(ft))) - pointer-to-function-pointer
+    ///   3. Pointer(X) - typedef lost the Function node; X is the return type
     fn extract_func_ptr_return_ctype(ctype: &CType) -> Option<CType> {
         match ctype {
             CType::Pointer(inner) => match inner.as_ref() {
                 CType::Function(ft) => {
-                    // Shape 1: peel spurious Pointer from ft.return_type
-                    Some(Self::peel_ctype_ptr_wrapper(&ft.return_type))
+                    Some(ft.return_type.clone())
                 }
                 CType::Pointer(inner2) => match inner2.as_ref() {
                     CType::Function(ft) => {
-                        // Shape 2: same peeling as Shape 1
-                        Some(Self::peel_ctype_ptr_wrapper(&ft.return_type))
+                        Some(ft.return_type.clone())
                     }
-                    // Shape 3 fallback: Pointer(Pointer(X)) where typedef lost
-                    // the Function node. The inner Pointer(X) is the return type
-                    // (a pointer return), so return it as-is.
                     _ => Some(inner.as_ref().clone()),
                 },
-                // Shape 3: Pointer(X) where X is not Function/Pointer.
-                // Typedef lost the Function node; X is the return type.
                 other => Some(other.clone()),
             },
             CType::Function(ft) => {
-                // Direct Function type - peel spurious Pointer from ft.return_type
-                Some(Self::peel_ctype_ptr_wrapper(&ft.return_type))
+                Some(ft.return_type.clone())
             }
             _ => None,
-        }
-    }
-
-    /// Peel the spurious Pointer wrapper from a FunctionType's return_type CType.
-    ///
-    /// The wrapper originates in stmt.rs lines 74-83 where building
-    /// FunctionTypedefInfo.return_type treats the (*fp) syntax's Pointer derived
-    /// declarator as part of the return type.  For `int (*fp)()` this produces
-    /// Pointer(Int); for `char *(*fp)()` it produces Pointer(Pointer(Char)).
-    /// Peeling one layer recovers the true return type.
-    fn peel_ctype_ptr_wrapper(ctype: &CType) -> CType {
-        match ctype {
-            CType::Pointer(inner) => *inner.clone(),
-            other => other.clone(),
         }
     }
 
