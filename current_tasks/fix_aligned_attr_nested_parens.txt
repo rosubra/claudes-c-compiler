@@ -1,0 +1,15 @@
+Fix __aligned__() attribute parsing to handle nested parentheses
+
+Problem: The parser's __aligned__(expr) attribute argument parsing uses a flat
+token skip loop (while not RParen, advance) which doesn't track nesting depth.
+When the alignment expression contains nested parentheses like __alignof__(type),
+the inner ) is mistakenly consumed as the aligned() closing paren, leaving
+the outer ) as an unmatched token that causes "expected Semicolon, got RParen".
+
+This breaks any C code that includes stddef.h (which has max_align_t with
+__aligned__(__alignof__(long long))), affecting mbedtls and many other projects.
+
+Fix: Replace the flat skip loop in parse_gcc_attributes with proper balanced
+parenthesis tracking for the aligned argument.
+
+Status: In progress
