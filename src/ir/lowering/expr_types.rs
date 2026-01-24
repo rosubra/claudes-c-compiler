@@ -155,7 +155,8 @@ impl Lowerer {
     /// For indirect calls (function pointer calls), determine if the return type is a struct
     /// and return its size. Returns None if not a struct return or if the type cannot be determined.
     pub(super) fn get_call_return_struct_size(&self, func: &Expr) -> Option<usize> {
-        // For indirect calls, extract the return type from the function pointer's CType
+        // For indirect calls, extract the return type from the function pointer's CType.
+        // Strip Deref layers since dereferencing function pointers is a no-op in C.
         let func_ctype = match func {
             Expr::Identifier(name, _) => {
                 // Could be a function pointer variable
@@ -165,7 +166,13 @@ impl Lowerer {
                     None
                 }
             }
-            Expr::Deref(inner, _) => self.get_expr_ctype(inner),
+            Expr::Deref(..) => {
+                let mut expr = func;
+                while let Expr::Deref(inner, _) = expr {
+                    expr = inner;
+                }
+                self.get_expr_ctype(expr)
+            }
             _ => self.get_expr_ctype(func),
         };
 
@@ -387,8 +394,14 @@ impl Lowerer {
     }
 
     /// Get the IR type for a function call's return value.
+    /// Strips Deref layers since dereferencing function pointers is a no-op in C.
     fn get_call_return_type(&self, func: &Expr) -> IrType {
-        if let Expr::Identifier(name, _) = func {
+        // Strip all Deref layers to get the underlying expression
+        let mut stripped = func;
+        while let Expr::Deref(inner, _) = stripped {
+            stripped = inner;
+        }
+        if let Expr::Identifier(name, _) = stripped {
             if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
                 return ret_ty;
             }
@@ -399,18 +412,8 @@ impl Lowerer {
                 return ret_ty;
             }
         }
-        if let Expr::Deref(inner, _) = func {
-            if let Expr::Identifier(name, _) = inner.as_ref() {
-                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
-                    return ret_ty;
-                }
-                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
-                    return ret_ty;
-                }
-            }
-            if let Some(inner_ctype) = self.get_expr_ctype(inner) {
-                return Self::extract_func_ptr_return_type(&inner_ctype);
-            }
+        if let Some(ctype) = self.get_expr_ctype(stripped) {
+            return Self::extract_func_ptr_return_type(&ctype);
         }
         if let Some(ctype) = self.get_expr_ctype(func) {
             return Self::extract_func_ptr_return_type(&ctype);
@@ -549,6 +552,18 @@ impl Lowerer {
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 let (_, field_ty, bf_info) = self.resolve_pointer_member_access_full(base_expr, field_name);
                 bitfield_promoted_type(field_ty, bf_info)
+            }
+            Expr::StmtExpr(compound, _) => {
+                // Statement expression: type is the type of the last expression statement
+                if let Some(last) = compound.items.last() {
+                    if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
+                        return self.get_expr_type(expr);
+                    }
+                }
+                IrType::I64
+            }
+            Expr::CompoundLiteral(type_name, _, _) => {
+                self.type_spec_to_ir(type_name)
             }
             _ => IrType::I64,
         }
@@ -1197,8 +1212,13 @@ impl Lowerer {
                     }
                 }
                 // For indirect calls through function pointer variables,
-                // extract the return type from the pointer's CType
-                let func_ctype = match func.as_ref() {
+                // extract the return type from the pointer's CType.
+                // Strip Deref layers since dereferencing function pointers is a no-op.
+                let mut stripped_func: &Expr = func.as_ref();
+                while let Expr::Deref(inner, _) = stripped_func {
+                    stripped_func = inner;
+                }
+                let func_ctype = match stripped_func {
                     Expr::Identifier(name, _) => {
                         if let Some(vi) = self.lookup_var_info(name) {
                             vi.c_type.clone()
@@ -1206,8 +1226,7 @@ impl Lowerer {
                             None
                         }
                     }
-                    Expr::Deref(inner, _) => self.get_expr_ctype(inner),
-                    _ => self.get_expr_ctype(func),
+                    _ => self.get_expr_ctype(stripped_func),
                 };
                 if let Some(ctype) = func_ctype {
                     if let Some(ret_ct) = Self::extract_func_ptr_return_ctype(&ctype) {

@@ -916,10 +916,14 @@ impl Lowerer {
     }
 
     fn lower_deref(&mut self, inner: &Expr) -> Operand {
-        let pointee_is_aggregate = |ct: &CType| -> bool {
+        let pointee_is_no_load = |ct: &CType| -> bool {
             if let CType::Pointer(ref pointee) = ct {
-                matches!(pointee.as_ref(), CType::Array(_, _) | CType::Struct(_) | CType::Union(_))
+                matches!(pointee.as_ref(),
+                    CType::Array(_, _) | CType::Struct(_) | CType::Union(_) | CType::Function(_))
                     || pointee.is_complex()
+            } else if matches!(ct, CType::Function(_)) {
+                // Dereferencing a function type is a no-op in C
+                true
             } else { false }
         };
         // In C, dereferencing a function pointer yields a function designator which
@@ -931,14 +935,14 @@ impl Lowerer {
         if self.is_function_pointer_deref(inner) {
             return self.lower_expr(inner);
         }
-        // Check if dereferencing yields an aggregate (array/struct/union/complex).
-        // In that case, the result is an address (no Load needed).
-        if self.get_expr_ctype(inner).map_or(false, |ct| pointee_is_aggregate(&ct)) {
+        // Check if dereferencing yields an aggregate or function type.
+        // In these cases, the result is an address (no Load needed).
+        if self.get_expr_ctype(inner).map_or(false, |ct| pointee_is_no_load(&ct)) {
             return self.lower_expr(inner);
         }
         {
             let inner_ct = self.expr_ctype(inner);
-            if pointee_is_aggregate(&inner_ct) {
+            if pointee_is_no_load(&inner_ct) {
                 return self.lower_expr(inner);
             }
             // Handle *array where array is a multi-dimensional array:

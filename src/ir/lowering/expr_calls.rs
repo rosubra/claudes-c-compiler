@@ -26,22 +26,29 @@ impl Lowerer {
     }
 
     /// Check if an identifier is a function pointer variable rather than a direct function.
-    fn is_func_ptr_variable(&self, name: &str) -> bool {
+    pub(super) fn is_func_ptr_variable(&self, name: &str) -> bool {
         (self.func().locals.contains_key(name) && !self.known_functions.contains(name))
             || (!self.func().locals.contains_key(name) && self.globals.contains_key(name)
                 && !self.known_functions.contains(name))
     }
 
     pub(super) fn lower_function_call(&mut self, func: &Expr, args: &[Expr]) -> Operand {
+        // Strip Deref layers to find the underlying function expression.
+        // In C, dereferencing a function pointer is a no-op: (*f)() == f().
+        let mut stripped_func = func;
+        while let Expr::Deref(inner, _) = stripped_func {
+            stripped_func = inner;
+        }
+
         // Resolve __builtin_* functions first
-        if let Expr::Identifier(name, _) = func {
+        if let Expr::Identifier(name, _) = stripped_func {
             if let Some(result) = self.try_lower_builtin_call(name, args) {
                 return result;
             }
         }
 
         // Determine sret/two-reg return convention
-        let (sret_size, two_reg_size) = if let Expr::Identifier(name, _) = func {
+        let (sret_size, two_reg_size) = if let Expr::Identifier(name, _) = stripped_func {
             if self.is_func_ptr_variable(name) {
                 // Indirect call through function pointer variable
                 match self.get_call_return_struct_size(func) {
@@ -57,7 +64,7 @@ impl Lowerer {
                 )
             }
         } else {
-            // Non-identifier function expression (e.g., (*fptr)(), array[i]())
+            // Non-identifier function expression (e.g., array[i]())
             match self.get_call_return_struct_size(func) {
                 Some(size) => Self::classify_struct_return(size),
                 None => (None, None),
@@ -68,7 +75,7 @@ impl Lowerer {
         let (mut arg_vals, mut arg_types, mut struct_arg_sizes) = self.lower_call_arguments(func, args);
 
         // Decompose complex double/float arguments into (real, imag) pairs for ABI compliance
-        let param_ctypes_for_decompose = if let Expr::Identifier(name, _) = func {
+        let param_ctypes_for_decompose = if let Expr::Identifier(name, _) = stripped_func {
             self.func_meta.sigs.get(name.as_str()).map(|s| s.param_ctypes.clone()).filter(|v| !v.is_empty())
         } else {
             None
@@ -90,7 +97,7 @@ impl Lowerer {
         };
 
         // Determine variadic status and number of fixed args
-        let (call_variadic, num_fixed_args) = if let Expr::Identifier(name, _) = func {
+        let (call_variadic, num_fixed_args) = if let Expr::Identifier(name, _) = stripped_func {
             let variadic = self.is_function_variadic(name);
             let n_fixed = if variadic {
                 if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
@@ -129,7 +136,7 @@ impl Lowerer {
 
         // For complex returns (non-sret), store into complex alloca
         if sret_size.is_none() {
-            if let Expr::Identifier(name, _) = func {
+            if let Expr::Identifier(name, _) = stripped_func {
                 if let Some(ret_ct) = self.types.func_return_ctypes.get(name).cloned() {
                     if let Some(result) = self.handle_complex_return(dest, &ret_ct) {
                         return result;
@@ -375,14 +382,27 @@ impl Lowerer {
                     ret_ty
                 }
             }
+            Expr::Deref(inner, _) => {
+                // In C, dereferencing a function pointer is a no-op: (*f)(args) == f(args).
+                // We lower the inner expression to get the function pointer value directly,
+                // rather than lower_expr(func) which would go through lower_deref and
+                // incorrectly emit a Load from the function address (especially when typedef
+                // resolution loses the function type information — resolve_typedef_derived
+                // discards FunctionPointer derived declarators, so CType ends up as
+                // Pointer(Int) instead of Pointer(Function(...))).
+                let n = arg_vals.len();
+                let sas = struct_arg_sizes;
+                let func_ptr = self.lower_expr(inner);
+                self.emit(Instruction::CallIndirect {
+                    dest: Some(dest), func_ptr, args: arg_vals, arg_types,
+                    return_type: indirect_ret_ty, is_variadic: false, num_fixed_args: n,
+                    struct_arg_sizes: sas,
+                });
+                indirect_ret_ty
+            }
             _ => {
                 let n = arg_vals.len();
                 let sas = struct_arg_sizes;
-                // Evaluate the callee expression. For Expr::Deref cases, lower_deref
-                // correctly handles function pointer dereference as a no-op (in C,
-                // *f where f is a function pointer yields a function designator that
-                // decays back to the same pointer), while real pointer-to-function-pointer
-                // dereferences emit the necessary Load instruction.
                 let func_ptr = self.lower_expr(func);
                 self.emit(Instruction::CallIndirect {
                     dest: Some(dest), func_ptr, args: arg_vals, arg_types,
@@ -441,12 +461,16 @@ impl Lowerer {
     }
 
     /// Determine the return type of a function pointer expression for indirect calls.
+    /// Strips Deref layers since dereferencing a function pointer is a no-op in C.
     fn get_func_ptr_return_ir_type(&self, func_expr: &Expr) -> IrType {
         if let Some(ctype) = self.get_expr_ctype(func_expr) {
             return Self::extract_return_type_from_ctype(&ctype);
         }
-        if let Expr::Deref(inner, _) = func_expr {
-            if let Some(ctype) = self.get_expr_ctype(inner) {
+        // Strip all Deref layers (dereferencing function pointers is a no-op)
+        let mut expr = func_expr;
+        while let Expr::Deref(inner, _) = expr {
+            expr = inner;
+            if let Some(ctype) = self.get_expr_ctype(expr) {
                 return Self::extract_return_type_from_ctype(&ctype);
             }
         }
