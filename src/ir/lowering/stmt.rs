@@ -1530,9 +1530,12 @@ impl Lowerer {
                     item_idx += 1;
                 }
                 CType::Array(elem_ty, Some(arr_size)) if has_nested_designator => {
-                    // .field[idx] = val: resolve index and store element
+                    // .field[idx] = val: resolve index and store element, then
+                    // continue consuming subsequent non-designated items for the
+                    // remaining array positions (C11 6.7.9p17).
                     let elem_size = elem_ty.size();
                     let elem_ir_ty = IrType::from_ctype(elem_ty);
+                    let arr_size = *arr_size;
                     // Find the index designator in the remaining designators
                     let idx = item.designators[1..].iter().find_map(|d| {
                         if let Designator::Index(ref idx_expr) = d {
@@ -1541,7 +1544,7 @@ impl Lowerer {
                             None
                         }
                     }).unwrap_or(0);
-                    if idx < *arr_size {
+                    if idx < arr_size {
                         let elem_offset = field_offset + idx * elem_size;
                         // Check if there are further nested designators (e.g., .a[2].b = val)
                         let remaining_field_desigs: Vec<_> = item.designators[1..].iter()
@@ -1569,9 +1572,77 @@ impl Lowerer {
                                 ty: elem_ir_ty,
                             });
                             self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                        } else if let Initializer::List(sub_items) = &item.init {
+                            // Handle list init for array element (e.g., .a[1] = {1,2,3})
+                            // The element could be a sub-array (e.g., int a[3][10])
+                            // or a struct/union
+                            match elem_ty.as_ref() {
+                                CType::Array(inner_elem_ty, Some(inner_size)) => {
+                                    let inner_elem_size = inner_elem_ty.size();
+                                    let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                                    let mut si = 0;
+                                    for sub_item in sub_items.iter() {
+                                        if si >= *inner_size { break; }
+                                        if let Initializer::Expr(e) = &sub_item.init {
+                                            let expr_ty = self.get_expr_type(e);
+                                            let val = self.lower_expr(e);
+                                            let val = self.emit_implicit_cast(val, expr_ty, inner_ir_ty);
+                                            let inner_offset = elem_offset + si * inner_elem_size;
+                                            let addr = self.fresh_value();
+                                            self.emit(Instruction::GetElementPtr {
+                                                dest: addr,
+                                                base: base_alloca,
+                                                offset: Operand::Const(IrConst::I64(inner_offset as i64)),
+                                                ty: inner_ir_ty,
+                                            });
+                                            self.emit(Instruction::Store { val, ptr: addr, ty: inner_ir_ty });
+                                        }
+                                        si += 1;
+                                    }
+                                }
+                                CType::Struct(ref st) => {
+                                    let sub_layout = StructLayout::for_struct(&st.fields);
+                                    self.emit_struct_init(sub_items, base_alloca, &sub_layout, elem_offset);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     item_idx += 1;
+                    // Continue consuming subsequent non-designated items for array
+                    // positions idx+1, idx+2, ... (C11 6.7.9p17: initialization
+                    // continues in order from the next element after the designated one)
+                    let mut ai = idx + 1;
+                    while ai < arr_size && item_idx < items.len() {
+                        let next_item = &items[item_idx];
+                        // Stop if the next item has any designator
+                        if !next_item.designators.is_empty() {
+                            break;
+                        }
+                        if let Initializer::Expr(e) = &next_item.init {
+                            let expr_ty = self.get_expr_type(e);
+                            let val = self.lower_expr(e);
+                            let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                            let elem_offset = field_offset + ai * elem_size;
+                            let addr = self.fresh_value();
+                            self.emit(Instruction::GetElementPtr {
+                                dest: addr,
+                                base: base_alloca,
+                                offset: Operand::Const(IrConst::I64(elem_offset as i64)),
+                                ty: elem_ir_ty,
+                            });
+                            self.emit(Instruction::Store { val, ptr: addr, ty: elem_ir_ty });
+                        } else {
+                            // Sub-list initializer - stop flat continuation
+                            break;
+                        }
+                        item_idx += 1;
+                        ai += 1;
+                    }
+                    // Stay on the same field (the array) rather than advancing,
+                    // since we already consumed the continuation items above.
+                    // current_field_idx is updated at line end; we want it to
+                    // point past this array field if we exhausted the continuation.
                 }
                 CType::Struct(st) => {
                     // Nested struct field
@@ -1579,6 +1650,12 @@ impl Lowerer {
                     match &item.init {
                         Initializer::List(sub_items) => {
                             // Nested braces: { {10, 20}, 30 } - the sub_items init the inner struct
+                            // Zero-init the sub-struct area if it has designators or partial init,
+                            // so that non-designated fields are properly zeroed.
+                            let has_desig = sub_items.iter().any(|si| !si.designators.is_empty());
+                            if has_desig || sub_items.len() < sub_layout.fields.len() {
+                                self.zero_init_region(base_alloca, field_offset, sub_layout.size);
+                            }
                             self.emit_struct_init(sub_items, base_alloca, &sub_layout, field_offset);
                             item_idx += 1;
                         }

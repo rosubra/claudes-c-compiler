@@ -2265,7 +2265,9 @@ impl Lowerer {
             }
             Initializer::List(items) => {
                 if let Some(ref layout) = struct_layout {
-                    self.init_struct_fields(alloca, items, layout);
+                    // Zero-init the struct first, then fill designated/sequential fields
+                    self.zero_init_alloca(alloca, layout.size);
+                    self.emit_struct_init(items, alloca, layout, 0);
                 } else {
                     self.init_array_compound_literal(alloca, items, type_spec, ty, size);
                 }
@@ -2520,7 +2522,8 @@ impl Lowerer {
                 }
                 Initializer::List(items) => {
                     if let Some(ref layout) = struct_layout {
-                        self.init_struct_fields(alloca, items, layout);
+                        self.zero_init_alloca(alloca, layout.size);
+                        self.emit_struct_init(items, alloca, layout, 0);
                     } else {
                         self.init_array_compound_literal(alloca, items, type_spec, ty, size);
                     }

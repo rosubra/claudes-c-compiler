@@ -1728,7 +1728,42 @@ impl Lowerer {
         self.emit(Instruction::Store { val, ptr: elem_addr, ty });
     }
 
-    /// Zero-initialize an alloca by emitting stores of zero.
+    /// Zero-initialize a region of memory within an alloca at the given byte offset.
+    pub(super) fn zero_init_region(&mut self, alloca: Value, base_offset: usize, region_size: usize) {
+        let mut offset = base_offset;
+        let end = base_offset + region_size;
+        while offset + 8 <= end {
+            let addr = self.fresh_value();
+            self.emit(Instruction::GetElementPtr {
+                dest: addr,
+                base: alloca,
+                offset: Operand::Const(IrConst::I64(offset as i64)),
+                ty: IrType::I64,
+            });
+            self.emit(Instruction::Store {
+                val: Operand::Const(IrConst::I64(0)),
+                ptr: addr,
+                ty: IrType::I64,
+            });
+            offset += 8;
+        }
+        while offset < end {
+            let addr = self.fresh_value();
+            self.emit(Instruction::GetElementPtr {
+                dest: addr,
+                base: alloca,
+                offset: Operand::Const(IrConst::I64(offset as i64)),
+                ty: IrType::I8,
+            });
+            self.emit(Instruction::Store {
+                val: Operand::Const(IrConst::I8(0)),
+                ptr: addr,
+                ty: IrType::I8,
+            });
+            offset += 1;
+        }
+    }
+
     pub(super) fn zero_init_alloca(&mut self, alloca: Value, total_size: usize) {
         let mut offset = 0usize;
         while offset + 8 <= total_size {

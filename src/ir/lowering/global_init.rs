@@ -644,9 +644,32 @@ impl Lowerer {
                     item_idx += 1;
                 }
                 // Nested designator into array: .field[idx] = val
+                // After the designated element, continue consuming non-designated
+                // items for subsequent array positions (C11 6.7.9p17).
                 CType::Array(elem_ty, Some(arr_size)) if has_nested_designator => {
-                    self.fill_nested_designator_array(item, elem_ty, *arr_size, bytes, field_offset);
+                    let arr_size = *arr_size;
+                    let desig_idx = self.fill_nested_designator_array(item, elem_ty, arr_size, bytes, field_offset);
                     item_idx += 1;
+                    // Continue consuming subsequent non-designated items for positions
+                    // desig_idx+1, desig_idx+2, ... within the same array field
+                    let elem_size = elem_ty.size();
+                    let elem_ir_ty = IrType::from_ctype(elem_ty);
+                    let mut ai = desig_idx + 1;
+                    while ai < arr_size && item_idx < items.len() {
+                        let next_item = &items[item_idx];
+                        if !next_item.designators.is_empty() {
+                            break;
+                        }
+                        if let Initializer::Expr(ref expr) = next_item.init {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let elem_offset = field_offset + ai * elem_size;
+                            self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                        } else {
+                            break;
+                        }
+                        item_idx += 1;
+                        ai += 1;
+                    }
                 }
                 // Struct or union field (non-nested designator)
                 CType::Struct(st) => {
@@ -773,11 +796,12 @@ impl Lowerer {
         self.fill_struct_global_bytes(&[sub_item], sub_layout, bytes, field_offset);
     }
 
-    /// Handle nested designator into an array field (e.g., .field[idx] = val).
+    /// Process a nested designator into an array field (e.g., .field[idx] = val).
+    /// Returns the array index that was designated.
     fn fill_nested_designator_array(
         &self, item: &InitializerItem, elem_ty: &CType, arr_size: usize,
         bytes: &mut [u8], field_offset: usize,
-    ) {
+    ) -> usize {
         let elem_size = elem_ty.size();
         let elem_ir_ty = IrType::from_ctype(elem_ty);
         let idx = item.designators[1..].iter().find_map(|d| {
@@ -804,8 +828,30 @@ impl Lowerer {
             } else if let Initializer::Expr(ref expr) = item.init {
                 let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
                 self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+            } else if let Initializer::List(ref sub_items) = item.init {
+                // Handle list init for array element (e.g., .a[1] = {1,2,3})
+                match elem_ty {
+                    CType::Array(inner_elem_ty, Some(inner_size)) => {
+                        let inner_elem_size = inner_elem_ty.size();
+                        let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                        for (si, sub_item) in sub_items.iter().enumerate() {
+                            if si >= *inner_size { break; }
+                            if let Initializer::Expr(ref expr) = sub_item.init {
+                                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                let inner_offset = elem_offset + si * inner_elem_size;
+                                self.write_const_to_bytes(bytes, inner_offset, &val, inner_ir_ty);
+                            }
+                        }
+                    }
+                    CType::Struct(ref st) => {
+                        let sub_layout = StructLayout::for_struct(&st.fields);
+                        self.fill_struct_global_bytes(sub_items, &sub_layout, bytes, elem_offset);
+                    }
+                    _ => {}
+                }
             }
         }
+        idx
     }
 
     /// Fill a composite (struct/union) field from an initializer.
