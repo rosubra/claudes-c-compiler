@@ -1325,9 +1325,37 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_va_arg(&mut self, ap_expr: &Expr, type_spec: &TypeSpecifier) -> Operand {
-        // VaArg needs the ADDRESS of the va_list variable (to read and advance it).
-        let ap_addr = self.lower_address_of(ap_expr);
-        let va_list_ptr = self.operand_to_value(ap_addr);
+        // VaArg instruction expects a pointer to the va_list "object" so it can
+        // both read from and advance the va_list state.
+        //
+        // The correct pointer depends on the target's va_list representation:
+        //
+        // x86-64 / AArch64: va_list is an array type (char[24] / char[32]).
+        //   - LOCAL va_list:  alloca IS the array, lower_expr returns the alloca
+        //     address (array-to-pointer decay) → pointer to the struct. ✓
+        //   - PARAM va_list:  array decayed to char* when passed; the alloca holds
+        //     a pointer to the caller's va_list struct, lower_expr loads that
+        //     pointer value → pointer to the struct. ✓
+        //   So lower_expr gives the correct va_list pointer on these targets.
+        //
+        // RISC-V: va_list is a scalar pointer type (void *).
+        //   - LOCAL va_list:  alloca holds the void* value. va_arg needs the
+        //     ADDRESS of the alloca (to read the current pointer and write back
+        //     the advanced one). lower_address_of returns this. ✓
+        //   - PARAM va_list:  alloca holds a copy of the void* parameter.
+        //     Same as local: need the ADDRESS of the alloca. lower_address_of
+        //     returns this. ✓
+        //   So lower_address_of gives the correct va_list pointer on RISC-V.
+        use crate::backend::Target;
+        let ap_val = if self.target == Target::Riscv64 {
+            // RISC-V: va_list is void*, need address of the variable holding it
+            self.lower_address_of(ap_expr)
+        } else {
+            // x86-64 / AArch64: va_list is an array type, lower_expr handles
+            // both local (array decay) and parameter (load pointer) cases
+            self.lower_expr(ap_expr)
+        };
+        let va_list_ptr = self.operand_to_value(ap_val);
         let result_ty = self.resolve_va_arg_type(type_spec);
         let dest = self.fresh_value();
         self.emit(Instruction::VaArg { dest, va_list_ptr, result_ty: result_ty.clone() });

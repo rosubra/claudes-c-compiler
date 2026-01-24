@@ -20,5 +20,7 @@ REMAINING ISSUES:
 2. Long double (f128) va_arg may have alignment issues for structs containing
    long double members.
 
-3. va_list passed as function parameter or global variable may have issues
-   if the va_list type representation differs from expectations.
+3. FIXED: va_list passed as function parameter now works correctly.
+   lower_va_arg uses lower_expr for x86-64/AArch64 (array type va_list
+   that decays to pointer) and lower_address_of for RISC-V (scalar void*).
+   This fixes ARM Lua tests and all va_list parameter passing.
