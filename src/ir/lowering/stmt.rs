@@ -1542,6 +1542,12 @@ impl Lowerer {
                 }
             }
             current_field_idx = field_idx + 1;
+
+            // For unions without a designator, only the first field is initialized.
+            // Stop iterating fields after processing one element.
+            if layout.is_union && desig_name.is_none() {
+                break;
+            }
         }
         item_idx
     }

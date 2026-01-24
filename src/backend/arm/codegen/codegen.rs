@@ -959,7 +959,9 @@ impl ArchCodegen for ArmCodegen {
         // Classify each param: int reg, float reg, i128 pair, or stack-passed
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
-        let mut param_class: Vec<char> = Vec::new(); // 'i', 'f', 's', 'p' (i128 pair)
+        // Classes: 'i' = int reg, 'f' = float reg, 'p' = i128 GP pair,
+        // 's' = stack (8 bytes), 'S' = stack F128 (16 bytes, 16-byte aligned)
+        let mut param_class: Vec<char> = Vec::new();
         let mut param_int_reg: Vec<usize> = Vec::new();
         let mut param_float_reg: Vec<usize> = Vec::new();
         let mut stack_offsets: Vec<i64> = Vec::new();
@@ -968,6 +970,7 @@ impl ArchCodegen for ArmCodegen {
         for param in func.params.iter() {
             let is_float = param.ty.is_float();
             let is_i128 = is_i128_type(param.ty);
+            let is_long_double = param.ty.is_long_double();
             if is_i128 {
                 // AAPCS64: 128-bit integers in even-aligned GP register pair
                 if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
@@ -978,6 +981,8 @@ impl ArchCodegen for ArmCodegen {
                     stack_offsets.push(0);
                     int_reg_idx += 2;
                 } else {
+                    // Align to 16 bytes for i128 on stack
+                    stack_offset = (stack_offset + 15) & !15;
                     param_class.push('s');
                     param_int_reg.push(0);
                     param_float_reg.push(0);
@@ -997,6 +1002,14 @@ impl ArchCodegen for ArmCodegen {
                 param_float_reg.push(0);
                 stack_offsets.push(0);
                 int_reg_idx += 1;
+            } else if is_long_double {
+                // F128 overflow to stack: 16 bytes, 16-byte aligned
+                stack_offset = (stack_offset + 15) & !15;
+                param_class.push('S');
+                param_int_reg.push(0);
+                param_float_reg.push(0);
+                stack_offsets.push(stack_offset);
+                stack_offset += 16;
             } else {
                 param_class.push('s');
                 param_int_reg.push(0);
@@ -1100,13 +1113,28 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Store stack-passed params (above callee's frame).
+        // 's' = regular stack params (8 bytes), 'S' = F128 stack params (16 bytes)
         for (i, param) in func.params.iter().enumerate() {
-            if param_class[i] != 's' || param.name.is_empty() { continue; }
+            if param_class[i] != 's' && param_class[i] != 'S' { continue; }
+            if param.name.is_empty() { continue; }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     let caller_offset = frame_size + stack_offsets[i];
-                    if is_i128_type(ty) {
-                        // 128-bit stack param: load both halves
+                    if param_class[i] == 'S' {
+                        // F128 stack param: load 128-bit value and convert to f64
+                        // Load the quad-precision value from the caller's stack into q0
+                        self.emit_load_from_sp("x0", caller_offset, "ldr");
+                        self.emit_load_from_sp("x1", caller_offset + 8, "ldr");
+                        // Reconstruct f128 in q0 from x0 (lo) and x1 (hi)
+                        self.state.emit("    fmov d0, x0");
+                        self.state.emit("    mov v0.d[1], x1");
+                        // Convert f128 to f64 via __trunctfdf2
+                        self.state.emit("    bl __trunctfdf2");
+                        // __trunctfdf2 returns f64 in d0; store as 8-byte f64
+                        self.state.emit("    fmov x0, d0");
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    } else if is_i128_type(ty) {
+                        // 128-bit integer stack param: load both halves
                         self.emit_load_from_sp("x0", caller_offset, "ldr");
                         self.emit_store_to_sp("x0", slot.0, "str");
                         self.emit_load_from_sp("x0", caller_offset + 8, "ldr");
