@@ -971,12 +971,15 @@ impl Lowerer {
         if is_addr_type {
             return Operand::Value(field_addr);
         }
+
+        // For bitfields, use extract_bitfield_from_addr which handles split loads
+        // (packed bitfields that span storage unit boundaries).
+        if let Some((bit_offset, bit_width)) = bitfield {
+            return self.extract_bitfield_from_addr(field_addr, field_ty, bit_offset, bit_width);
+        }
+
         let dest = self.fresh_value();
         self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
-
-        if let Some((bit_offset, bit_width)) = bitfield {
-            return self.extract_bitfield(dest, field_ty, bit_offset, bit_width);
-        }
         Operand::Value(dest)
     }
 
@@ -1105,9 +1108,7 @@ impl Lowerer {
     fn try_lower_bitfield_inc_dec(&mut self, inner: &Expr, is_inc: bool, return_new: bool) -> Option<Operand> {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(inner)?;
 
-        let loaded = self.fresh_value();
-        self.emit(Instruction::Load { dest: loaded, ptr: field_addr, ty: storage_ty });
-        let current_val = self.extract_bitfield(loaded, storage_ty, bit_offset, bit_width);
+        let current_val = self.extract_bitfield_from_addr(field_addr, storage_ty, bit_offset, bit_width);
 
         let ir_op = if is_inc { IrBinOp::Add } else { IrBinOp::Sub };
         let result = self.emit_binop_val(ir_op, current_val.clone(), Operand::Const(IrConst::I64(1)), IrType::I64);

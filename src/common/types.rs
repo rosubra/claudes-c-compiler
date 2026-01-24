@@ -232,6 +232,26 @@ pub struct StructFieldLayout {
 }
 
 impl StructLayout {
+    /// Return the smallest integer CType that can hold at least `needed_bytes` bytes.
+    /// Preserves signedness.
+    fn smallest_int_ctype_for_bytes(needed_bytes: usize, is_signed: bool) -> CType {
+        if is_signed {
+            match needed_bytes {
+                0..=1 => CType::Char,
+                2 => CType::Short,
+                3..=4 => CType::Int,
+                _ => CType::Long,
+            }
+        } else {
+            match needed_bytes {
+                0..=1 => CType::UChar,
+                2 => CType::UShort,
+                3..=4 => CType::UInt,
+                _ => CType::ULong,
+            }
+        }
+    }
+
     /// Compute the layout for a struct (fields laid out sequentially with alignment padding).
     /// Supports bitfield packing: adjacent bitfields share storage units.
     /// `max_field_align`: if Some(N), cap each field's alignment to min(natural, N).
@@ -308,15 +328,26 @@ impl StructLayout {
                     let total_bit_offset = (bf_unit_offset * 8) as u32 + bf_bit_pos;
                     let byte_offset = (total_bit_offset / 8) as usize;
                     let bit_in_byte = total_bit_offset % 8;
-                    // For packed bitfields, we need to use the field's declared type size
-                    // as the storage unit, placed at the byte boundary
                     let storage_offset = byte_offset;
                     let bit_offset_in_storage = bit_in_byte;
+
+                    // If the bitfield spans beyond its declared type's storage unit,
+                    // widen the storage type to cover all needed bits.
+                    // E.g., unsigned char m1:8 at bit_offset=4 needs 12 bits > 8,
+                    // so we widen to unsigned short (16 bits).
+                    let needed_bits = bit_offset_in_storage + bw;
+                    let storage_ty = if needed_bits > unit_bits {
+                        let needed_bytes = ((needed_bits + 7) / 8) as usize;
+                        let is_signed = field.ty.is_signed();
+                        Self::smallest_int_ctype_for_bytes(needed_bytes, is_signed)
+                    } else {
+                        field.ty.clone()
+                    };
 
                     field_layouts.push(StructFieldLayout {
                         name: field.name.clone(),
                         offset: storage_offset,
-                        ty: field.ty.clone(),
+                        ty: storage_ty,
                         bit_offset: Some(bit_offset_in_storage),
                         bit_width: Some(bw),
                     });

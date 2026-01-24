@@ -151,9 +151,7 @@ impl Lowerer {
     pub(super) fn try_lower_bitfield_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(lhs)?;
 
-        let loaded = self.fresh_value();
-        self.emit(Instruction::Load { dest: loaded, ptr: field_addr, ty: storage_ty });
-        let current_val = self.extract_bitfield(loaded, storage_ty, bit_offset, bit_width);
+        let current_val = self.extract_bitfield_from_addr(field_addr, storage_ty, bit_offset, bit_width);
 
         let rhs_val = self.lower_expr(rhs);
 
@@ -166,9 +164,18 @@ impl Lowerer {
     }
 
     /// Store a value into a bitfield: load storage unit, clear field bits, OR in new value, store back.
+    /// Handles packed bitfields that span beyond the storage type (bit_offset + bit_width > storage_bits).
     pub(super) fn store_bitfield(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32, val: Operand) {
         if bit_width >= 64 && bit_offset == 0 {
             self.emit(Instruction::Store { val, ptr: addr, ty: storage_ty });
+            return;
+        }
+
+        let storage_bits = (storage_ty.size() * 8) as u32;
+
+        // Check if the bitfield spans beyond the storage type boundary (packed bitfields)
+        if storage_bits > 0 && bit_offset + bit_width > storage_bits {
+            self.store_bitfield_split(addr, storage_ty, storage_bits, bit_offset, bit_width, val);
             return;
         }
 
@@ -191,21 +198,65 @@ impl Lowerer {
         self.emit(Instruction::Store { val: Operand::Value(new_val), ptr: addr, ty: storage_ty });
     }
 
+    /// Store a bitfield that spans across two storage units (packed bitfields).
+    /// Splits the value into low and high parts and does two read-modify-write operations.
+    fn store_bitfield_split(&mut self, addr: Value, storage_ty: IrType, storage_bits: u32, bit_offset: u32, bit_width: u32, val: Operand) {
+        let low_bits = storage_bits - bit_offset;
+        let high_bits = bit_width - low_bits;
+
+        let mask = if bit_width >= 64 { u64::MAX } else { (1u64 << bit_width) - 1 };
+        let masked_val = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
+
+        // Low part: take low_bits from masked_val, shift left by bit_offset
+        let low_mask = if low_bits >= 64 { u64::MAX } else { (1u64 << low_bits) - 1 };
+        let low_val = self.emit_binop_val(IrBinOp::And, Operand::Value(masked_val), Operand::Const(IrConst::I64(low_mask as i64)), IrType::I64);
+        let shifted_low = if bit_offset > 0 {
+            self.emit_binop_val(IrBinOp::Shl, Operand::Value(low_val), Operand::Const(IrConst::I64(bit_offset as i64)), IrType::I64)
+        } else {
+            low_val
+        };
+
+        // Read-modify-write low storage unit
+        let old_low = self.fresh_value();
+        self.emit(Instruction::Load { dest: old_low, ptr: addr, ty: storage_ty });
+        let low_clear = !(low_mask << bit_offset);
+        let cleared_low = self.emit_binop_val(IrBinOp::And, Operand::Value(old_low), Operand::Const(IrConst::I64(low_clear as i64)), IrType::I64);
+        let new_low = self.emit_binop_val(IrBinOp::Or, Operand::Value(cleared_low), Operand::Value(shifted_low), IrType::I64);
+        self.emit(Instruction::Store { val: Operand::Value(new_low), ptr: addr, ty: storage_ty });
+
+        // High part: take remaining bits from masked_val >> low_bits, store at bit 0 of next unit
+        let high_val = self.emit_binop_val(IrBinOp::LShr, Operand::Value(masked_val), Operand::Const(IrConst::I64(low_bits as i64)), IrType::I64);
+        let high_mask = if high_bits >= 64 { u64::MAX } else { (1u64 << high_bits) - 1 };
+        let masked_high = self.emit_binop_val(IrBinOp::And, Operand::Value(high_val), Operand::Const(IrConst::I64(high_mask as i64)), IrType::I64);
+
+        let high_addr = self.emit_gep_offset(addr, storage_ty.size(), IrType::I8);
+
+        // Read-modify-write high storage unit
+        let old_high = self.fresh_value();
+        self.emit(Instruction::Load { dest: old_high, ptr: high_addr, ty: storage_ty });
+        let high_clear = !high_mask;
+        let cleared_high = self.emit_binop_val(IrBinOp::And, Operand::Value(old_high), Operand::Const(IrConst::I64(high_clear as i64)), IrType::I64);
+        let new_high = self.emit_binop_val(IrBinOp::Or, Operand::Value(cleared_high), Operand::Value(masked_high), IrType::I64);
+        self.emit(Instruction::Store { val: Operand::Value(new_high), ptr: high_addr, ty: storage_ty });
+    }
+
     /// Extract a bitfield value from a loaded storage unit.
     pub(super) fn extract_bitfield(&mut self, loaded: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32) -> Operand {
         if bit_width >= 64 && bit_offset == 0 {
             return Operand::Value(loaded);
         }
 
+        // If the loaded value doesn't cover all bits (split case), the caller
+        // should use extract_bitfield_from_addr instead. But handle the non-split case.
         if storage_ty.is_signed() {
             let shl_amount = 64 - bit_offset - bit_width;
             let ashr_amount = 64 - bit_width;
             let mut val = Operand::Value(loaded);
-            if shl_amount > 0 {
+            if shl_amount > 0 && shl_amount < 64 {
                 let shifted = self.emit_binop_val(IrBinOp::Shl, val, Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
                 val = Operand::Value(shifted);
             }
-            if ashr_amount > 0 {
+            if ashr_amount > 0 && ashr_amount < 64 {
                 let result = self.emit_binop_val(IrBinOp::AShr, val, Operand::Const(IrConst::I64(ashr_amount as i64)), IrType::I64);
                 Operand::Value(result)
             } else {
@@ -224,6 +275,55 @@ impl Lowerer {
                 let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
                 Operand::Value(masked)
             }
+        }
+    }
+
+    /// Extract a bitfield from memory, handling the case where it spans two storage units.
+    pub(super) fn extract_bitfield_from_addr(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32) -> Operand {
+        let storage_bits = (storage_ty.size() * 8) as u32;
+
+        if storage_bits > 0 && bit_offset + bit_width > storage_bits {
+            // Split extraction: load from two storage units and combine
+            let low_bits = storage_bits - bit_offset;
+            let high_bits = bit_width - low_bits;
+
+            // Load low part, shift right by bit_offset to get low_bits at bit 0
+            let low_loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: low_loaded, ptr: addr, ty: storage_ty });
+            let low_val = if bit_offset > 0 {
+                let shifted = self.emit_binop_val(IrBinOp::LShr, Operand::Value(low_loaded), Operand::Const(IrConst::I64(bit_offset as i64)), IrType::I64);
+                shifted
+            } else {
+                low_loaded
+            };
+            let low_mask = if low_bits >= 64 { u64::MAX } else { (1u64 << low_bits) - 1 };
+            let masked_low = self.emit_binop_val(IrBinOp::And, Operand::Value(low_val), Operand::Const(IrConst::I64(low_mask as i64)), IrType::I64);
+
+            // Load high part from next storage unit
+            let high_addr = self.emit_gep_offset(addr, storage_ty.size(), IrType::I8);
+            let high_loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: high_loaded, ptr: high_addr, ty: storage_ty });
+            let high_mask = if high_bits >= 64 { u64::MAX } else { (1u64 << high_bits) - 1 };
+            let masked_high = self.emit_binop_val(IrBinOp::And, Operand::Value(high_loaded), Operand::Const(IrConst::I64(high_mask as i64)), IrType::I64);
+
+            // Shift high part left by low_bits and OR with low part
+            let shifted_high = self.emit_binop_val(IrBinOp::Shl, Operand::Value(masked_high), Operand::Const(IrConst::I64(low_bits as i64)), IrType::I64);
+            let combined = self.emit_binop_val(IrBinOp::Or, Operand::Value(masked_low), Operand::Value(shifted_high), IrType::I64);
+
+            // Sign extend if the field type is signed
+            if storage_ty.is_signed() && bit_width < 64 {
+                let shl_amount = 64 - bit_width;
+                let shifted = self.emit_binop_val(IrBinOp::Shl, Operand::Value(combined), Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
+                let result = self.emit_binop_val(IrBinOp::AShr, Operand::Value(shifted), Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
+                Operand::Value(result)
+            } else {
+                Operand::Value(combined)
+            }
+        } else {
+            // Normal case: load single storage unit and extract
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: storage_ty });
+            self.extract_bitfield(loaded, storage_ty, bit_offset, bit_width)
         }
     }
 
