@@ -590,6 +590,272 @@ impl ArmCodegen {
         }
     }
 
+    // --- SSE-to-NEON helpers ---
+
+    /// Load the address represented by a pointer Value into the given register.
+    /// For alloca values, computes the address; for others, loads the stored pointer.
+    fn load_ptr_to_reg(&mut self, ptr: &Value, reg: &str) {
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            if self.state.is_alloca(ptr.0) {
+                self.emit_add_sp_offset(reg, slot.0);
+            } else {
+                self.emit_load_from_sp(reg, slot.0, "ldr");
+            }
+        }
+    }
+
+    /// Emit a NEON binary 128-bit operation: load from args[0] and args[1] pointers,
+    /// apply the NEON instruction, store result to dest_ptr.
+    fn emit_neon_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], neon_inst: &str) {
+        // Load first 128-bit operand pointer into x0, then load q0
+        self.operand_to_x0(&args[0]);
+        self.state.emit("    ldr q0, [x0]");
+        // Load second 128-bit operand pointer into x1, then load q1
+        match &args[1] {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.emit_add_sp_offset("x1", slot.0);
+                    } else {
+                        self.emit_load_from_sp("x1", slot.0, "ldr");
+                    }
+                }
+            }
+            Operand::Const(_) => {
+                self.operand_to_x0(&args[1]);
+                self.state.emit("    mov x1, x0");
+            }
+        }
+        self.state.emit("    ldr q1, [x1]");
+        // Apply the binary NEON operation
+        self.state.emit(&format!("    {} v0.16b, v0.16b, v1.16b", neon_inst));
+        // Store result to dest_ptr
+        self.load_ptr_to_reg(dest_ptr, "x0");
+        self.state.emit("    str q0, [x0]");
+    }
+
+    fn emit_x86_sse_op_arm(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+        match op {
+            X86SseOpKind::Lfence | X86SseOpKind::Mfence => {
+                self.state.emit("    dmb ish");
+            }
+            X86SseOpKind::Sfence => {
+                self.state.emit("    dmb ishst");
+            }
+            X86SseOpKind::Pause => {
+                self.state.emit("    yield");
+            }
+            X86SseOpKind::Clflush => {
+                // ARM has no direct clflush; use dc civac (clean+invalidate to PoC)
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    dc civac, x0");
+            }
+            X86SseOpKind::Movnti => {
+                // Non-temporal 32-bit store: dest_ptr = target address, args[0] = value
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    mov w9, w0");
+                    self.load_ptr_to_reg(ptr, "x0");
+                    self.state.emit("    str w9, [x0]");
+                }
+            }
+            X86SseOpKind::Movnti64 => {
+                // Non-temporal 64-bit store
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    mov x9, x0");
+                    self.load_ptr_to_reg(ptr, "x0");
+                    self.state.emit("    str x9, [x0]");
+                }
+            }
+            X86SseOpKind::Movntdq | X86SseOpKind::Movntpd => {
+                // Non-temporal 128-bit store: dest_ptr = target, args[0] = source ptr
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    ldr q0, [x0]");
+                    self.load_ptr_to_reg(ptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::Loaddqu => {
+                // Load 128-bit unaligned: args[0] = source ptr, dest_ptr = result storage
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    ldr q0, [x0]");
+                    self.load_ptr_to_reg(dptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::Storedqu => {
+                // Store 128-bit unaligned: dest_ptr = target ptr, args[0] = source data ptr
+                if let Some(ptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    ldr q0, [x0]");
+                    self.load_ptr_to_reg(ptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::Pcmpeqb128 => {
+                if let Some(dptr) = dest_ptr {
+                    // cmeq compares and sets all bits in each lane on equality
+                    self.emit_neon_binary_128(dptr, args, "cmeq");
+                }
+            }
+            X86SseOpKind::Pcmpeqd128 => {
+                if let Some(dptr) = dest_ptr {
+                    // For 32-bit lane equality, load q regs, use cmeq with .4s arrangement
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    ldr q0, [x0]");
+                    match &args[1] {
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                if self.state.is_alloca(v.0) {
+                                    self.emit_add_sp_offset("x1", slot.0);
+                                } else {
+                                    self.emit_load_from_sp("x1", slot.0, "ldr");
+                                }
+                            }
+                        }
+                        Operand::Const(_) => {
+                            self.operand_to_x0(&args[1]);
+                            self.state.emit("    mov x1, x0");
+                        }
+                    }
+                    self.state.emit("    ldr q1, [x1]");
+                    self.state.emit("    cmeq v0.4s, v0.4s, v1.4s");
+                    self.load_ptr_to_reg(dptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::Psubusb128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_neon_binary_128(dptr, args, "uqsub");
+                }
+            }
+            X86SseOpKind::Por128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_neon_binary_128(dptr, args, "orr");
+                }
+            }
+            X86SseOpKind::Pand128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_neon_binary_128(dptr, args, "and");
+                }
+            }
+            X86SseOpKind::Pxor128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_neon_binary_128(dptr, args, "eor");
+                }
+            }
+            X86SseOpKind::Pmovmskb128 => {
+                // Extract the high bit of each byte in a 128-bit vector into a 16-bit mask.
+                // NEON has no pmovmskb equivalent, so we use a multi-step sequence:
+                //   1. Load 128-bit data into v0
+                //   2. Shift right each byte by 7 to isolate the sign bit (ushr v0.16b, v0.16b, #7)
+                //   3. Collect bits using successive narrowing and shifts
+                // Efficient approach: multiply by power-of-2 bit positions, then add across lanes.
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    ldr q0, [x0]");
+                // Shift right by 7 to get 0 or 1 in each byte lane
+                self.state.emit("    ushr v0.16b, v0.16b, #7");
+                // Load the bit position constants: [1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128]
+                // 0x8040201008040201 loaded via movz/movk sequence
+                self.state.emit("    movz x0, #0x0201");
+                self.state.emit("    movk x0, #0x0804, lsl #16");
+                self.state.emit("    movk x0, #0x2010, lsl #32");
+                self.state.emit("    movk x0, #0x8040, lsl #48");
+                self.state.emit("    fmov d1, x0");
+                self.state.emit("    mov v1.d[1], x0");
+                // Multiply each byte: v0[i] * v1[i] gives the bit contribution
+                self.state.emit("    mul v0.16b, v0.16b, v1.16b");
+                // Now sum bytes 0-7 into low byte, and bytes 8-15 into high byte
+                // addv sums all lanes into a scalar - but we need two separate sums
+                // Use ext to split, then addv each half
+                self.state.emit("    ext v1.16b, v0.16b, v0.16b, #8");
+                // v0 has low 8 bytes, v1 has high 8 bytes (shifted)
+                // Sum low 8 bytes
+                self.state.emit("    addv b0, v0.8b");
+                self.state.emit("    umov w0, v0.b[0]");
+                // Sum high 8 bytes
+                self.state.emit("    addv b1, v1.8b");
+                self.state.emit("    umov w1, v1.b[0]");
+                // Combine: result = low_sum | (high_sum << 8)
+                self.state.emit("    orr w0, w0, w1, lsl #8");
+                // Store scalar result
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            X86SseOpKind::SetEpi8 => {
+                // Splat a byte value to all 16 bytes: args[0] = byte value
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    dup v0.16b, w0");
+                    self.load_ptr_to_reg(dptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::SetEpi32 => {
+                // Splat a 32-bit value to all 4 lanes: args[0] = 32-bit value
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_x0(&args[0]);
+                    self.state.emit("    dup v0.4s, w0");
+                    self.load_ptr_to_reg(dptr, "x0");
+                    self.state.emit("    str q0, [x0]");
+                }
+            }
+            X86SseOpKind::Crc32_8 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    mov w9, w0");
+                self.operand_to_x0(&args[1]);
+                self.state.emit("    crc32b w9, w9, w0");
+                self.state.emit("    mov x0, x9");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_16 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    mov w9, w0");
+                self.operand_to_x0(&args[1]);
+                self.state.emit("    crc32h w9, w9, w0");
+                self.state.emit("    mov x0, x9");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_32 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    mov w9, w0");
+                self.operand_to_x0(&args[1]);
+                self.state.emit("    crc32w w9, w9, w0");
+                self.state.emit("    mov x0, x9");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            X86SseOpKind::Crc32_64 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    mov x9, x0");
+                self.operand_to_x0(&args[1]);
+                self.state.emit("    crc32x w9, w9, x0");
+                self.state.emit("    mov x0, x9");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+        }
+    }
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -2324,6 +2590,10 @@ impl ArchCodegen for ArmCodegen {
         // Full 128-bit copy: load src into x0:x1, store to dest
         self.operand_to_x0_x1(src);
         self.store_x0_x1_to(dest);
+    }
+
+    fn emit_x86_sse_op(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+        self.emit_x86_sse_op_arm(dest, op, dest_ptr, args);
     }
 }
 
