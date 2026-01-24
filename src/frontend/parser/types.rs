@@ -497,10 +497,12 @@ impl Parser {
                     self.pos = save; // restore, not a recognized pattern
                 }
             }
-            // Parse pointer declarators
+            // Parse pointer declarators: each * may be followed by
+            // cv-qualifiers (const/volatile/restrict), e.g. const char *const *p
             let mut field_type = type_spec.clone();
             while self.consume_if(&TokenKind::Star) {
                 field_type = TypeSpecifier::Pointer(Box::new(field_type));
+                self.skip_cv_qualifiers();
             }
             let name = if let TokenKind::Identifier(n) = self.peek().clone() {
                 self.advance();

@@ -142,7 +142,18 @@ impl Parser {
             span
         } else {
             let span = self.peek_span();
-            eprintln!("parser error: expected {:?}, got {:?}", expected, self.peek());
+            // Show context around error
+            let start = if self.pos > 20 { self.pos - 20 } else { 0 };
+            let end = std::cmp::min(self.pos + 5, self.tokens.len());
+            let context: Vec<_> = self.tokens[start..end].iter().map(|t| {
+                match &t.kind {
+                    TokenKind::Identifier(name) => format!("Id({})", name),
+                    TokenKind::IntLiteral(v) => format!("Int({})", v),
+                    TokenKind::StringLiteral(s) => format!("Str({})", s),
+                    other => format!("{:?}", other),
+                }
+            }).collect();
+            eprintln!("parser error: expected {:?}, got {:?} at pos {} context: [{}]", expected, self.peek(), self.pos, context.join(", "));
             span
         }
     }
@@ -241,14 +252,28 @@ impl Parser {
                                     TokenKind::Identifier(name) if name == "aligned" || name == "__aligned__" => {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
-                                            self.advance();
+                                            self.advance(); // consume opening (
                                             if let TokenKind::IntLiteral(n) = self.peek() {
                                                 _aligned = Some(*n as usize);
                                                 self.advance();
                                             }
-                                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                                                self.advance();
+                                            // Skip to matching closing paren, tracking nesting depth
+                                            // so that __alignof__(long long) and sizeof(type) work
+                                            let mut paren_depth = 1i32;
+                                            while paren_depth > 0 {
+                                                match self.peek() {
+                                                    TokenKind::LParen => { paren_depth += 1; self.advance(); }
+                                                    TokenKind::RParen => {
+                                                        paren_depth -= 1;
+                                                        if paren_depth > 0 {
+                                                            self.advance();
+                                                        }
+                                                    }
+                                                    TokenKind::Eof => break,
+                                                    _ => { self.advance(); }
+                                                }
                                             }
+                                            // Consume the final closing paren
                                             if matches!(self.peek(), TokenKind::RParen) {
                                                 self.advance();
                                             }
