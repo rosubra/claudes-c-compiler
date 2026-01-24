@@ -866,100 +866,91 @@ impl Lowerer {
     /// Get the IR type for an expression (best-effort, based on locals/globals info).
     pub(super) fn get_expr_type(&self, expr: &Expr) -> IrType {
         match expr {
-            Expr::IntLiteral(_, _) | Expr::LongLiteral(_, _) | Expr::CharLiteral(_, _) => return IrType::I64,
-            Expr::UIntLiteral(_, _) | Expr::ULongLiteral(_, _) => return IrType::U64,
-            Expr::FloatLiteral(_, _) => return IrType::F64,
-            Expr::FloatLiteralF32(_, _) => return IrType::F32,
-            Expr::FloatLiteralLongDouble(_, _) => return IrType::F128, // long double: 16-byte ABI
+            Expr::IntLiteral(_, _) | Expr::LongLiteral(_, _) | Expr::CharLiteral(_, _) => IrType::I64,
+            Expr::UIntLiteral(_, _) | Expr::ULongLiteral(_, _) => IrType::U64,
+            Expr::FloatLiteral(_, _) => IrType::F64,
+            Expr::FloatLiteralF32(_, _) => IrType::F32,
+            Expr::FloatLiteralLongDouble(_, _) => IrType::F128,
             Expr::ImaginaryLiteral(_, _) | Expr::ImaginaryLiteralF32(_, _)
-            | Expr::ImaginaryLiteralLongDouble(_, _) => return IrType::Ptr, // complex is aggregate
-            Expr::StringLiteral(_, _) => return IrType::Ptr,
-            Expr::Cast(ref target_type, _, _) => return self.type_spec_to_ir(target_type),
+            | Expr::ImaginaryLiteralLongDouble(_, _) => IrType::Ptr,
+            Expr::StringLiteral(_, _) => IrType::Ptr,
+            Expr::Cast(ref target_type, _, _) => self.type_spec_to_ir(target_type),
             Expr::UnaryOp(UnaryOp::RealPart, inner, _) | Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
-                // __real__ and __imag__ extract a component from complex values
                 let inner_ct = self.expr_ctype(inner);
                 if inner_ct.is_complex() {
                     return Self::complex_component_ir_type(&inner_ct);
                 }
-                // For non-complex: __real__ returns the value, __imag__ returns 0
-                return self.get_expr_type(inner);
+                self.get_expr_type(inner)
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _)
             | Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                // Check for complex types
                 let inner_ct = self.expr_ctype(inner);
                 if inner_ct.is_complex() {
-                    return IrType::Ptr; // complex is aggregate type
+                    return IrType::Ptr;
                 }
-                // C99 6.3.1.1: Integer promotion - result type is at least int
                 let inner_ty = self.get_expr_type(inner);
                 if inner_ty.is_float() {
                     return inner_ty;
                 }
-                // Apply integer promotion: sub-int types promote to I32
-                return match inner_ty {
+                match inner_ty {
                     IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 => IrType::I32,
                     IrType::U32 => IrType::U32,
                     _ => inner_ty,
-                };
+                }
             }
             Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
-                // PreInc/PreDec preserve the operand type (they modify and return the lvalue)
-                return self.get_expr_type(inner);
+                self.get_expr_type(inner)
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
-                // Check for complex operands - complex arithmetic returns Ptr
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         let lct = self.expr_ctype(lhs);
                         let rct = self.expr_ctype(rhs);
                         if lct.is_complex() || rct.is_complex() {
-                            return IrType::Ptr; // complex is aggregate
+                            return IrType::Ptr;
                         }
                     }
                     _ => {}
                 }
                 match op {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-                    | BinOp::LogicalAnd | BinOp::LogicalOr => return IrType::I64,
+                    | BinOp::LogicalAnd | BinOp::LogicalOr => IrType::I64,
                     BinOp::Shl | BinOp::Shr => {
-                        // Shift result type is the promoted type of the left operand
                         let lty = self.get_expr_type(lhs);
-                        return match lty {
+                        match lty {
                             IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 | IrType::I32 => IrType::I32,
                             IrType::U32 => IrType::U32,
                             _ => lty,
-                        };
+                        }
                     }
                     _ => {
                         let lty = self.get_expr_type(lhs);
                         let rty = self.get_expr_type(rhs);
                         if lty == IrType::F128 || rty == IrType::F128 {
-                            return IrType::F128;
+                            IrType::F128
                         } else if lty == IrType::F64 || rty == IrType::F64 {
-                            return IrType::F64;
+                            IrType::F64
                         } else if lty == IrType::F32 || rty == IrType::F32 {
-                            return IrType::F32;
+                            IrType::F32
+                        } else {
+                            Self::common_type(lty, rty)
                         }
-                        // Integer binary ops: apply usual arithmetic conversions
-                        return Self::common_type(lty, rty);
                     }
                 }
             }
             Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
-                return self.get_expr_type(lhs);
+                self.get_expr_type(lhs)
             }
             Expr::Conditional(_, then_expr, else_expr, _) => {
                 let then_ty = self.get_expr_type(then_expr);
                 let else_ty = self.get_expr_type(else_expr);
-                return Self::common_type(then_ty, else_ty);
+                Self::common_type(then_ty, else_ty)
             }
-            Expr::Comma(_, rhs, _) => return self.get_expr_type(rhs),
-            Expr::PostfixOp(_, inner, _) => return self.get_expr_type(inner),
-            Expr::AddressOf(_, _) => return IrType::Ptr,
-            Expr::Sizeof(_, _) => return IrType::U64,  // sizeof returns size_t (unsigned long)
+            Expr::Comma(_, rhs, _) => self.get_expr_type(rhs),
+            Expr::PostfixOp(_, inner, _) => self.get_expr_type(inner),
+            Expr::AddressOf(_, _) => IrType::Ptr,
+            Expr::Sizeof(_, _) => IrType::U64,
             Expr::GenericSelection(controlling, associations, _) => {
-                // Resolve _Generic by matching the controlling expression's type
                 let controlling_ctype = self.get_expr_ctype(controlling);
                 let controlling_ir_type = self.get_expr_type(controlling);
                 let mut default_expr: Option<&Expr> = None;
@@ -984,10 +975,9 @@ impl Lowerer {
                 if let Some(def) = default_expr {
                     return self.get_expr_type(def);
                 }
-                return IrType::I64;
+                IrType::I64
             }
             Expr::FunctionCall(func, _, _) => {
-                // Look up the return type of the called function
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if let Some(&ret_ty) = self.func_meta.return_types.get(name) {
                         return ret_ty;
@@ -995,12 +985,10 @@ impl Lowerer {
                     if let Some(&ret_ty) = self.func_meta.ptr_return_types.get(name) {
                         return ret_ty;
                     }
-                    // Handle builtins that return float types
                     if let Some(ret_ty) = Self::builtin_return_type(name) {
                         return ret_ty;
                     }
                 }
-                // For (*fptr)(...) calls, check the inner identifier
                 if let Expr::Deref(inner, _) = func.as_ref() {
                     if let Expr::Identifier(name, _) = inner.as_ref() {
                         if let Some(&ret_ty) = self.func_meta.return_types.get(name) {
@@ -1010,21 +998,16 @@ impl Lowerer {
                             return ret_ty;
                         }
                     }
-                    // Try CType of the inner (pre-deref) expression for function pointers
                     if let Some(inner_ctype) = self.get_expr_ctype(inner) {
                         return Self::extract_func_ptr_return_type(&inner_ctype);
                     }
                 }
-                // For indirect calls (function pointers), determine return type from CType
                 if let Some(ctype) = self.get_expr_ctype(func) {
                     return Self::extract_func_ptr_return_type(&ctype);
                 }
-                return IrType::I64;
+                IrType::I64
             }
-            Expr::VaArg(_, type_spec, _) => return self.resolve_va_arg_type(type_spec),
-            _ => {}
-        }
-        match expr {
+            Expr::VaArg(_, type_spec, _) => self.resolve_va_arg_type(type_spec),
             Expr::Identifier(name, _) => {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     return IrType::Ptr;
@@ -1033,14 +1016,12 @@ impl Lowerer {
                     return IrType::I32;
                 }
                 if let Some(info) = self.locals.get(name) {
-                    // Arrays decay to pointers in expression context
                     if info.is_array {
                         return IrType::Ptr;
                     }
                     return info.ty;
                 }
                 if let Some(ginfo) = self.globals.get(name) {
-                    // Arrays decay to pointers in expression context
                     if ginfo.is_array {
                         return IrType::Ptr;
                     }
@@ -1049,7 +1030,6 @@ impl Lowerer {
                 IrType::I64
             }
             Expr::ArraySubscript(base, index, _) => {
-                // First try CType-based resolution (handles float arrays correctly)
                 if let Some(base_ctype) = self.get_expr_ctype(base) {
                     match base_ctype {
                         CType::Array(elem, _) => return IrType::from_ctype(&elem),
@@ -1057,7 +1037,6 @@ impl Lowerer {
                         _ => {}
                     }
                 }
-                // Also check reverse subscript (index[base])
                 if let Some(idx_ctype) = self.get_expr_ctype(index) {
                     match idx_ctype {
                         CType::Array(elem, _) => return IrType::from_ctype(&elem),
@@ -1065,7 +1044,6 @@ impl Lowerer {
                         _ => {}
                     }
                 }
-                // Fallback: For multi-dim arrays, find the root identifier
                 let root_name = self.get_array_root_name(expr);
                 if let Some(name) = root_name {
                     if let Some(info) = self.locals.get(&name) {
@@ -1079,8 +1057,6 @@ impl Lowerer {
                         }
                     }
                 }
-                // Check both base and index for identifier with type info
-                // (handles reverse subscript like 3[arr] where index is the array)
                 for operand in [base.as_ref(), index.as_ref()] {
                     if let Expr::Identifier(name, _) = operand {
                         if let Some(info) = self.locals.get(name) {
@@ -1101,7 +1077,6 @@ impl Lowerer {
                         }
                     }
                 }
-                // For struct/union member array access: s.arr[i] or p->arr[i]
                 match base.as_ref() {
                     Expr::MemberAccess(base_expr, field_name, _) => {
                         if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
@@ -1119,18 +1094,15 @@ impl Lowerer {
                     }
                     _ => {}
                 }
-                // For complex base expressions, try to resolve pointee type
                 if let Some(pt) = self.get_pointee_type_of_expr(base) {
                     return pt;
                 }
-                // Also try the index (reverse subscript with complex pointer expr)
                 if let Some(pt) = self.get_pointee_type_of_expr(index) {
                     return pt;
                 }
                 IrType::I64
             }
             Expr::Deref(inner, _) => {
-                // Dereference: use CType-based resolution for multi-level pointers
                 if let Some(inner_ctype) = self.get_expr_ctype(inner) {
                     match inner_ctype {
                         CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
@@ -1138,7 +1110,6 @@ impl Lowerer {
                         _ => {}
                     }
                 }
-                // Fallback: use heuristic-based approach
                 if let Some(pt) = self.get_pointee_type_of_expr(inner) {
                     return pt;
                 }

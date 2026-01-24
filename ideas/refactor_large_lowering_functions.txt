@@ -8,11 +8,17 @@ Items 1, 2, 3, 4b, 4c have been completed:
 - Shared helpers extracted: resolve_typedef_derived(), register_function_meta(),
   intern_string_literal(), push_zero_bytes() - eliminating 18+ duplication sites
 
+Item 4 completed:
+- get_expr_type: merged two sequential match blocks into a single unified dispatch
+
+Additional dedup completed in expr.rs:
+- fp_masks() helper centralizes FP bit-layout constants (abs_mask, exp_only, exp_shift, etc.)
+- fp_abs_bits() helper deduplicates abs-value computation across isnan/isinf/isinf_sign
+- mask_float_sign_for_truthiness() deduplicates sign-bit masking in lower_condition_expr
+  and LogicalNot
+
 Remaining (lower priority, less severe):
 
-4. get_expr_type (types.rs, ~250 lines)
-   - Type inference for expressions, split across two match blocks with fallthrough
-   - The two match blocks should be unified into one clean dispatch
-
-5. lower_function (lowering.rs, ~286 lines)
+5. lower_function (lowering.rs, ~340 lines)
    - Could be split into: lower_function_params, lower_function_body, emit_implicit_return
+   - But the function has clear phase comments and reasonable structure

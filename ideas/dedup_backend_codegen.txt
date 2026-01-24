@@ -6,6 +6,13 @@ Items 1 and 2 have been completed:
 - classify_float_binop() + FloatOp enum fixes the latent fadd-fallback bug and shares
   the float operation dispatch across all three backends
 
+Items 1, 2, and 4 have been completed:
+- CastKind enum + classify_cast() extracts shared cast classification
+- classify_float_binop() + FloatOp enum shares float operation dispatch
+- ARM operand_to_x0 movz/movk inlining deduplicated via emit_load_imm64 (I64/F32/F64/LongDouble)
+- ARM emit_sub_sp/emit_add_sp simplified to use emit_load_imm64 for large offsets
+- ARM emit_inline_asm const loading simplified to use emit_load_imm64
+
 Remaining opportunities:
 
 3. Parameter classification: emit_store_params and emit_call all independently classify
@@ -13,9 +20,6 @@ Remaining opportunities:
    but the three ABIs differ significantly (x86-64 SysV, AAPCS64, RISC-V LP64D), so the
    benefit is lower than items 1-2.
 
-4. ARM-specific: load_large_imm helper exists but operand_to_x0 manually inlines the same
-   movz+movk pattern 4 times. va_arg/va_start bypass large-offset helpers.
-
-5. emit_memcpy: ARM and RISC-V both have nearly identical loop-based memcpy implementations.
-   Could extract a shared "emit loop-based memcpy" into the ArchCodegen trait with
-   arch-specific register names as parameters.
+5. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
+   modes (ARM post-increment vs RISC-V explicit pointer advance). x86 uses rep movsb.
+   The savings are marginal (~10 lines) since the loop bodies are structurally different.

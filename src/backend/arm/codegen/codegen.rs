@@ -47,17 +47,8 @@ impl ArmCodegen {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit(&format!("    sub sp, sp, #{}", n));
-        } else if n <= 65535 {
-            self.state.emit(&format!("    mov x16, #{}", n));
-            self.state.emit("    sub sp, sp, x16");
         } else {
-            self.state.emit(&format!("    movz x16, #{}", n & 0xFFFF));
-            if (n >> 16) & 0xFFFF != 0 {
-                self.state.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
-            }
-            if (n >> 32) & 0xFFFF != 0 {
-                self.state.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
-            }
+            self.emit_load_imm64("x16", n);
             self.state.emit("    sub sp, sp, x16");
         }
     }
@@ -67,17 +58,8 @@ impl ArmCodegen {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit(&format!("    add sp, sp, #{}", n));
-        } else if n <= 65535 {
-            self.state.emit(&format!("    mov x16, #{}", n));
-            self.state.emit("    add sp, sp, x16");
         } else {
-            self.state.emit(&format!("    movz x16, #{}", n & 0xFFFF));
-            if (n >> 16) & 0xFFFF != 0 {
-                self.state.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
-            }
-            if (n >> 32) & 0xFFFF != 0 {
-                self.state.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
-            }
+            self.emit_load_imm64("x16", n);
             self.state.emit("    add sp, sp, x16");
         }
     }
@@ -225,74 +207,12 @@ impl ArmCodegen {
                         } else if *v < 0 && *v >= -65536 {
                             self.state.emit(&format!("    mov x0, #{}", v));
                         } else {
-                            self.state.emit(&format!("    mov x0, #{}", *v as u64 & 0xffff));
-                            if (*v as u64 >> 16) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (*v as u64 >> 16) & 0xffff));
-                            }
-                            if (*v as u64 >> 32) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (*v as u64 >> 32) & 0xffff));
-                            }
-                            if (*v as u64 >> 48) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (*v as u64 >> 48) & 0xffff));
-                            }
+                            self.emit_load_imm64("x0", *v);
                         }
                     }
-                    IrConst::F32(v) => {
-                        let bits = v.to_bits() as u64;
-                        if bits == 0 {
-                            self.state.emit("    mov x0, #0");
-                        } else if bits <= 65535 {
-                            self.state.emit(&format!("    mov x0, #{}", bits));
-                        } else {
-                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
-                            if (bits >> 16) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
-                            }
-                            if (bits >> 32) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
-                            }
-                            if (bits >> 48) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
-                            }
-                        }
-                    }
-                    IrConst::F64(v) => {
-                        let bits = v.to_bits();
-                        if bits == 0 {
-                            self.state.emit("    mov x0, #0");
-                        } else if bits <= 65535 {
-                            self.state.emit(&format!("    mov x0, #{}", bits));
-                        } else {
-                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
-                            if (bits >> 16) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
-                            }
-                            if (bits >> 32) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
-                            }
-                            if (bits >> 48) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
-                            }
-                        }
-                    }
-                    // LongDouble at computation level is treated as F64
-                    IrConst::LongDouble(v) => {
-                        let bits = v.to_bits();
-                        if bits == 0 {
-                            self.state.emit("    mov x0, #0");
-                        } else {
-                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
-                            if (bits >> 16) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
-                            }
-                            if (bits >> 32) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
-                            }
-                            if (bits >> 48) & 0xffff != 0 {
-                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
-                            }
-                        }
-                    }
+                    IrConst::F32(v) => self.emit_load_imm64("x0", v.to_bits() as i64),
+                    IrConst::F64(v) => self.emit_load_imm64("x0", v.to_bits() as i64),
+                    IrConst::LongDouble(v) => self.emit_load_imm64("x0", v.to_bits() as i64),
                     IrConst::Zero => self.state.emit("    mov x0, #0"),
                 }
             }
@@ -1763,21 +1683,7 @@ impl ArchCodegen for ArmCodegen {
             let reg = op_regs[op_idx].clone();
             match val {
                 Operand::Const(c) => {
-                    let imm = c.to_i64().unwrap_or(0);
-                    if imm >= 0 && imm <= 65535 {
-                        self.state.emit(&format!("    mov {}, #{}", reg, imm));
-                    } else {
-                        self.state.emit(&format!("    movz {}, #{}", reg, imm as u64 & 0xFFFF));
-                        if (imm as u64 >> 16) & 0xFFFF != 0 {
-                            self.state.emit(&format!("    movk {}, #{}, lsl #16", reg, (imm as u64 >> 16) & 0xFFFF));
-                        }
-                        if (imm as u64 >> 32) & 0xFFFF != 0 {
-                            self.state.emit(&format!("    movk {}, #{}, lsl #32", reg, (imm as u64 >> 32) & 0xFFFF));
-                        }
-                        if (imm as u64 >> 48) & 0xFFFF != 0 {
-                            self.state.emit(&format!("    movk {}, #{}, lsl #48", reg, (imm as u64 >> 48) & 0xFFFF));
-                        }
-                    }
+                    self.emit_load_imm64(&reg, c.to_i64().unwrap_or(0));
                 }
                 Operand::Value(v) => {
                     if let Some(slot) = self.state.get_slot(v.0) {

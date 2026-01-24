@@ -10,6 +10,22 @@ use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
+    /// Mask off the sign bit of a float value for truthiness testing.
+    /// This ensures -0.0 is treated as falsy (same as +0.0) while NaN remains truthy.
+    fn mask_float_sign_for_truthiness(&mut self, val: Operand, float_ty: IrType) -> Operand {
+        if !matches!(float_ty, IrType::F32 | IrType::F64 | IrType::F128) {
+            return val;
+        }
+        let (abs_mask, _, _, _, _) = Self::fp_masks(float_ty);
+        let result = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: result, op: IrBinOp::And,
+            lhs: val, rhs: Operand::Const(IrConst::I64(abs_mask)),
+            ty: IrType::I64,
+        });
+        Operand::Value(result)
+    }
+
     /// Lower a condition expression, ensuring floating-point values are properly
     /// tested for truthiness. The backend's CondBranch uses integer testq, which
     /// doesn't handle -0.0 correctly (bit pattern 0x8000000000000000 is non-zero
@@ -18,25 +34,7 @@ impl Lowerer {
     pub(super) fn lower_condition_expr(&mut self, expr: &Expr) -> Operand {
         let expr_ty = self.infer_expr_type(expr);
         let val = self.lower_expr(expr);
-        if matches!(expr_ty, IrType::F32 | IrType::F64 | IrType::F128) {
-            // Mask off the sign bit: AND with 0x7FFF... so that -0.0 becomes +0.0 (all zeros).
-            // NaN has non-zero exponent+mantissa bits, so it stays truthy.
-            let mask = match expr_ty {
-                IrType::F32 => Operand::Const(IrConst::I64(0x7FFFFFFFi64)),
-                _ => Operand::Const(IrConst::I64(0x7FFFFFFFFFFFFFFFi64)),
-            };
-            let result = self.fresh_value();
-            self.emit(Instruction::BinOp {
-                dest: result,
-                op: IrBinOp::And,
-                lhs: val,
-                rhs: mask,
-                ty: IrType::I64,
-            });
-            Operand::Value(result)
-        } else {
-            val
-        }
+        self.mask_float_sign_for_truthiness(val, expr_ty)
     }
 
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> Operand {
@@ -567,24 +565,7 @@ impl Lowerer {
             UnaryOp::LogicalNot => {
                 let inner_ty = self.infer_expr_type(inner);
                 let val = self.lower_expr(inner);
-                // For floats, mask off sign bit so -0.0 is treated as zero
-                let cmp_val = if matches!(inner_ty, IrType::F32 | IrType::F64 | IrType::F128) {
-                    let mask = match inner_ty {
-                        IrType::F32 => Operand::Const(IrConst::I64(0x7FFFFFFFi64)),
-                        _ => Operand::Const(IrConst::I64(0x7FFFFFFFFFFFFFFFi64)),
-                    };
-                    let masked = self.fresh_value();
-                    self.emit(Instruction::BinOp {
-                        dest: masked,
-                        op: IrBinOp::And,
-                        lhs: val,
-                        rhs: mask,
-                        ty: IrType::I64,
-                    });
-                    Operand::Value(masked)
-                } else {
-                    val
-                };
+                let cmp_val = self.mask_float_sign_for_truthiness(val, inner_ty);
                 let dest = self.fresh_value();
                 self.emit(Instruction::Cmp {
                     dest, op: IrCmpOp::Eq,
@@ -1166,6 +1147,37 @@ impl Lowerer {
         (Operand::Value(result), int_ty)
     }
 
+    /// Floating-point bit-layout constants for classification.
+    /// Returns (abs_mask, exp_only, exp_shift, exp_field_max, mant_mask) for the given float type.
+    fn fp_masks(float_ty: IrType) -> (i64, i64, i64, i64, i64) {
+        match float_ty {
+            IrType::F32 => (
+                0x7FFFFFFF_i64,             // abs_mask
+                0x7F800000_i64,             // exp_only
+                23,                         // exp_shift
+                0xFF,                       // exp_field_max
+                0x007FFFFF_i64,             // mant_mask
+            ),
+            _ => (
+                0x7FFFFFFFFFFFFFFF_i64,     // abs_mask
+                0x7FF0000000000000_u64 as i64, // exp_only
+                52,                         // exp_shift
+                0x7FF,                      // exp_field_max
+                0x000FFFFFFFFFFFFF_u64 as i64, // mant_mask
+            ),
+        }
+    }
+
+    /// Compute the absolute value (sign-stripped) of float bits: bits & abs_mask.
+    fn fp_abs_bits(&mut self, bits: &Operand, int_ty: IrType, abs_mask: i64) -> Value {
+        let abs_val = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: abs_val, op: IrBinOp::And,
+            lhs: bits.clone(), rhs: Operand::Const(IrConst::I64(abs_mask)), ty: int_ty,
+        });
+        abs_val
+    }
+
     /// Lower __builtin_fpclassify(nan_val, inf_val, norm_val, subnorm_val, zero_val, x)
     /// Returns one of the first 5 arguments based on the classification of x.
     fn lower_builtin_fpclassify(&mut self, args: &[Expr]) -> Option<Operand> {
@@ -1186,31 +1198,25 @@ impl Lowerer {
 
         // Bitcast to integer to examine bits
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (_abs_mask, _exp_only, exp_shift, exp_field_max, mant_mask) = Self::fp_masks(arg_ty);
 
-        // Get exponent and mantissa masks based on float type
-        let (exp_mask, mant_mask, exp_shift) = match arg_ty {
-            IrType::F32 => (0x7F800000_u64, 0x007FFFFF_u64, 23_u64),
-            _ => (0x7FF0000000000000_u64, 0x000FFFFFFFFFFFFF_u64, 52_u64),
-        };
-
-        // Extract exponent: (bits >> exp_shift) & exp_field_mask
+        // Extract exponent: (bits >> exp_shift) & exp_field_max
         let shifted = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: shifted, op: IrBinOp::LShr,
-            lhs: bits.clone(), rhs: Operand::Const(IrConst::I64(exp_shift as i64)), ty: int_ty,
+            lhs: bits.clone(), rhs: Operand::Const(IrConst::I64(exp_shift)), ty: int_ty,
         });
-        let exp_field_mask = if arg_ty == IrType::F32 { 0xFF_i64 } else { 0x7FF_i64 };
         let exponent = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: exponent, op: IrBinOp::And,
-            lhs: Operand::Value(shifted), rhs: Operand::Const(IrConst::I64(exp_field_mask)), ty: int_ty,
+            lhs: Operand::Value(shifted), rhs: Operand::Const(IrConst::I64(exp_field_max)), ty: int_ty,
         });
 
         // Extract mantissa: bits & mant_mask
         let mantissa = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: mantissa, op: IrBinOp::And,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(mant_mask as i64)), ty: int_ty,
+            lhs: bits, rhs: Operand::Const(IrConst::I64(mant_mask)), ty: int_ty,
         });
 
         // Classification logic using select chains:
@@ -1220,7 +1226,7 @@ impl Lowerer {
         // if exp == 0 && mant != 0 => Subnormal
         // else => Normal
 
-        let exp_all_ones = exp_field_mask;
+        let exp_all_ones = exp_field_max;
 
         // Check: exp == all_ones
         let exp_is_max = self.fresh_value();
@@ -1393,20 +1399,9 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
 
-        // NaN check: (bits & abs_mask) > exp_mask
-        // where abs_mask strips the sign bit, exp_mask has all exponent bits set
-        let (abs_mask, exp_only) = match arg_ty {
-            IrType::F32 => (0x7FFFFFFF_i64, 0x7F800000_i64),
-            _ => (0x7FFFFFFFFFFFFFFF_i64, 0x7FF0000000000000_u64 as i64),
-        };
-
-        let abs_val = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: abs_val, op: IrBinOp::And,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(abs_mask)), ty: int_ty,
-        });
-
+        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
         let is_nan = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: is_nan, op: IrCmpOp::Ugt,
@@ -1424,22 +1419,9 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
 
-        let abs_mask = match arg_ty {
-            IrType::F32 => 0x7FFFFFFF_i64,
-            _ => 0x7FFFFFFFFFFFFFFF_i64,
-        };
-        let exp_only = match arg_ty {
-            IrType::F32 => 0x7F800000_i64,
-            _ => 0x7FF0000000000000_u64 as i64,
-        };
-
-        let abs_val = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: abs_val, op: IrBinOp::And,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(abs_mask)), ty: int_ty,
-        });
-
+        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
         let is_inf = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: is_inf, op: IrCmpOp::Eq,
@@ -1456,23 +1438,19 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (_, exp_only, _, _, _) = Self::fp_masks(arg_ty);
 
-        // Finite: exponent != all 1s
-        let exp_mask = match arg_ty {
-            IrType::F32 => 0x7F800000_i64,
-            _ => 0x7FF0000000000000_u64 as i64,
-        };
-
+        // Finite: (bits & exp_only) != exp_only
         let exp_bits = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: exp_bits, op: IrBinOp::And,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(exp_mask)), ty: int_ty,
+            lhs: bits, rhs: Operand::Const(IrConst::I64(exp_only)), ty: int_ty,
         });
 
         let is_finite = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: is_finite, op: IrCmpOp::Ne,
-            lhs: Operand::Value(exp_bits), rhs: Operand::Const(IrConst::I64(exp_mask)), ty: int_ty,
+            lhs: Operand::Value(exp_bits), rhs: Operand::Const(IrConst::I64(exp_only)), ty: int_ty,
         });
 
         Some(Operand::Value(is_finite))
@@ -1485,22 +1463,13 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (_, exp_only, exp_shift, exp_field_max, _) = Self::fp_masks(arg_ty);
 
-        // Normal: exponent != 0 AND exponent != all 1s
-        let (exp_mask, exp_shift) = match arg_ty {
-            IrType::F32 => (0x7F800000_i64, 23_i64),
-            _ => (0x7FF0000000000000_u64 as i64, 52_i64),
-        };
-        let exp_field_max = match arg_ty {
-            IrType::F32 => 0xFF_i64,
-            _ => 0x7FF_i64,
-        };
-
-        // Extract exponent bits
+        // Extract exponent field
         let exp_bits = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: exp_bits, op: IrBinOp::And,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(exp_mask)), ty: int_ty,
+            lhs: bits, rhs: Operand::Const(IrConst::I64(exp_only)), ty: int_ty,
         });
         let exponent = self.fresh_value();
         self.emit(Instruction::BinOp {
@@ -1508,21 +1477,17 @@ impl Lowerer {
             lhs: Operand::Value(exp_bits), rhs: Operand::Const(IrConst::I64(exp_shift)), ty: int_ty,
         });
 
-        // exp != 0
+        // Normal: exp != 0 AND exp != max
         let exp_nonzero = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: exp_nonzero, op: IrCmpOp::Ne,
             lhs: Operand::Value(exponent), rhs: Operand::Const(IrConst::I64(0)), ty: int_ty,
         });
-
-        // exp != max
         let exp_not_max = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: exp_not_max, op: IrCmpOp::Ne,
             lhs: Operand::Value(exponent), rhs: Operand::Const(IrConst::I64(exp_field_max)), ty: int_ty,
         });
-
-        // result = exp_nonzero & exp_not_max
         let result = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: result, op: IrBinOp::And,
@@ -1539,19 +1504,13 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
-
-        // Sign bit is the MSB
-        let shift = match arg_ty {
-            IrType::F32 => 31_i64,
-            _ => 63_i64,
-        };
+        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
 
         let shifted = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: shifted, op: IrBinOp::LShr,
-            lhs: bits, rhs: Operand::Const(IrConst::I64(shift)), ty: int_ty,
+            lhs: bits, rhs: Operand::Const(IrConst::I64(sign_shift)), ty: int_ty,
         });
-
         let result = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: result, op: IrBinOp::And,
@@ -1568,27 +1527,11 @@ impl Lowerer {
         }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let (abs_mask, exp_only, _, _, _) = Self::fp_masks(arg_ty);
+        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
 
-        let abs_mask = match arg_ty {
-            IrType::F32 => 0x7FFFFFFF_i64,
-            _ => 0x7FFFFFFFFFFFFFFF_i64,
-        };
-        let exp_only = match arg_ty {
-            IrType::F32 => 0x7F800000_i64,
-            _ => 0x7FF0000000000000_u64 as i64,
-        };
-        let sign_shift = match arg_ty {
-            IrType::F32 => 31_i64,
-            _ => 63_i64,
-        };
-
-        // Check if infinite
-        let abs_val = self.fresh_value();
-        self.emit(Instruction::BinOp {
-            dest: abs_val, op: IrBinOp::And,
-            lhs: bits.clone(), rhs: Operand::Const(IrConst::I64(abs_mask)), ty: int_ty,
-        });
-
+        // Check if infinite: abs(bits) == exp_only
+        let abs_val = self.fp_abs_bits(&bits, int_ty, abs_mask);
         let is_inf = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: is_inf, op: IrCmpOp::Eq,
@@ -1607,7 +1550,7 @@ impl Lowerer {
             lhs: Operand::Value(sign_shifted), rhs: Operand::Const(IrConst::I64(1)), ty: int_ty,
         });
 
-        // direction = sign_bit ? -1 : 1  =>  1 - 2*sign_bit
+        // direction = 1 - 2*sign_bit  (i.e., +1 for positive, -1 for negative)
         let sign_x2 = self.fresh_value();
         self.emit(Instruction::BinOp {
             dest: sign_x2, op: IrBinOp::Mul,
