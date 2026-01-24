@@ -76,25 +76,27 @@ impl RiscvCodegen {
         val >= -2048 && val <= 2047
     }
 
-    /// Emit: store `reg` to `offset(s0)`, handling large offsets via t5.
+    /// Emit: store `reg` to `offset(s0)`, handling large offsets via t6.
+    /// Uses t6 as scratch to avoid conflicts with t3-t5 call argument temps.
     fn emit_store_to_s0(&mut self, reg: &str, offset: i64, store_instr: &str) {
         if Self::fits_imm12(offset) {
             self.state.emit(&format!("    {} {}, {}(s0)", store_instr, reg, offset));
         } else {
-            self.state.emit(&format!("    li t5, {}", offset));
-            self.state.emit("    add t5, s0, t5");
-            self.state.emit(&format!("    {} {}, 0(t5)", store_instr, reg));
+            self.state.emit(&format!("    li t6, {}", offset));
+            self.state.emit("    add t6, s0, t6");
+            self.state.emit(&format!("    {} {}, 0(t6)", store_instr, reg));
         }
     }
 
-    /// Emit: load from `offset(s0)` into `reg`, handling large offsets via t5.
+    /// Emit: load from `offset(s0)` into `reg`, handling large offsets via t6.
+    /// Uses t6 as scratch to avoid conflicts with t3-t5 call argument temps.
     fn emit_load_from_s0(&mut self, reg: &str, offset: i64, load_instr: &str) {
         if Self::fits_imm12(offset) {
             self.state.emit(&format!("    {} {}, {}(s0)", load_instr, reg, offset));
         } else {
-            self.state.emit(&format!("    li t5, {}", offset));
-            self.state.emit("    add t5, s0, t5");
-            self.state.emit(&format!("    {} {}, 0(t5)", load_instr, reg));
+            self.state.emit(&format!("    li t6, {}", offset));
+            self.state.emit("    add t6, s0, t6");
+            self.state.emit(&format!("    {} {}, 0(t6)", load_instr, reg));
         }
     }
 
@@ -968,9 +970,11 @@ impl ArchCodegen for RiscvCodegen {
 
         // Phase 4: Load non-F128 register args.
         // Load all non-F128 args into their target registers.
-        // Process GP args into t3-t6 first (temp), then FP args, then move GP from temp.
+        // Process GP args into temps first, then FP args, then move GP from temp to aX.
+        // Note: t6 is reserved as the large-offset stack scratch register
+        // (used by emit_load_from_s0/emit_store_to_s0), so it must NOT be in this pool.
         let mut gp_temps: Vec<(usize, &str)> = Vec::new(); // (target_reg_idx, temp_reg)
-        let temp_regs = ["t3", "t4", "t5", "t6", "s2", "s3", "s4", "s5"];
+        let temp_regs = ["t3", "t4", "t5", "s2", "s3", "s4", "s5", "s6"];
         let mut temp_i = 0usize;
         for (i, arg) in args.iter().enumerate() {
             if arg_classes[i] == 'I' {
@@ -1612,12 +1616,13 @@ impl ArchCodegen for RiscvCodegen {
                 Operand::Const(c) => {
                     if is_fp {
                         // Load float constant: li to temp GP, then fmv to FP reg
+                        // Use t5 (not t6, which is reserved for large-offset stack access)
                         let imm = c.to_i64().unwrap_or(0);
-                        self.state.emit(&format!("    li t6, {}", imm));
+                        self.state.emit(&format!("    li t5, {}", imm));
                         if constraint.contains('f') && !constraint.contains("64") {
-                            self.state.emit(&format!("    fmv.w.x {}, t6", reg));
+                            self.state.emit(&format!("    fmv.w.x {}, t5", reg));
                         } else {
-                            self.state.emit(&format!("    fmv.d.x {}, t6", reg));
+                            self.state.emit(&format!("    fmv.d.x {}, t5", reg));
                         }
                     } else {
                         let imm = c.to_i64().unwrap_or(0);

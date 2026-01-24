@@ -42,25 +42,25 @@ impl ArmCodegen {
 
     // --- AArch64 large-offset helpers ---
 
-    /// Emit a large immediate subtraction from sp. For values > 4095, uses x16 as scratch.
+    /// Emit a large immediate subtraction from sp. Uses x17 (IP1) as scratch.
     fn emit_sub_sp(&mut self, n: i64) {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit(&format!("    sub sp, sp, #{}", n));
         } else {
-            self.emit_load_imm64("x16", n);
-            self.state.emit("    sub sp, sp, x16");
+            self.emit_load_imm64("x17", n);
+            self.state.emit("    sub sp, sp, x17");
         }
     }
 
-    /// Emit a large immediate addition to sp.
+    /// Emit a large immediate addition to sp. Uses x17 (IP1) as scratch.
     fn emit_add_sp(&mut self, n: i64) {
         if n == 0 { return; }
         if n <= 4095 {
             self.state.emit(&format!("    add sp, sp, #{}", n));
         } else {
-            self.emit_load_imm64("x16", n);
-            self.state.emit("    add sp, sp, x16");
+            self.emit_load_imm64("x17", n);
+            self.state.emit("    add sp, sp, x17");
         }
     }
 
@@ -88,25 +88,27 @@ impl ArmCodegen {
         offset <= max_offset && offset % access_size == 0
     }
 
-    /// Emit store to [sp, #offset], handling large offsets via x16.
+    /// Emit store to [sp, #offset], handling large offsets via x17.
+    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
     fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
-            self.load_large_imm("x16", offset);
-            self.state.emit("    add x16, sp, x16");
-            self.state.emit(&format!("    {} {}, [x16]", instr, reg));
+            self.load_large_imm("x17", offset);
+            self.state.emit("    add x17, sp, x17");
+            self.state.emit(&format!("    {} {}, [x17]", instr, reg));
         }
     }
 
-    /// Emit load from [sp, #offset], handling large offsets via x16.
+    /// Emit load from [sp, #offset], handling large offsets via x17.
+    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
     fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
-            self.load_large_imm("x16", offset);
-            self.state.emit("    add x16, sp, x16");
-            self.state.emit(&format!("    {} {}, [x16]", instr, reg));
+            self.load_large_imm("x17", offset);
+            self.state.emit("    add x17, sp, x17");
+            self.state.emit(&format!("    {} {}, [x17]", instr, reg));
         }
     }
 
@@ -116,19 +118,20 @@ impl ArmCodegen {
         if offset >= -512 && offset <= 504 {
             self.state.emit(&format!("    stp {}, {}, [sp, #{}]", reg1, reg2, offset));
         } else {
-            self.load_large_imm("x16", offset);
-            self.state.emit("    add x16, sp, x16");
-            self.state.emit(&format!("    stp {}, {}, [x16]", reg1, reg2));
+            self.load_large_imm("x17", offset);
+            self.state.emit("    add x17, sp, x17");
+            self.state.emit(&format!("    stp {}, {}, [x17]", reg1, reg2));
         }
     }
 
     /// Emit `add dest, sp, #offset` handling large offsets.
+    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
     fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
         if offset >= 0 && offset <= 4095 {
             self.state.emit(&format!("    add {}, sp, #{}", dest, offset));
         } else {
-            self.load_large_imm("x16", offset);
-            self.state.emit(&format!("    add {}, sp, x16", dest));
+            self.load_large_imm("x17", offset);
+            self.state.emit(&format!("    add {}, sp, x17", dest));
         }
     }
 
@@ -923,9 +926,9 @@ impl ArchCodegen for ArmCodegen {
         }
         stack_arg_space = (stack_arg_space + 15) & !15; // Final 16-byte alignment
 
-        // Phase 1: Handle stack args FIRST (before GP temp regs are populated),
-        // because loading stack args uses x16 as a scratch register for large
-        // offsets, which would clobber x16 if GP args were already in x9-x16.
+        // Phase 1: Handle stack args FIRST (before GP temp regs are populated).
+        // Stack arg loading uses x17 as scratch for large offsets (not x16,
+        // since x16 is the last GP temp register for call arguments).
         if stack_arg_space > 0 {
             // Pre-decrement SP and store stack args
             self.emit_sub_sp(stack_arg_space as i64);
@@ -989,8 +992,8 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 2a: Load GP register args into temp registers (x9-x16).
-        // This must happen AFTER stack args are stored, since operand_to_x0
-        // may use x16 as a scratch register for large SP offsets.
+        // operand_to_x0 may use x17 as scratch for large SP offsets (via
+        // emit_load_from_sp), which is safe since x17 is not in ARM_TMP_REGS.
         let mut gp_tmp_idx = 0usize;
         for (i, arg) in args.iter().enumerate() {
             if arg_classes[i] != 'i' { continue; }
