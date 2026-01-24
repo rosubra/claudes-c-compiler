@@ -869,8 +869,32 @@ impl Lowerer {
             return Operand::Value(alloca);
         }
 
+        // For non-sret complex float returns: the packed {real, imag} data is in rax (I64).
+        // Store it into a temporary alloca so consumers can treat it as a pointer to complex data.
+        if sret_size.is_none() {
+            if let Expr::Identifier(name, _) = func {
+                if let Some(ret_ct) = self.func_return_ctypes.get(name).cloned() {
+                    if ret_ct == CType::ComplexFloat {
+                        let alloca = self.fresh_value();
+                        self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8 });
+                        self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::I64 });
+                        return Operand::Value(alloca);
+                    }
+                }
+            }
+        }
+
         // Narrow the result if the return type is sub-64-bit integer
         self.maybe_narrow_call_result(dest, call_ret_ty)
+    }
+
+    /// Determine the return type for creal/crealf/creall/cimag/cimagf/cimagl based on function name.
+    fn creal_return_type(name: &str) -> IrType {
+        match name {
+            "crealf" | "__builtin_crealf" | "cimagf" | "__builtin_cimagf" => IrType::F32,
+            "creall" | "__builtin_creall" | "cimagl" | "__builtin_cimagl" => IrType::F128,
+            _ => IrType::F64, // creal, cimag, __builtin_creal, __builtin_cimag
+        }
     }
 
     /// Try to lower a __builtin_* call. Returns Some(result) if handled.
@@ -1008,16 +1032,38 @@ impl Lowerer {
                     BuiltinIntrinsic::Parity => self.lower_parity_intrinsic(name, args),
                     BuiltinIntrinsic::ComplexReal => {
                         // creal/crealf/creall: extract real part of complex argument
+                        // When the argument is not complex, convert it to the appropriate float type
                         if !args.is_empty() {
-                            Some(self.lower_complex_real_part(&args[0]))
+                            let arg_ctype = self.expr_ctype(&args[0]);
+                            if arg_ctype.is_complex() {
+                                Some(self.lower_complex_real_part(&args[0]))
+                            } else {
+                                // Non-complex argument: convert to the target float type
+                                let target_ty = Self::creal_return_type(name);
+                                let val = self.lower_expr(&args[0]);
+                                let val_ty = self.get_expr_type(&args[0]);
+                                Some(self.emit_implicit_cast(val, val_ty, target_ty))
+                            }
                         } else {
                             Some(Operand::Const(IrConst::F64(0.0)))
                         }
                     }
                     BuiltinIntrinsic::ComplexImag => {
                         // cimag/cimagf/cimagl: extract imaginary part of complex argument
+                        // When the argument is not complex, return 0 in the appropriate float type
                         if !args.is_empty() {
-                            Some(self.lower_complex_imag_part(&args[0]))
+                            let arg_ctype = self.expr_ctype(&args[0]);
+                            if arg_ctype.is_complex() {
+                                Some(self.lower_complex_imag_part(&args[0]))
+                            } else {
+                                // Non-complex argument: imaginary part is 0
+                                let target_ty = Self::creal_return_type(name);
+                                Some(match target_ty {
+                                    IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+                                    IrType::F128 => Operand::Const(IrConst::LongDouble(0.0)),
+                                    _ => Operand::Const(IrConst::F64(0.0)),
+                                })
+                            }
                         } else {
                             Some(Operand::Const(IrConst::F64(0.0)))
                         }
