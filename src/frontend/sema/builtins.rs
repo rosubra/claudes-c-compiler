@@ -370,6 +370,50 @@ pub fn builtin_to_libc_name(name: &str) -> Option<&str> {
 }
 
 /// Check if a name is a known builtin function.
+///
+/// This includes both explicitly registered builtins (in BUILTIN_MAP) and
+/// atomic/sync builtins that are handled by pattern matching in the IR lowering
+/// code (expr_atomics.rs). The atomic builtins must be recognized here so that
+/// sema does not emit "implicit declaration" warnings for them.
 pub fn is_builtin(name: &str) -> bool {
-    BUILTIN_MAP.contains_key(name)
+    if BUILTIN_MAP.contains_key(name) {
+        return true;
+    }
+    // Atomic builtins handled by pattern matching in expr_atomics.rs
+    is_atomic_builtin(name)
+}
+
+/// Check if a name is an atomic/sync builtin handled by the IR lowering code.
+/// These are dispatched by name pattern in try_lower_atomic_builtin() and
+/// classify_fetch_op()/classify_op_fetch() rather than through the BUILTIN_MAP.
+fn is_atomic_builtin(name: &str) -> bool {
+    // __atomic_* family (C11-style)
+    if name.starts_with("__atomic_") {
+        return matches!(name,
+            "__atomic_fetch_add" | "__atomic_fetch_sub" | "__atomic_fetch_and" |
+            "__atomic_fetch_or" | "__atomic_fetch_xor" | "__atomic_fetch_nand" |
+            "__atomic_add_fetch" | "__atomic_sub_fetch" | "__atomic_and_fetch" |
+            "__atomic_or_fetch" | "__atomic_xor_fetch" | "__atomic_nand_fetch" |
+            "__atomic_exchange_n" | "__atomic_exchange" |
+            "__atomic_compare_exchange_n" | "__atomic_compare_exchange" |
+            "__atomic_load_n" | "__atomic_load" |
+            "__atomic_store_n" | "__atomic_store" |
+            "__atomic_test_and_set" | "__atomic_clear" |
+            "__atomic_thread_fence" | "__atomic_signal_fence" |
+            "__atomic_is_lock_free" | "__atomic_always_lock_free"
+        );
+    }
+    // __sync_* family (legacy GCC-style)
+    if name.starts_with("__sync_") {
+        return matches!(name,
+            "__sync_fetch_and_add" | "__sync_fetch_and_sub" | "__sync_fetch_and_and" |
+            "__sync_fetch_and_or" | "__sync_fetch_and_xor" | "__sync_fetch_and_nand" |
+            "__sync_add_and_fetch" | "__sync_sub_and_fetch" | "__sync_and_and_fetch" |
+            "__sync_or_and_fetch" | "__sync_xor_and_fetch" | "__sync_nand_and_fetch" |
+            "__sync_val_compare_and_swap" | "__sync_bool_compare_and_swap" |
+            "__sync_lock_test_and_set" | "__sync_lock_release" |
+            "__sync_synchronize"
+        );
+    }
+    false
 }

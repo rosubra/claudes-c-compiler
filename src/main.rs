@@ -135,10 +135,10 @@ fn main() {
             }
 
             // Feature flags
-            "-fPIC" | "-fpic" => {
+            "-fPIC" | "-fpic" | "-fPIE" | "-fpie" => {
                 driver.pic = true;
             }
-            "-fno-PIC" | "-fno-pic" => {
+            "-fno-PIC" | "-fno-pic" | "-fno-PIE" | "-fno-pie" => {
                 driver.pic = false;
             }
             arg if arg.starts_with("-f") => {

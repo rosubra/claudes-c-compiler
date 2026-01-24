@@ -37,6 +37,12 @@ impl X86Codegen {
         }
     }
 
+    pub fn new_with_pic(pic: bool) -> Self {
+        let mut s = Self::new();
+        s.state.pic_mode = pic;
+        s
+    }
+
     /// Enable position-independent code generation.
     pub fn set_pic(&mut self, pic: bool) {
         self.state.pic_mode = pic;
@@ -1961,7 +1967,11 @@ impl ArchCodegen for X86Codegen {
     // emit_branch, emit_cond_branch, emit_unreachable, emit_indirect_branch:
     // use default implementations from ArchCodegen trait
 
-    // emit_label_addr: uses default implementation (delegates to emit_global_addr)
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Labels are always local, never use GOTPCREL even in PIC mode
+        self.state.emit(&format!("    leaq {}(%rip), %rax", label));
+        self.store_rax_to(dest);
+    }
 
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in xmm1.

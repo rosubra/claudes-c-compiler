@@ -56,6 +56,18 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Position-independent code (-fPIC) support**: Added `-fPIC`/`-fpic`/`-fPIE`/`-fpie` flag
+  parsing and x86-64 PIC codegen. In PIC mode, function calls emit `@PLT` suffix and global
+  variable accesses use `@GOTPCREL` (load address through GOT). Local symbols (`.L*` prefixed)
+  and labels retain direct `%rip`-relative addressing. This fixes PostgreSQL's shared library
+  modules (`dict_snowball.so` etc.) which failed with "relocation R_X86_64_PC32 against undefined
+  symbol cannot be used when making a shared object; recompile with -fPIC". PostgreSQL now builds
+  successfully (configure + full build including shared libraries).
+- **Atomic builtin sema registration**: Registered all `__sync_*` and `__atomic_*` builtin
+  function names in the semantic analysis pass. Previously these were handled by pattern matching
+  in the IR lowering code but not recognized by sema, causing "implicit declaration of function"
+  warnings. These warnings broke PostgreSQL's configure and compilation. Added `is_atomic_builtin()`
+  to check for all 33 atomic/sync builtin names.
 - **SSE/SSE2/SSE4.2 intrinsic support**: Bundled compiler include headers (`emmintrin.h`,
   `xmmintrin.h`, `smmintrin.h`, `nmmintrin.h`) with `__m128i`/`__m128d` types represented as
   16-byte aligned structs. Registered all `__builtin_ia32_*` and `_mm_*` names as compiler
