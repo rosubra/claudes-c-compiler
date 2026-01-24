@@ -42,7 +42,8 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
   embedded in both `LocalInfo` and `GlobalInfo` via `Deref`
 - **`DeclAnalysis`** - Computed once per declaration, bundles all type properties.
   Used by both local and global lowering to avoid duplicating type analysis
-- **`FunctionMeta`** - Per-function metadata (return types, param types, sret info)
+- **`FuncSig`** - Consolidated function signature (return type, param types, sret/two-reg info)
+- **`FunctionMeta`** - Maps function names to `FuncSig` (direct calls) and `ptr_sigs` (function pointers)
 - **`ScopeFrame`** - Records additions/shadows per block scope. `pop_scope()` undoes
   changes in O(changes) rather than cloning entire HashMaps
 

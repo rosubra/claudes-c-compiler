@@ -1222,7 +1222,7 @@ impl Lowerer {
             Expr::Sizeof(_, _) => IrType::U64,
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(&ret_ty) = self.func_meta.return_types.get(name.as_str()) {
+                    if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
                         return ret_ty;
                     }
                 }

@@ -389,10 +389,10 @@ impl Lowerer {
     /// Get the IR type for a function call's return value.
     fn get_call_return_type(&self, func: &Expr) -> IrType {
         if let Expr::Identifier(name, _) = func {
-            if let Some(&ret_ty) = self.func_meta.return_types.get(name) {
+            if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
                 return ret_ty;
             }
-            if let Some(&ret_ty) = self.func_meta.ptr_return_types.get(name) {
+            if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
                 return ret_ty;
             }
             if let Some(ret_ty) = Self::builtin_return_type(name) {
@@ -401,10 +401,10 @@ impl Lowerer {
         }
         if let Expr::Deref(inner, _) = func {
             if let Expr::Identifier(name, _) = inner.as_ref() {
-                if let Some(&ret_ty) = self.func_meta.return_types.get(name) {
+                if let Some(ret_ty) = self.func_meta.sigs.get(name.as_str()).map(|s| s.return_type) {
                     return ret_ty;
                 }
-                if let Some(&ret_ty) = self.func_meta.ptr_return_types.get(name) {
+                if let Some(ret_ty) = self.func_meta.ptr_sigs.get(name.as_str()).map(|s| s.return_type) {
                     return ret_ty;
                 }
             }
@@ -1172,7 +1172,7 @@ impl Lowerer {
             Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int))),
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
+                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                         return Some(ctype.clone());
                     }
                 }

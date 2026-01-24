@@ -132,12 +132,13 @@ impl Lowerer {
                 let arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
                 let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let dest = self.fresh_value();
-                let variadic = self.func_meta.variadic.contains(libc_name.as_str());
+                let libc_sig = self.func_meta.sigs.get(libc_name.as_str());
+                let variadic = libc_sig.map_or(false, |s| s.is_variadic);
                 let n_fixed = if variadic {
-                    self.func_meta.param_types.get(libc_name.as_str()).map(|p| p.len()).unwrap_or(arg_vals.len())
+                    libc_sig.map(|s| s.param_types.len()).unwrap_or(arg_vals.len())
                 } else { arg_vals.len() };
                 let return_type = Self::builtin_return_type(name)
-                    .or_else(|| self.func_meta.return_types.get(libc_name.as_str()).copied())
+                    .or_else(|| libc_sig.map(|s| s.return_type))
                     .unwrap_or(IrType::I64);
                 self.emit(Instruction::Call {
                     dest: Some(dest), func: libc_name.clone(),

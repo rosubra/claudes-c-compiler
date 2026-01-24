@@ -524,12 +524,12 @@ impl Lowerer {
         if let Some(ctype) = self.func_return_ctypes.get(name) {
             return ctype.clone();
         }
-        // Check pointer/struct return CTypes
-        if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
+        // Check pointer/struct return CTypes and derive from IR return type
+        let sig = self.func_meta.sigs.get(name);
+        if let Some(ctype) = sig.and_then(|s| s.return_ctype.as_ref()) {
             return ctype.clone();
         }
-        // Derive CType from IR return type
-        if let Some(&ir_ty) = self.func_meta.return_types.get(name) {
+        if let Some(&ir_ty) = sig.map(|s| &s.return_type) {
             return match ir_ty {
                 IrType::F32 => CType::Float,
                 IrType::F64 => CType::Double,

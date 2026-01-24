@@ -7,7 +7,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
-use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis};
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, FuncSig};
 
 impl Lowerer {
     /// Handle extern declarations inside function bodies.
@@ -96,20 +96,36 @@ impl Lowerer {
         if ptr_count > 0 {
             ret_ty = IrType::Ptr;
         }
-        self.func_meta.return_types.insert(name.to_string(), ret_ty);
         let param_tys: Vec<IrType> = params.iter().map(|p| {
             self.type_spec_to_ir(&p.type_spec)
         }).collect();
         let param_bool_flags: Vec<bool> = params.iter().map(|p| {
             matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
         }).collect();
-        if !variadic || !param_tys.is_empty() {
-            self.func_meta.param_types.insert(name.to_string(), param_tys);
-            self.func_meta.param_bool_flags.insert(name.to_string(), param_bool_flags);
-        }
-        if variadic {
-            self.func_meta.variadic.insert(name.to_string());
-        }
+        let sig = if !variadic || !param_tys.is_empty() {
+            FuncSig {
+                return_type: ret_ty,
+                return_ctype: None,
+                param_types: param_tys,
+                param_ctypes: Vec::new(),
+                param_bool_flags,
+                is_variadic: variadic,
+                sret_size: None,
+                two_reg_ret_size: None,
+            }
+        } else {
+            FuncSig {
+                return_type: ret_ty,
+                return_ctype: None,
+                param_types: Vec::new(),
+                param_ctypes: Vec::new(),
+                param_bool_flags: Vec::new(),
+                is_variadic: variadic,
+                sret_size: None,
+                two_reg_ret_size: None,
+            }
+        };
+        self.func_meta.sigs.insert(name.to_string(), sig);
     }
 
     /// Lower an `Initializer::Expr` for a local variable declaration.

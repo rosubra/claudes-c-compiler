@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType, StructLayout};
-use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, resolve_typedef_derived};
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, resolve_typedef_derived};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -133,11 +133,19 @@ impl Lowerer {
             for d in &declarator.derived {
                 if let DerivedDeclarator::FunctionPointer(params, _) = d {
                     let ret_ty = self.type_spec_to_ir(&decl.type_spec);
-                    self.func_meta.ptr_return_types.insert(declarator.name.clone(), ret_ty);
                     let param_tys: Vec<IrType> = params.iter().map(|p| {
                         self.type_spec_to_ir(&p.type_spec)
                     }).collect();
-                    self.func_meta.ptr_param_types.insert(declarator.name.clone(), param_tys);
+                    self.func_meta.ptr_sigs.insert(declarator.name.clone(), FuncSig {
+                        return_type: ret_ty,
+                        return_ctype: None,
+                        param_types: param_tys,
+                        param_ctypes: Vec::new(),
+                        param_bool_flags: Vec::new(),
+                        is_variadic: false,
+                        sret_size: None,
+                        two_reg_ret_size: None,
+                    });
                     break;
                 }
             }

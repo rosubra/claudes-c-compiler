@@ -210,32 +210,36 @@ pub(super) struct FunctionTypedefInfo {
     pub variadic: bool,
 }
 
-/// Metadata about known functions (return types, param types, variadic status, etc.).
-/// Tracks function signatures so that calls can insert proper casts and ABI handling.
+/// Consolidated function signature metadata.
+/// Replaces 10 parallel HashMaps with a single struct per function.
+#[derive(Debug, Clone)]
+pub(super) struct FuncSig {
+    /// IR return type for inserting narrowing casts after calls.
+    pub return_type: IrType,
+    /// CType of the return value (for pointer-returning and struct-returning functions).
+    pub return_ctype: Option<CType>,
+    /// IR types of each parameter, for inserting implicit argument casts.
+    pub param_types: Vec<IrType>,
+    /// CTypes of each parameter, for complex type argument conversions.
+    pub param_ctypes: Vec<CType>,
+    /// Flags indicating which parameters are _Bool (need normalization to 0/1).
+    pub param_bool_flags: Vec<bool>,
+    /// Whether this function is variadic.
+    pub is_variadic: bool,
+    /// If the function returns a struct > 16 bytes, the struct size (uses hidden sret pointer).
+    pub sret_size: Option<usize>,
+    /// If the function returns a struct of 9-16 bytes via two registers, the struct size.
+    pub two_reg_ret_size: Option<usize>,
+}
+
+/// Metadata about known functions (signatures, variadic status, ABI handling).
+/// Uses a consolidated FuncSig per function instead of parallel HashMaps.
 #[derive(Debug, Default)]
 pub(super) struct FunctionMeta {
-    /// Function name -> return type mapping for inserting narrowing casts after calls.
-    pub return_types: HashMap<String, IrType>,
-    /// Function name -> parameter types mapping for inserting implicit argument casts.
-    pub param_types: HashMap<String, Vec<IrType>>,
-    /// Function name -> parameter CType mapping for complex type argument conversions.
-    pub param_ctypes: HashMap<String, Vec<CType>>,
-    /// Function name -> flags indicating which parameters are _Bool (need normalization to 0/1).
-    pub param_bool_flags: HashMap<String, Vec<bool>>,
-    /// Function name -> is_variadic flag for calling convention handling.
-    pub variadic: HashSet<String>,
-    /// Function pointer variable name -> return type mapping.
-    pub ptr_return_types: HashMap<String, IrType>,
-    /// Function pointer variable name -> parameter types mapping.
-    pub ptr_param_types: HashMap<String, Vec<IrType>>,
-    /// Function name -> return CType mapping (for pointer-returning functions).
-    pub return_ctypes: HashMap<String, CType>,
-    /// Functions that return structs > 16 bytes and need hidden sret pointer.
-    /// Maps function name to the struct return size.
-    pub sret_functions: HashMap<String, usize>,
-    /// Functions that return structs of 9-16 bytes via two registers (rax+rdx).
-    /// Maps function name to the struct return size.
-    pub two_reg_return_functions: HashMap<String, usize>,
+    /// Function name -> consolidated signature.
+    pub sigs: HashMap<String, FuncSig>,
+    /// Function pointer variable name -> signature (return type + param types).
+    pub ptr_sigs: HashMap<String, FuncSig>,
 }
 
 /// Records undo operations for scope-based variable management.
@@ -804,9 +808,8 @@ impl Lowerer {
                 }
             }
         }
-        self.func_meta.return_types.insert(name.to_string(), ret_ty);
-
         // Track CType for pointer-returning functions
+        let mut return_ctype = None;
         if ret_ty == IrType::Ptr {
             let base_ctype = self.type_spec_to_ctype(ret_type_spec);
             let ret_ctype = if ptr_count > 0 {
@@ -818,7 +821,7 @@ impl Lowerer {
             } else {
                 base_ctype
             };
-            self.func_meta.return_ctypes.insert(name.to_string(), ret_ctype);
+            return_ctype = Some(ret_ctype);
         }
 
         // Record complex return types for expr_ctype resolution
@@ -835,22 +838,23 @@ impl Lowerer {
         // - Structs <= 8 bytes: returned in one register (rax/x0/a0)
         // - Structs 9-16 bytes (INTEGER class): returned in two registers (rax+rdx/x0+x1/a0+a1)
         // - Structs > 16 bytes: use hidden sret pointer as first argument
+        let mut sret_size = None;
+        let mut two_reg_ret_size = None;
         if ptr_count == 0 {
             let resolved = self.resolve_type_spec(ret_type_spec).clone();
             if matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
                 let size = self.sizeof_type(ret_type_spec);
                 if size > 16 {
-                    self.func_meta.sret_functions.insert(name.to_string(), size);
+                    sret_size = Some(size);
                 } else if size > 8 {
-                    // 9-16 byte structs: return via two registers
-                    self.func_meta.two_reg_return_functions.insert(name.to_string(), size);
+                    two_reg_ret_size = Some(size);
                 }
             }
             // _Complex long double uses sret (too large for registers).
             // _Complex double returns via xmm0+xmm1 (two FP registers), not sret.
             if matches!(resolved, TypeSpecifier::ComplexLongDouble) {
                 let size = self.sizeof_type(ret_type_spec);
-                self.func_meta.sret_functions.insert(name.to_string(), size);
+                sret_size = Some(size);
             }
         }
 
@@ -867,14 +871,30 @@ impl Lowerer {
             self.type_spec_to_ctype(&self.resolve_type_spec(&p.type_spec).clone())
         }).collect();
 
-        if !variadic || !param_tys.is_empty() {
-            self.func_meta.param_types.insert(name.to_string(), param_tys);
-            self.func_meta.param_bool_flags.insert(name.to_string(), param_bool_flags);
-            self.func_meta.param_ctypes.insert(name.to_string(), param_ctypes);
-        }
-        if variadic {
-            self.func_meta.variadic.insert(name.to_string());
-        }
+        let sig = if !variadic || !param_tys.is_empty() {
+            FuncSig {
+                return_type: ret_ty,
+                return_ctype,
+                param_types: param_tys,
+                param_ctypes,
+                param_bool_flags,
+                is_variadic: variadic,
+                sret_size,
+                two_reg_ret_size,
+            }
+        } else {
+            FuncSig {
+                return_type: ret_ty,
+                return_ctype,
+                param_types: Vec::new(),
+                param_ctypes: Vec::new(),
+                param_bool_flags: Vec::new(),
+                is_variadic: variadic,
+                sret_size,
+                two_reg_ret_size,
+            }
+        };
+        self.func_meta.sigs.insert(name.to_string(), sig);
     }
 
     pub(super) fn fresh_value(&mut self) -> Value {
@@ -1022,9 +1042,9 @@ impl Lowerer {
         }
 
         // Check if this function uses sret (returns struct > 16 bytes via hidden pointer)
-        let uses_sret = self.func_meta.sret_functions.contains_key(&func.name);
+        let uses_sret = self.func_meta.sigs.get(&func.name).and_then(|s| s.sret_size).is_some();
         // Check if this function returns a 9-16 byte struct via two registers
-        let uses_two_reg_return = self.func_meta.two_reg_return_functions.contains_key(&func.name);
+        let uses_two_reg_return = self.func_meta.sigs.get(&func.name).and_then(|s| s.two_reg_ret_size).is_some();
 
         // For two-register struct returns (9-16 bytes), use I128 as the IR return type
         if uses_two_reg_return {
@@ -1320,11 +1340,19 @@ impl Lowerer {
                                 _ => ret_ty,
                             };
                             if let Some(ref name) = p.name {
-                                self.func_meta.ptr_return_types.insert(name.clone(), ret_ty);
                                 let param_tys: Vec<IrType> = fptr_params.iter().map(|fp| {
                                     self.type_spec_to_ir(&fp.type_spec)
                                 }).collect();
-                                self.func_meta.ptr_param_types.insert(name.clone(), param_tys);
+                                self.func_meta.ptr_sigs.insert(name.clone(), FuncSig {
+                                    return_type: ret_ty,
+                                    return_ctype: None,
+                                    param_types: param_tys,
+                                    param_ctypes: Vec::new(),
+                                    param_bool_flags: Vec::new(),
+                                    is_variadic: false,
+                                    sret_size: None,
+                                    two_reg_ret_size: None,
+                                });
                             }
                         }
                     }

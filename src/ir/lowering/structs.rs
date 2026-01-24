@@ -258,8 +258,7 @@ impl Lowerer {
                         // Indirect call through variable: use struct size to determine ABI
                         struct_size > 8
                     } else {
-                        self.func_meta.sret_functions.contains_key(name)
-                            || self.func_meta.two_reg_return_functions.contains_key(name)
+                        self.func_meta.sigs.get(name.as_str()).map_or(false, |s| s.sret_size.is_some() || s.two_reg_ret_size.is_some())
                     }
                 } else {
                     // Indirect call through expression: determine from return type
@@ -329,8 +328,7 @@ impl Lowerer {
                 }
                 // Small struct (<= 8 bytes): produces packed data unless somehow sret
                 if let Expr::Identifier(name, _) = func_expr.as_ref() {
-                    !self.func_meta.sret_functions.contains_key(name)
-                        && !self.func_meta.two_reg_return_functions.contains_key(name)
+                    self.func_meta.sigs.get(name.as_str()).map_or(true, |s| s.sret_size.is_none() && s.two_reg_ret_size.is_none())
                 } else {
                     true
                 }
@@ -545,7 +543,7 @@ impl Lowerer {
             Expr::FunctionCall(func, _, _) => {
                 // Function returning a struct pointer
                 if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
+                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                         if let CType::Pointer(pointee) = ctype {
                             return self.struct_layout_from_ctype(pointee);
                         }
@@ -715,7 +713,7 @@ impl Lowerer {
             Expr::FunctionCall(func, _, _) => {
                 // Function returning a struct: look up the return CType
                 if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(ctype) = self.func_meta.return_ctypes.get(name) {
+                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                         if let Some(layout) = self.struct_layout_from_ctype(ctype) {
                             return Some(layout);
                         }

@@ -50,9 +50,10 @@ impl Lowerer {
                 }
             } else {
                 // Direct function call - look up by function name
+                let sig = self.func_meta.sigs.get(name.as_str());
                 (
-                    self.func_meta.sret_functions.get(name).copied(),
-                    self.func_meta.two_reg_return_functions.get(name).copied(),
+                    sig.and_then(|s| s.sret_size),
+                    sig.and_then(|s| s.two_reg_ret_size),
                 )
             }
         } else {
@@ -68,7 +69,7 @@ impl Lowerer {
 
         // Decompose complex double/float arguments into (real, imag) pairs for ABI compliance
         let param_ctypes_for_decompose = if let Expr::Identifier(name, _) = func {
-            self.func_meta.param_ctypes.get(name).cloned()
+            self.func_meta.sigs.get(name.as_str()).map(|s| s.param_ctypes.clone()).filter(|v| !v.is_empty())
         } else {
             None
         };
@@ -91,14 +92,18 @@ impl Lowerer {
         let (call_variadic, num_fixed_args) = if let Expr::Identifier(name, _) = func {
             let variadic = self.is_function_variadic(name);
             let n_fixed = if variadic {
-                if let Some(pctypes) = self.func_meta.param_ctypes.get(name) {
-                    pctypes.iter().map(|ct| {
-                        if matches!(ct, CType::ComplexDouble) { 2 } else { 1 }
-                    }).sum()
+                if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
+                    if !sig.param_ctypes.is_empty() {
+                        sig.param_ctypes.iter().map(|ct| {
+                            if matches!(ct, CType::ComplexDouble) { 2 } else { 1 }
+                        }).sum()
+                    } else if !sig.param_types.is_empty() {
+                        sig.param_types.len()
+                    } else {
+                        arg_vals.len()
+                    }
                 } else {
-                    self.func_meta.param_types.get(name)
-                        .map(|p| p.len())
-                        .unwrap_or(arg_vals.len())
+                    arg_vals.len()
                 }
             } else {
                 arg_vals.len()
@@ -210,16 +215,13 @@ impl Lowerer {
     /// and default argument promotions for variadic args.
     pub(super) fn lower_call_arguments(&mut self, func: &Expr, args: &[Expr]) -> (Vec<Operand>, Vec<IrType>) {
         let func_name = if let Expr::Identifier(name, _) = func { Some(name.as_str()) } else { None };
-        let param_types: Option<Vec<IrType>> = func_name.and_then(|name|
-            self.func_meta.param_types.get(name).cloned()
-                .or_else(|| self.func_meta.ptr_param_types.get(name).cloned())
+        let sig = func_name.and_then(|name|
+            self.func_meta.sigs.get(name)
+                .or_else(|| self.func_meta.ptr_sigs.get(name))
         );
-        let param_ctypes: Option<Vec<CType>> = func_name.and_then(|name|
-            self.func_meta.param_ctypes.get(name).cloned()
-        );
-        let param_bool_flags: Option<Vec<bool>> = func_name.and_then(|name|
-            self.func_meta.param_bool_flags.get(name).cloned()
-        );
+        let param_types: Option<Vec<IrType>> = sig.map(|s| s.param_types.clone()).filter(|v| !v.is_empty());
+        let param_ctypes: Option<Vec<CType>> = sig.map(|s| s.param_ctypes.clone()).filter(|v| !v.is_empty());
+        let param_bool_flags: Option<Vec<bool>> = sig.map(|s| s.param_bool_flags.clone()).filter(|v| !v.is_empty());
         let pre_call_variadic = func_name.map_or(false, |name|
             self.is_function_variadic(name)
         );
@@ -263,8 +265,7 @@ impl Lowerer {
                 );
                 if is_struct_ret {
                     let returns_address = if let Expr::Identifier(name, _) = func_expr.as_ref() {
-                        self.func_meta.sret_functions.contains_key(name)
-                            || self.func_meta.two_reg_return_functions.contains_key(name)
+                        self.func_meta.sigs.get(name.as_str()).map_or(false, |s| s.sret_size.is_some() || s.two_reg_ret_size.is_some())
                     } else {
                         let struct_size = self.struct_value_size(a).unwrap_or(8);
                         struct_size > 8
@@ -336,8 +337,9 @@ impl Lowerer {
                     indirect_ret_ty
                 } else {
                     // Direct call
-                    let mut ret_ty = self.func_meta.return_types.get(name).copied().unwrap_or(IrType::I64);
-                    if self.func_meta.two_reg_return_functions.contains_key(name) {
+                    let sig = self.func_meta.sigs.get(name.as_str());
+                    let mut ret_ty = sig.map(|s| s.return_type).unwrap_or(IrType::I64);
+                    if sig.and_then(|s| s.two_reg_ret_size).is_some() {
                         ret_ty = IrType::I128;
                     }
                     self.emit(Instruction::Call {
@@ -405,8 +407,9 @@ impl Lowerer {
 
     /// Check if a function is variadic.
     pub(super) fn is_function_variadic(&self, name: &str) -> bool {
-        if self.func_meta.variadic.contains(name) { return true; }
-        if self.func_meta.param_types.contains_key(name) { return false; }
+        if let Some(sig) = self.func_meta.sigs.get(name) {
+            return sig.is_variadic;
+        }
         matches!(name, "printf" | "fprintf" | "sprintf" | "snprintf" | "scanf" | "sscanf"
             | "fscanf" | "dprintf" | "vprintf" | "vfprintf" | "vsprintf" | "vsnprintf"
             | "syslog" | "err" | "errx" | "warn" | "warnx" | "asprintf" | "vasprintf"

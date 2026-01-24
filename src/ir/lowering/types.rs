@@ -2,7 +2,7 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructField, StructLayout, CType};
 use crate::common::source::Span;
-use super::lowering::Lowerer;
+use super::lowering::{Lowerer, FuncSig};
 
 impl Lowerer {
 
@@ -252,6 +252,20 @@ impl Lowerer {
 
     /// Seed known libc math function signatures for correct calling convention.
     /// Without these, calls like atanf(1) would pass integer args in %rdi instead of %xmm0.
+    /// Helper to insert a builtin function signature into func_meta.
+    fn insert_builtin_sig(&mut self, name: &str, return_type: IrType, param_types: Vec<IrType>, param_ctypes: Vec<CType>) {
+        self.func_meta.sigs.insert(name.to_string(), FuncSig {
+            return_type,
+            return_ctype: None,
+            param_types,
+            param_ctypes,
+            param_bool_flags: Vec::new(),
+            is_variadic: false,
+            sret_size: None,
+            two_reg_ret_size: None,
+        });
+    }
+
     pub(super) fn seed_libc_math_functions(&mut self) {
         use IrType::*;
         // float func(float) - single-precision math
@@ -263,8 +277,7 @@ impl Lowerer {
             "rintf", "nearbyintf", "erff", "erfcf", "tgammaf", "lgammaf",
         ];
         for name in f_f {
-            self.func_meta.return_types.insert(name.to_string(), F32);
-            self.func_meta.param_types.insert(name.to_string(), vec![F32]);
+            self.insert_builtin_sig(name, F32, vec![F32], Vec::new());
         }
         // double func(double) - double-precision math
         let d_d: &[&str] = &[
@@ -275,55 +288,37 @@ impl Lowerer {
             "rint", "nearbyint", "erf", "erfc", "tgamma", "lgamma",
         ];
         for name in d_d {
-            self.func_meta.return_types.insert(name.to_string(), F64);
-            self.func_meta.param_types.insert(name.to_string(), vec![F64]);
+            self.insert_builtin_sig(name, F64, vec![F64], Vec::new());
         }
         // float func(float, float) - two-arg single-precision
         let f_ff: &[&str] = &["atan2f", "powf", "fmodf", "remainderf", "copysignf", "fminf", "fmaxf", "fdimf", "hypotf"];
         for name in f_ff {
-            self.func_meta.return_types.insert(name.to_string(), F32);
-            self.func_meta.param_types.insert(name.to_string(), vec![F32, F32]);
+            self.insert_builtin_sig(name, F32, vec![F32, F32], Vec::new());
         }
         // double func(double, double) - two-arg double-precision
         let d_dd: &[&str] = &["atan2", "pow", "fmod", "remainder", "copysign", "fmin", "fmax", "fdim", "hypot"];
         for name in d_dd {
-            self.func_meta.return_types.insert(name.to_string(), F64);
-            self.func_meta.param_types.insert(name.to_string(), vec![F64, F64]);
+            self.insert_builtin_sig(name, F64, vec![F64, F64], Vec::new());
         }
         // int/long returning functions
-        self.func_meta.return_types.insert("abs".to_string(), I32);
-        self.func_meta.param_types.insert("abs".to_string(), vec![I32]);
-        self.func_meta.return_types.insert("labs".to_string(), I64);
-        self.func_meta.param_types.insert("labs".to_string(), vec![I64]);
-        // float func(float, int)
-        self.func_meta.return_types.insert("ldexpf".to_string(), F32);
-        self.func_meta.param_types.insert("ldexpf".to_string(), vec![F32, I32]);
-        self.func_meta.return_types.insert("ldexp".to_string(), F64);
-        self.func_meta.param_types.insert("ldexp".to_string(), vec![F64, I32]);
-        self.func_meta.return_types.insert("scalbnf".to_string(), F32);
-        self.func_meta.param_types.insert("scalbnf".to_string(), vec![F32, I32]);
-        self.func_meta.return_types.insert("scalbn".to_string(), F64);
-        self.func_meta.param_types.insert("scalbn".to_string(), vec![F64, I32]);
+        self.insert_builtin_sig("abs", I32, vec![I32], Vec::new());
+        self.insert_builtin_sig("labs", I64, vec![I64], Vec::new());
+        // float/double func(float/double, int)
+        self.insert_builtin_sig("ldexpf", F32, vec![F32, I32], Vec::new());
+        self.insert_builtin_sig("ldexp", F64, vec![F64, I32], Vec::new());
+        self.insert_builtin_sig("scalbnf", F32, vec![F32, I32], Vec::new());
+        self.insert_builtin_sig("scalbn", F64, vec![F64, I32], Vec::new());
         // Complex math functions: register return types and param_ctypes.
-        // param_types left at original form (Ptr for complex) since arg-casting
-        // uses them pre-decomposition. param_ctypes enables decomposition.
-        self.func_meta.return_types.insert("cabs".to_string(), F64);
-        self.func_meta.param_ctypes.insert("cabs".to_string(), vec![CType::ComplexDouble]);
-        self.func_meta.return_types.insert("cabsf".to_string(), F32);
-        self.func_meta.param_ctypes.insert("cabsf".to_string(), vec![CType::ComplexFloat]);
-        self.func_meta.return_types.insert("cabsl".to_string(), F64);
-        self.func_meta.return_types.insert("carg".to_string(), F64);
-        self.func_meta.param_ctypes.insert("carg".to_string(), vec![CType::ComplexDouble]);
-        self.func_meta.return_types.insert("cargf".to_string(), F32);
-        self.func_meta.param_ctypes.insert("cargf".to_string(), vec![CType::ComplexFloat]);
-        self.func_meta.return_types.insert("creal".to_string(), F64);
-        self.func_meta.param_ctypes.insert("creal".to_string(), vec![CType::ComplexDouble]);
-        self.func_meta.return_types.insert("cimag".to_string(), F64);
-        self.func_meta.param_ctypes.insert("cimag".to_string(), vec![CType::ComplexDouble]);
-        self.func_meta.return_types.insert("crealf".to_string(), F32);
-        self.func_meta.param_ctypes.insert("crealf".to_string(), vec![CType::ComplexFloat]);
-        self.func_meta.return_types.insert("cimagf".to_string(), F32);
-        self.func_meta.param_ctypes.insert("cimagf".to_string(), vec![CType::ComplexFloat]);
+        // param_types left empty for complex since arg-casting uses param_ctypes for decomposition.
+        self.insert_builtin_sig("cabs", F64, Vec::new(), vec![CType::ComplexDouble]);
+        self.insert_builtin_sig("cabsf", F32, Vec::new(), vec![CType::ComplexFloat]);
+        self.insert_builtin_sig("cabsl", F64, Vec::new(), Vec::new());
+        self.insert_builtin_sig("carg", F64, Vec::new(), vec![CType::ComplexDouble]);
+        self.insert_builtin_sig("cargf", F32, Vec::new(), vec![CType::ComplexFloat]);
+        self.insert_builtin_sig("creal", F64, Vec::new(), vec![CType::ComplexDouble]);
+        self.insert_builtin_sig("cimag", F64, Vec::new(), vec![CType::ComplexDouble]);
+        self.insert_builtin_sig("crealf", F32, Vec::new(), vec![CType::ComplexFloat]);
+        self.insert_builtin_sig("cimagf", F32, Vec::new(), vec![CType::ComplexFloat]);
         // Functions returning _Complex double (real in xmm0, imag in xmm1):
         let cd_cd: &[&str] = &[
             "csqrt", "cexp", "clog", "csin", "ccos", "ctan",
@@ -331,8 +326,7 @@ impl Lowerer {
             "casinh", "cacosh", "catanh", "conj",
         ];
         for name in cd_cd {
-            self.func_meta.return_types.insert(name.to_string(), F64);
-            self.func_meta.param_ctypes.insert(name.to_string(), vec![CType::ComplexDouble]);
+            self.insert_builtin_sig(name, F64, Vec::new(), vec![CType::ComplexDouble]);
             self.func_return_ctypes.insert(name.to_string(), CType::ComplexDouble);
         }
 
@@ -343,17 +337,14 @@ impl Lowerer {
             "casinhf", "cacoshf", "catanhf", "conjf",
         ];
         for name in cf_cf {
-            self.func_meta.return_types.insert(name.to_string(), F64);
-            self.func_meta.param_ctypes.insert(name.to_string(), vec![CType::ComplexFloat]);
+            self.insert_builtin_sig(name, F64, Vec::new(), vec![CType::ComplexFloat]);
             self.func_return_ctypes.insert(name.to_string(), CType::ComplexFloat);
         }
 
         // cpow/cpowf take two complex args
-        self.func_meta.return_types.insert("cpow".to_string(), F64);
-        self.func_meta.param_ctypes.insert("cpow".to_string(), vec![CType::ComplexDouble, CType::ComplexDouble]);
+        self.insert_builtin_sig("cpow", F64, Vec::new(), vec![CType::ComplexDouble, CType::ComplexDouble]);
         self.func_return_ctypes.insert("cpow".to_string(), CType::ComplexDouble);
-        self.func_meta.return_types.insert("cpowf".to_string(), F64);
-        self.func_meta.param_ctypes.insert("cpowf".to_string(), vec![CType::ComplexFloat, CType::ComplexFloat]);
+        self.insert_builtin_sig("cpowf", F64, Vec::new(), vec![CType::ComplexFloat, CType::ComplexFloat]);
         self.func_return_ctypes.insert("cpowf".to_string(), CType::ComplexFloat);
     }
 
