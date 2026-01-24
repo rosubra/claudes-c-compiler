@@ -1990,15 +1990,25 @@ impl Lowerer {
             // the element type is a function pointer (8 bytes), not the return type.
             let has_func_ptr = derived.iter().any(|d| matches!(d,
                 DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _)));
+            // Also account for array dimensions in the type specifier itself
+            // e.g., if type is Array(Array(Int, 3), 2) from the parser,
+            // or from a typedef like: typedef unsigned char byte4_t[4];
+            let type_dims = self.collect_type_array_dims(ts);
+
             let base_elem_size = if has_func_ptr {
                 8 // function pointer size
+            } else if !type_dims.is_empty() {
+                // When ts itself is an array type (from typedef), use the innermost
+                // element size, since collect_type_array_dims already extracts the
+                // array dimensions which will be included in all_dims.
+                let mut inner = ts;
+                while let TypeSpecifier::Array(elem, _) = inner {
+                    inner = elem.as_ref();
+                }
+                self.sizeof_type(inner).max(1)
             } else {
                 self.sizeof_type(ts).max(1)
             };
-
-            // Also account for array dimensions in the type specifier itself
-            // e.g., if type is Array(Array(Int, 3), 2) from the parser
-            let type_dims = self.collect_type_array_dims(ts);
 
             // Combine: derived dims come first (outermost), then type dims
             let all_dims: Vec<usize> = array_dims.iter().map(|d| d.unwrap_or(256))

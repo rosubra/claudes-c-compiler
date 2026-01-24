@@ -2040,6 +2040,29 @@ impl Lowerer {
         for item in items {
             match &item.init {
                 Initializer::List(sub_items) => {
+                    // Check for braced string literal initializing a char sub-array: { "abc" }
+                    // This is common in patterns like: unsigned char arr[3][4] = { {"abc"}, {"def"} };
+                    if sub_items.len() == 1 {
+                        if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
+                            let start_len = values.len();
+                            for &byte in s.as_bytes() {
+                                values.push(IrConst::I64(byte as i64));
+                            }
+                            // Add null terminator if room
+                            if values.len() < start_len + sub_elem_count {
+                                values.push(IrConst::I64(0));
+                            }
+                            // Pad to sub_elem_count
+                            while values.len() < start_len + sub_elem_count {
+                                values.push(self.zero_const(base_ty));
+                            }
+                            // Truncate if string was too long for the sub-array
+                            if values.len() > start_len + sub_elem_count {
+                                values.truncate(start_len + sub_elem_count);
+                            }
+                            continue;
+                        }
+                    }
                     // Braced sub-list: recurse into next dimension, then pad to sub_elem_count
                     let start_len = values.len();
                     self.flatten_global_array_init(sub_items, &array_dim_strides[1..], base_ty, values);
