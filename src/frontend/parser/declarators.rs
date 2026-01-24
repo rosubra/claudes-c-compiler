@@ -149,23 +149,53 @@ impl Parser {
         if inner_only_ptr_and_array && inner_has_pointer && outer_starts_with_function
             && outer_suffixes.len() == 1
         {
+            // In C's inside-out reading of declarations:
+            //   outer_pointers = return-type pointers (e.g., the `*` in `int *`)
+            //   inner_derived = declarator pointers/arrays from inside parens
+            //   outer_suffixes = [Function(...)]
+            //
+            // The LAST Pointer in inner_derived is the function pointer syntax
+            // marker (the `(*` in `(*fp)`). Any preceding Pointers in inner_derived
+            // are extra indirection levels (e.g., `(**fpp)` has two Pointers — the
+            // first is extra indirection, the second is the syntax marker).
+            //
+            // Layout: outer_pointers ++ [syntax_marker_ptr, FunctionPointer] ++ extra_inner_ptrs ++ inner_arrays
+            //
+            // Example: `int *(*fp)(int)` → outer=[Pointer], inner=[Pointer]
+            //   result: [Pointer, Pointer, FunctionPointer] — one return-type ptr, one syntax ptr
+            //
+            // Example: `int (**fpp)(int,int)` → outer=[], inner=[Pointer, Pointer]
+            //   result: [Pointer, FunctionPointer, Pointer] — syntax ptr + fptr, then extra indirection
+            //
+            // Example: `int *(**fpp)(int)` → outer=[Pointer], inner=[Pointer, Pointer]
+            //   result: [Pointer, Pointer, FunctionPointer, Pointer]
             let mut result = outer_pointers;
-            // Emit inner arrays first (for array of function pointers)
+
+            // Count inner pointers. The last one is the function pointer syntax marker.
+            // All others are extra indirection levels placed AFTER the FunctionPointer.
+            let inner_ptr_count = inner_derived.iter()
+                .filter(|d| matches!(d, DerivedDeclarator::Pointer))
+                .count();
+            let extra_indirection_ptrs = if inner_ptr_count > 0 { inner_ptr_count - 1 } else { 0 };
+
+            // Emit the function pointer syntax marker + FunctionPointer
+            result.push(DerivedDeclarator::Pointer);
+            if let Some(DerivedDeclarator::Function(params, variadic)) = outer_suffixes.into_iter().next() {
+                result.push(DerivedDeclarator::FunctionPointer(params, variadic));
+            }
+
+            // Emit extra indirection Pointers (beyond the syntax marker)
+            for _ in 0..extra_indirection_ptrs {
+                result.push(DerivedDeclarator::Pointer);
+            }
+
+            // Emit inner arrays (for array of function pointers, e.g., `int (*fps[10])(int)`)
             for d in &inner_derived {
                 if matches!(d, DerivedDeclarator::Array(_)) {
                     result.push(d.clone());
                 }
             }
-            // Emit pointer(s)
-            for d in &inner_derived {
-                if matches!(d, DerivedDeclarator::Pointer) {
-                    result.push(DerivedDeclarator::Pointer);
-                }
-            }
-            // Convert Function to FunctionPointer
-            if let Some(DerivedDeclarator::Function(params, variadic)) = outer_suffixes.into_iter().next() {
-                result.push(DerivedDeclarator::FunctionPointer(params, variadic));
-            }
+
             return result;
         }
 

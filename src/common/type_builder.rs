@@ -161,6 +161,17 @@ pub fn build_full_ctype(
                     result = func_type;
                     i += 1;
                 }
+                DerivedDeclarator::Array(size_expr) => {
+                    // Array declarators after the function pointer core are outer
+                    // wrappers (e.g., array-of-function-pointers when inner_derived
+                    // had [Pointer, Array(N)] which the parser emits as
+                    // [Pointer, FunctionPointer, Array(N)]).
+                    let size = size_expr
+                        .as_ref()
+                        .and_then(|e| ctx.eval_const_expr_as_usize(e));
+                    result = CType::Array(Box::new(result), size);
+                    i += 1;
+                }
                 _ => {
                     i += 1;
                 }

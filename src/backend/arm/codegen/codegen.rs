@@ -868,7 +868,17 @@ impl ArchCodegen for ArmCodegen {
                 }
                 continue;
             }
-            if param_class[i] != 'i' || param.name.is_empty() { continue; }
+            if param_class[i] != 'i' { continue; }
+            // Unnamed params (e.g. hidden sret pointer) still need storage if they have an alloca
+            if param.name.is_empty() {
+                if let Some((dest, _ty)) = find_param_alloca(func, i) {
+                    if let Some(slot) = self.state.get_slot(dest.0) {
+                        let reg = ARM_ARG_REGS[param_int_reg[i]];
+                        self.emit_store_to_sp(reg, slot.0, "str");
+                    }
+                }
+                continue;
+            }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     let store_instr = Self::str_for_type(ty);

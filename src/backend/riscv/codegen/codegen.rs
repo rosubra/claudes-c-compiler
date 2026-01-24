@@ -912,6 +912,27 @@ impl ArchCodegen for RiscvCodegen {
             };
 
             if param.name.is_empty() {
+                // Unnamed params (e.g. hidden sret pointer) still need storage if
+                // they have an alloca and are in a register.
+                if !is_stack_passed && !is_i128_param && !is_long_double && !is_float
+                    && !is_float_in_gpr
+                {
+                    if let Some((dest, _ty)) = find_param_alloca(func, _i) {
+                        if let Some(slot) = self.state.get_slot(dest.0) {
+                            if func.is_variadic {
+                                let off = (int_reg_idx as i64) * 8;
+                                self.emit_load_from_s0("t0", off, "ld");
+                                self.emit_store_to_s0("t0", slot.0, "sd");
+                            } else if has_f128_reg_params {
+                                let off = f128_save_offset + (int_reg_idx as i64) * 8;
+                                self.state.emit(&format!("    ld t0, {}(sp)", off));
+                                self.emit_store_to_s0("t0", slot.0, "sd");
+                            } else {
+                                self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, "sd");
+                            }
+                        }
+                    }
+                }
                 if is_stack_passed {
                     if is_i128_param || is_long_double {
                         stack_param_offset = (stack_param_offset + 15) & !15;

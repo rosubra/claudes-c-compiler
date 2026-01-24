@@ -16,9 +16,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~97.3% passing (2911/2991)
-- AArch64: ~97.8% passing (2807/2869)
-- RISC-V 64: ~97.6% passing (2791/2861)
+- x86-64: ~97.2% passing (2907/2991)
+- AArch64: ~97.1% passing (2787/2869)
+- RISC-V 64: ~97.8% passing (2797/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
@@ -56,6 +56,17 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix pointer-to-function-pointer dereference calls**: Calling through a
+  dereferenced pointer-to-function-pointer (`(*fpp)(a,b)` where `fpp` is
+  `int (**)()`) was segfaulting due to three interacting bugs: (1) the parser's
+  `combine_declarator_parts` placed all inner Pointers before FunctionPointer,
+  making `int (**fpp)()` produce the same derived list as `int *(*fp)()`;
+  (2) `is_function_pointer_deref` used `ptr_sigs` fallback too broadly, treating
+  pointer-to-function-pointers as no-op derefs; (3) `build_full_ctype` silently
+  skipped Array declarators after the function pointer core. Fixed all three:
+  parser now places extra indirection Pointers after FunctionPointer, the
+  `ptr_sigs` fallback is only used when CType is unavailable, and the type builder
+  handles post-core Array declarators.
 - **Unify type computation between sema and lowering**: Extracted the duplicated
   `build_full_ctype`, `find_function_pointer_core`, and `convert_param_decls_to_ctypes`
   functions into a new shared `common/type_builder.rs` module. Both sema and lowering now
@@ -270,8 +281,8 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | jq | PASS | All 12 tests pass |
 | sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
-| redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Build succeeds; initdb fully works (fixed typedef fptr return signedness + va_list param passing + 2D array init); `make check` temp-install succeeds but postmaster has bind EFAULT issue |
+| redis | PARTIAL | Builds; version/cli work; server has bind EFAULT issue (same as postgres) |
+| postgres | PARTIAL | Build succeeds; initdb fully works; `make check` temp-install succeeds but postmaster has bind EFAULT issue |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)

@@ -935,12 +935,12 @@ impl Lowerer {
     /// - *add where add is a function name → function designator → decays back
     /// - *(s->fnptr) where fnptr is a function pointer member → same no-op
     /// - **f, ***f etc. are also no-ops (recursive application)
-    fn is_function_pointer_deref(&self, inner: &Expr) -> bool {
+    pub(super) fn is_function_pointer_deref(&self, inner: &Expr) -> bool {
         // Check CType-based detection (works for typedef'd function pointers
         // where param_ctype correctly sets CType::Pointer(CType::Function(...)),
         // and also for struct member function pointers via get_expr_ctype)
-        if let Some(inner_ct) = self.get_expr_ctype(inner) {
-            match &inner_ct {
+        if let Some(ref inner_ct) = self.get_expr_ctype(inner) {
+            match inner_ct {
                 CType::Pointer(pointee) if matches!(pointee.as_ref(), CType::Function(_)) => {
                     return true;
                 }
@@ -957,21 +957,27 @@ impl Lowerer {
                     return true;
                 }
                 // Check if this is a function pointer variable.
-                // Peel through Pointer layers to find if the innermost type is
-                // a function type. In C, dereferencing a function pointer (or
-                // pointer to function pointer) at any depth is always a no-op.
+                // Only Pointer(Function(_)) or Function(_) makes a deref a no-op.
+                // Pointer(Pointer(Function(_))) (i.e., int (**fpp)()) is a REAL
+                // dereference that produces a function pointer value — NOT a no-op.
                 if let Some(vi) = self.lookup_var_info(name) {
+                    let has_ctype = vi.c_type.is_some();
                     if let Some(ref ct) = vi.c_type {
-                        let mut t = ct;
-                        while let CType::Pointer(inner) = t {
-                            t = inner.as_ref();
-                        }
-                        if matches!(t, CType::Function(_)) {
-                            return true;
+                        match ct {
+                            CType::Pointer(pointee) if matches!(pointee.as_ref(), CType::Function(_)) => {
+                                return true;
+                            }
+                            CType::Function(_) => {
+                                return true;
+                            }
+                            _ => {}
                         }
                     }
-                    // Also check ptr_sigs (function pointer metadata)
-                    if self.func_meta.ptr_sigs.contains_key(name.as_str()) {
+                    // Fallback: check ptr_sigs only when c_type is unavailable.
+                    // When c_type IS available, the match above is authoritative —
+                    // ptr_sigs may contain entries for pointer-to-function-pointers
+                    // which are NOT no-op derefs.
+                    if !has_ctype && self.func_meta.ptr_sigs.contains_key(name.as_str()) {
                         return true;
                     }
                 }

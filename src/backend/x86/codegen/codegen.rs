@@ -867,9 +867,21 @@ impl ArchCodegen for X86Codegen {
             };
 
             if param.name.is_empty() {
-                // Unnamed param - just advance register/stack counters
+                // Unnamed param (e.g. hidden sret pointer): store to alloca if one
+                // exists, then advance register/stack counters.
+                if let Some((dest, _ty)) = find_param_alloca(func, _i) {
+                    if let Some(slot) = self.state.get_slot(dest.0) {
+                        if !is_stack_passed && !is_float && !is_long_double && !is_i128
+                            && !is_small_struct && !is_large_struct
+                        {
+                            // Regular integer/pointer param (covers sret hidden pointer)
+                            let store_instr = Self::mov_store_for_type(_ty);
+                            let reg = Self::reg_for_type(X86_ARG_REGS[int_reg_idx], _ty);
+                            self.state.emit(&format!("    {} %{}, {}(%rbp)", store_instr, reg, slot.0));
+                        }
+                    }
+                }
                 if is_large_struct {
-                    // MEMORY class: always on stack, raw data
                     let size = struct_size.unwrap();
                     stack_param_offset += (((size + 7) / 8) as i64) * 8;
                 } else if is_small_struct {

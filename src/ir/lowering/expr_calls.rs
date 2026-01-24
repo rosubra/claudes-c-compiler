@@ -33,11 +33,19 @@ impl Lowerer {
     }
 
     pub(super) fn lower_function_call(&mut self, func: &Expr, args: &[Expr]) -> Operand {
-        // Strip Deref layers to find the underlying function expression.
-        // In C, dereferencing a function pointer is a no-op: (*f)() == f().
+        // Strip Deref layers that are semantically no-ops.
+        // In C, dereferencing a function pointer is a no-op: (*fp)() == fp().
+        // But dereferencing a pointer-to-function-pointer is a real load:
+        // (*fpp)() where fpp is int (**)(int,int) must load the function pointer.
+        // Only strip a Deref if the inner expression is itself a function pointer
+        // or function designator (checked via is_function_pointer_deref).
         let mut stripped_func = func;
         while let Expr::Deref(inner, _) = stripped_func {
-            stripped_func = inner;
+            if self.is_function_pointer_deref(inner) {
+                stripped_func = inner;
+            } else {
+                break;
+            }
         }
 
         // Resolve __builtin_* functions first

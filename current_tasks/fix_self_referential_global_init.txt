@@ -1,0 +1,18 @@
+Task: Fix self-referential global struct initializers emitting zero instead of address
+
+Bug: When a global struct variable references itself in its initializer
+(e.g., `struct Node n = {10, &n};`), the pointer field is emitted as zero
+bytes instead of a relocation to the variable's own address. Non-self-referential
+address initializers work correctly.
+
+This causes SIGSEGV at runtime when the self-referencing pointer is dereferenced.
+Affects multiple compiler_suite tests (0010_0047, 0048_0047, 0053_0215, etc.)
+and potentially real-world code using self-referential linked lists/trees.
+
+Plan:
+1. Find the global initializer emission code
+2. Identify why self-references produce zero
+3. Fix to emit proper relocations for self-referential addresses
+4. Add regression test
+
+Status: IN PROGRESS
