@@ -446,6 +446,30 @@ impl Lowerer {
                 }
                 if matches!(elem_ty, CType::Struct(_) | CType::Union(_)) {
                     self.fill_array_of_composites(sub_items, elem_ty, arr_size, elem_size, bytes, field_offset);
+                } else if matches!(elem_ty, CType::Array(_, Some(_))) {
+                    // Multi-dimensional array with braced initializers:
+                    // check if sub_items have braces (sub-array inits) or are flat values
+                    let has_braced = sub_items.iter().any(|si| matches!(si.init, Initializer::List(_)));
+                    if has_braced {
+                        // Sub-items have braces: each braced sub-item initializes a sub-array
+                        self.fill_braced_multidim_array(sub_items, elem_ty, arr_size, elem_size, bytes, field_offset);
+                    } else {
+                        // All flat values: flatten across all dimensions
+                        let (innermost_ty, total_elems) = Self::flatten_array_type(elem_ty, arr_size);
+                        if matches!(innermost_ty, CType::Struct(_) | CType::Union(_)) {
+                            // Innermost type is composite: fill using struct-aware logic
+                            let inner_size = innermost_ty.size();
+                            let inner_ir_ty = IrType::from_ctype(&innermost_ty);
+                            self.fill_flat_array_of_composites(
+                                sub_items, 0, &innermost_ty, total_elems, inner_size, inner_ir_ty,
+                                bytes, field_offset, 0,
+                            );
+                        } else {
+                            let scalar_size = innermost_ty.size();
+                            let scalar_ir_ty = IrType::from_ctype(&innermost_ty);
+                            self.fill_array_of_scalars(sub_items, total_elems, scalar_size, scalar_ir_ty, bytes, field_offset);
+                        }
+                    }
                 } else {
                     self.fill_array_of_scalars(sub_items, arr_size, elem_size, elem_ir_ty, bytes, field_offset);
                 }
@@ -464,6 +488,12 @@ impl Lowerer {
                 let new_idx = if matches!(elem_ty, CType::Struct(_) | CType::Union(_)) {
                     self.fill_flat_array_of_composites(
                         items, item_idx, elem_ty, arr_size, elem_size, elem_ir_ty,
+                        bytes, field_offset, start_ai,
+                    )
+                } else if matches!(elem_ty, CType::Array(_, Some(_))) {
+                    // Multi-dimensional array: flatten all dimensions and fill scalars
+                    self.fill_flat_multidim_array(
+                        items, item_idx, elem_ty, arr_size,
                         bytes, field_offset, start_ai,
                     )
                 } else {
@@ -488,9 +518,18 @@ impl Lowerer {
     ) -> ArrayFillResult {
         let elem_size = elem_ty.size();
         let elem_ir_ty = IrType::from_ctype(elem_ty);
+        let is_char_fam = matches!(elem_ty, CType::Char | CType::UChar);
 
         match &items[item_idx].init {
             Initializer::List(sub_items) => {
+                // Check if this is a braced string literal initializing a char FAM
+                // e.g., .chunk = {"hello"}
+                if is_char_fam && sub_items.len() == 1 && sub_items[0].designators.is_empty() {
+                    if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
+                        Self::write_string_to_bytes(bytes, field_offset, s, bytes.len() - field_offset);
+                        return ArrayFillResult { new_item_idx: item_idx + 1, skip_update: false };
+                    }
+                }
                 for (ai, sub_item) in sub_items.iter().enumerate() {
                     let elem_offset = field_offset + ai * elem_size;
                     if elem_offset + elem_size > bytes.len() { break; }
@@ -500,6 +539,14 @@ impl Lowerer {
                 ArrayFillResult { new_item_idx: item_idx + 1, skip_update: false }
             }
             Initializer::Expr(expr) => {
+                // String literal directly initializing a char FAM
+                // e.g., struct { char *p; char data[]; } s = {0, "hello"};
+                if is_char_fam {
+                    if let Expr::StringLiteral(s, _) = expr {
+                        Self::write_string_to_bytes(bytes, field_offset, s, bytes.len() - field_offset);
+                        return ArrayFillResult { new_item_idx: item_idx + 1, skip_update: false };
+                    }
+                }
                 let mut ai = 0usize;
                 let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
                 let elem_offset = field_offset + ai * elem_size;
@@ -642,6 +689,126 @@ impl Lowerer {
             }
         }
         item_idx + consumed.max(1)
+    }
+
+    /// Fill a multi-dimensional array from a braced initializer where sub-items are
+    /// themselves braced lists (e.g., { {1,2}, {3,4} } for int arr[2][2]).
+    /// Each braced sub-item initializes one element of the outermost dimension.
+    pub(super) fn fill_braced_multidim_array(
+        &self, sub_items: &[InitializerItem], elem_ty: &CType,
+        arr_size: usize, elem_size: usize,
+        bytes: &mut [u8], field_offset: usize,
+    ) {
+        let mut ai = 0usize;
+        let mut si = 0usize;
+        while ai < arr_size && si < sub_items.len() {
+            let sub_item = &sub_items[si];
+            // Check for designator (e.g., [1] = {...})
+            if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
+                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                    ai = idx;
+                }
+            }
+            if ai >= arr_size { break; }
+            let elem_offset = field_offset + ai * elem_size;
+            match &sub_item.init {
+                Initializer::List(inner_items) => {
+                    // Recursively fill the sub-array element
+                    if let CType::Array(inner_elem_ty, Some(inner_size)) = elem_ty {
+                        // Check if inner items are also braced (3D+ arrays)
+                        let inner_has_braced = inner_items.iter().any(|ii| matches!(ii.init, Initializer::List(_)));
+                        if matches!(inner_elem_ty.as_ref(), CType::Array(_, Some(_))) && inner_has_braced {
+                            self.fill_braced_multidim_array(inner_items, inner_elem_ty, *inner_size, inner_elem_ty.size(), bytes, elem_offset);
+                        } else {
+                            // Innermost level: flatten and fill
+                            let (innermost_ty, total) = Self::flatten_array_type(inner_elem_ty, *inner_size);
+                            if matches!(innermost_ty, CType::Struct(_) | CType::Union(_)) {
+                                let inner_size_bytes = innermost_ty.size();
+                                let inner_ir_ty = IrType::from_ctype(&innermost_ty);
+                                self.fill_flat_array_of_composites(
+                                    inner_items, 0, &innermost_ty, total, inner_size_bytes, inner_ir_ty,
+                                    bytes, elem_offset, 0,
+                                );
+                            } else {
+                                let scalar_size = innermost_ty.size();
+                                let scalar_ir_ty = IrType::from_ctype(&innermost_ty);
+                                self.fill_array_of_scalars(inner_items, total, scalar_size, scalar_ir_ty, bytes, elem_offset);
+                            }
+                        }
+                    }
+                }
+                Initializer::Expr(expr) => {
+                    // Flat scalar initializing a sub-array element
+                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                    let ir_ty = IrType::from_ctype(elem_ty);
+                    self.write_const_to_bytes(bytes, elem_offset, &val, ir_ty);
+                }
+            }
+            ai += 1;
+            si += 1;
+        }
+    }
+
+    /// Fill a multi-dimensional array (e.g., int arr[2][2][2]) from flat scalar initializers.
+    /// Computes the innermost scalar type and total scalar count, then fills sequentially.
+    pub(super) fn fill_flat_multidim_array(
+        &self, items: &[InitializerItem], item_idx: usize,
+        elem_ty: &CType, arr_size: usize,
+        bytes: &mut [u8], field_offset: usize, start_ai: usize,
+    ) -> usize {
+        // Compute the innermost non-array type and total element count
+        let (innermost_ty, total_elems) = Self::flatten_array_type(elem_ty, arr_size);
+
+        if matches!(innermost_ty, CType::Struct(_) | CType::Union(_)) {
+            // Innermost type is composite: use struct-aware filling
+            let inner_size = innermost_ty.size();
+            let inner_ir_ty = IrType::from_ctype(&innermost_ty);
+            self.fill_flat_array_of_composites(
+                items, item_idx, &innermost_ty, total_elems, inner_size, inner_ir_ty,
+                bytes, field_offset, start_ai,
+            )
+        } else {
+            // Innermost type is scalar: fill sequentially
+            let scalar_size = innermost_ty.size();
+            let scalar_ir_ty = IrType::from_ctype(&innermost_ty);
+
+            let mut consumed = 0usize;
+            let mut ai = start_ai;
+            while ai < total_elems && (item_idx + consumed) < items.len() {
+                let cur_item = &items[item_idx + consumed];
+                if !cur_item.designators.is_empty() && consumed > 0 { break; }
+                if let Initializer::Expr(e) = &cur_item.init {
+                    let val = self.eval_const_expr(e).unwrap_or(IrConst::I64(0));
+                    let elem_offset = field_offset + ai * scalar_size;
+                    if elem_offset + scalar_size <= bytes.len() {
+                        self.write_const_to_bytes(bytes, elem_offset, &val, scalar_ir_ty);
+                    }
+                    consumed += 1;
+                    ai += 1;
+                } else {
+                    break;
+                }
+            }
+            item_idx + consumed.max(1)
+        }
+    }
+
+    /// Flatten a multi-dimensional array type to get the innermost scalar type
+    /// and total element count.
+    /// E.g., Array(Array(Int, 2), 3) -> (Int, 6)
+    fn flatten_array_type(elem_ty: &CType, outer_size: usize) -> (CType, usize) {
+        let mut total = outer_size;
+        let mut ty = elem_ty.clone();
+        loop {
+            match ty {
+                CType::Array(inner, Some(sz)) => {
+                    total *= sz;
+                    ty = (*inner).clone();
+                }
+                _ => break,
+            }
+        }
+        (ty, total)
     }
 
     /// Get the StructLayout for a composite (struct or union) CType.

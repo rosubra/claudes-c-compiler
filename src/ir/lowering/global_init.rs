@@ -610,8 +610,28 @@ impl Lowerer {
                     let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
                     if field_idx == last_field_idx {
                         let num_elems = match &item.init {
-                            Initializer::List(sub_items) => sub_items.len(),
-                            Initializer::Expr(_) => items.len() - item_idx,
+                            Initializer::List(sub_items) => {
+                                // Check if the list contains a single string literal
+                                // initializing a char FAM (e.g., .chunk = {"hello"})
+                                if sub_items.len() == 1 {
+                                    if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
+                                        if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                            return s.len() + 1; // string bytes + null terminator
+                                        }
+                                    }
+                                }
+                                sub_items.len()
+                            }
+                            Initializer::Expr(expr) => {
+                                // String literal directly initializing a char FAM
+                                // (e.g., struct { char *p; char data[]; } s = {0, "hello"};)
+                                if let Expr::StringLiteral(s, _) = expr {
+                                    if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                        return s.len() + 1; // string bytes + null terminator
+                                    }
+                                }
+                                items.len() - item_idx
+                            }
                         };
                         return num_elems * elem_size;
                     }
