@@ -951,148 +951,87 @@ impl Lowerer {
         // Track which byte ranges are pointer fields that need address relocations
         let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new(); // (byte_offset, addr_init)
 
-        for elem_idx in 0..num_elems {
-            let item = items.get(elem_idx);
-            let base_offset = elem_idx * struct_size;
+        // Check if items use [N].field designated initializer pattern.
+        // In this pattern, each item has designators like [Index(N), Field("name")]
+        // and multiple items can target the same array element but different fields.
+        let has_array_field_designators = items.iter().any(|item| {
+            item.designators.len() >= 2
+                && matches!(item.designators[0], Designator::Index(_))
+                && matches!(item.designators[1], Designator::Field(_))
+        });
 
-            if let Some(item) = item {
-                match &item.init {
-                    Initializer::List(sub_items) => {
-                        let mut current_field_idx = 0usize;
-                        for sub_item in sub_items {
-                            let desig_name = match sub_item.designators.first() {
-                                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                                _ => None,
-                            };
-                            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
-                                Some(idx) => idx,
-                                None => break,
-                            };
-                            let field = &layout.fields[field_idx];
-                            let field_offset = base_offset + field.offset;
-                            let field_ir_ty = IrType::from_ctype(&field.ty);
-                            let is_ptr_field = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
-                            let is_ptr_array = Self::type_has_pointer_elements(&field.ty)
-                                && matches!(field.ty, CType::Array(..));
+        if has_array_field_designators {
+            // Handle [N].field = value pattern (e.g., postgres mcxt_methods[]).
+            // Items are individual field assignments with explicit array index + field
+            // designators. We must group them by target array index and process each
+            // field within the target struct element.
+            let mut current_elem_idx = 0usize;
+            let mut current_field_idx = 0usize;
+            for item in items {
+                // Determine the target array element index
+                let mut elem_idx = current_elem_idx;
+                let mut field_desig: Option<&str> = None;
+                let mut remaining_desigs_start = 0;
 
-                            // Handle multi-level designators (e.g., .bs.keyword={"GET", -1}
-                            // or .bs.keyword = {"STORE", -1}) that target a sub-field within
-                            // a struct/union field.
-                            let has_nested_field_designator = sub_item.designators.len() > 1
-                                && matches!(sub_item.designators.first(), Some(Designator::Field(_)));
-
-                            if has_nested_field_designator {
-                                // Drill through nested designators to find the target sub-field
-                                self.fill_nested_designator_with_ptrs(
-                                    sub_item, &field.ty, field_offset,
-                                    &mut bytes, &mut ptr_ranges,
-                                );
-                                current_field_idx = field_idx + 1;
-                                continue;
-                            }
-
-                            if let Initializer::Expr(expr) = &sub_item.init {
-                                if is_ptr_field {
-                                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
-                                        ptr_ranges.push((field_offset, addr_init));
-                                    } else if let Some(val) = self.eval_const_expr(expr) {
-                                        self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
-                                    }
-                                } else if is_ptr_array {
-                                    // Single expr for a pointer array field (flat init start)
-                                    // Resolve as address for the first element
-                                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
-                                        ptr_ranges.push((field_offset, addr_init));
-                                    } else if let Some(val) = self.eval_const_expr(expr) {
-                                        self.write_const_to_bytes(&mut bytes, field_offset, &val, IrType::I64);
-                                    }
-                                } else if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
-                                    let val = self.eval_init_scalar(&sub_item.init);
-                                    self.write_bitfield_to_bytes(&mut bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
-                                } else {
-                                    if let Some(val) = self.eval_const_expr(expr) {
-                                        self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
-                                    }
-                                }
-                            } else if let Initializer::List(ref inner_items) = sub_item.init {
-                                if is_ptr_array {
-                                    // Array-of-pointers field with braced init: {f1, f2, ...}
-                                    let arr_size = match &field.ty {
-                                        CType::Array(_, Some(s)) => *s,
-                                        _ => inner_items.len(),
-                                    };
-                                    for (ai, inner_item) in inner_items.iter().enumerate() {
-                                        if ai >= arr_size { break; }
-                                        let elem_offset = field_offset + ai * 8;
-                                        if let Initializer::Expr(ref expr) = inner_item.init {
-                                            if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
-                                                ptr_ranges.push((elem_offset, addr_init));
-                                            } else if let Some(val) = self.eval_const_expr(expr) {
-                                                self.write_const_to_bytes(&mut bytes, elem_offset, &val, IrType::I64);
-                                            }
-                                        }
-                                    }
-                                } else if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
-                                    // Nested struct with braced init - must handle pointer fields
-                                    let has_ptr = sub_layout.fields.iter().any(|f| {
-                                        matches!(f.ty, CType::Pointer(_) | CType::Function(_))
-                                        || Self::type_has_pointer_elements(&f.ty)
-                                    });
-                                    if has_ptr {
-                                        self.fill_nested_struct_with_ptrs(
-                                            inner_items, &sub_layout, field_offset,
-                                            &mut bytes, &mut ptr_ranges,
-                                        );
-                                    } else {
-                                        self.fill_struct_global_bytes(inner_items, &sub_layout, &mut bytes, field_offset);
-                                    }
-                                } else {
-                                    // Array of scalars with braced init
-                                    let elem_size = match &field.ty {
-                                        CType::Array(inner, _) => inner.size(),
-                                        _ => field_ir_ty.size(),
-                                    };
-                                    let elem_ir_ty = match &field.ty {
-                                        CType::Array(inner, _) => IrType::from_ctype(inner),
-                                        _ => field_ir_ty,
-                                    };
-                                    for (ai, inner_item) in inner_items.iter().enumerate() {
-                                        let elem_offset = field_offset + ai * elem_size;
-                                        if let Initializer::Expr(ref expr) = inner_item.init {
-                                            if let Some(val) = self.eval_const_expr(expr) {
-                                                self.write_const_to_bytes(&mut bytes, elem_offset, &val, elem_ir_ty);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            current_field_idx = field_idx + 1;
+                if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                    if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                        if idx != current_elem_idx {
+                            current_field_idx = 0;
                         }
+                        elem_idx = idx;
                     }
-                    Initializer::Expr(expr) => {
-                        // Single expression for first field
-                        if !layout.fields.is_empty() {
-                            let field = &layout.fields[0];
-                            let field_offset = base_offset + field.offset;
-                            let field_ir_ty = IrType::from_ctype(&field.ty);
-                            let is_ptr_field = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
-                            if is_ptr_field {
-                                if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
-                                    ptr_ranges.push((field_offset, addr_init));
-                                }
-                            } else if field.bit_offset.is_some() {
-                                if let Some(val) = self.eval_const_expr(expr) {
-                                    let bit_offset = field.bit_offset.unwrap();
-                                    let bit_width = field.bit_width.unwrap();
-                                    self.write_bitfield_to_bytes(&mut bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
-                                }
-                            } else if let Some(val) = self.eval_const_expr(expr) {
-                                self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
-                            }
-                        }
-                    }
+                    remaining_desigs_start = 1;
                 }
+
+                // Extract field designator
+                if let Some(Designator::Field(ref name)) = item.designators.get(remaining_desigs_start) {
+                    field_desig = Some(name.as_str());
+                    remaining_desigs_start += 1;
+                }
+
+                if elem_idx >= num_elems {
+                    current_elem_idx = elem_idx + 1;
+                    continue;
+                }
+
+                let base_offset = elem_idx * struct_size;
+                let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx) {
+                    Some(idx) => idx,
+                    None => { current_elem_idx = elem_idx; continue; }
+                };
+                let field = &layout.fields[field_idx];
+                let field_offset = base_offset + field.offset;
+
+                // Check for further nested designators beyond [N].field
+                // e.g., [N].field.subfield or [N].field[idx]
+                if remaining_desigs_start < item.designators.len() {
+                    // Build a synthetic item with remaining designators for nested handling
+                    let remaining_item = InitializerItem {
+                        designators: item.designators[remaining_desigs_start..].to_vec(),
+                        init: item.init.clone(),
+                    };
+                    self.fill_nested_designator_with_ptrs(
+                        &remaining_item, &field.ty, field_offset,
+                        &mut bytes, &mut ptr_ranges,
+                    );
+                } else {
+                    // Direct field assignment
+                    self.emit_struct_field_init_compound(
+                        item, field, field_offset,
+                        &mut bytes, &mut ptr_ranges,
+                    );
+                }
+
+                current_elem_idx = elem_idx;
+                current_field_idx = field_idx + 1;
             }
+        } else {
+            // Original path: items correspond 1-to-1 to array elements (no [N].field designators).
+            // Each item is either a braced list for one struct element or a single expression.
+            self.fill_struct_array_sequential(
+                items, layout, num_elems,
+                &mut bytes, &mut ptr_ranges,
+            );
         }
 
         // Sort ptr_ranges by offset
@@ -1117,6 +1056,171 @@ impl Lowerer {
         }
 
         GlobalInit::Compound(compound_elements)
+    }
+
+    /// Emit a single struct field initialization into the byte buffer and ptr_ranges.
+    /// Handles pointer fields, pointer array fields, bitfields, nested structs, and scalars.
+    fn emit_struct_field_init_compound(
+        &mut self,
+        item: &InitializerItem,
+        field: &crate::common::types::StructFieldLayout,
+        field_offset: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let field_ir_ty = IrType::from_ctype(&field.ty);
+        let is_ptr_field = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
+        let is_ptr_array = Self::type_has_pointer_elements(&field.ty)
+            && matches!(field.ty, CType::Array(..));
+
+        if let Initializer::Expr(ref expr) = item.init {
+            if is_ptr_field {
+                if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                    ptr_ranges.push((field_offset, addr_init));
+                } else if let Some(val) = self.eval_const_expr(expr) {
+                    self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                }
+            } else if is_ptr_array {
+                if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                    ptr_ranges.push((field_offset, addr_init));
+                } else if let Some(val) = self.eval_const_expr(expr) {
+                    self.write_const_to_bytes(bytes, field_offset, &val, IrType::I64);
+                }
+            } else if let (Some(bo), Some(bw)) = (field.bit_offset, field.bit_width) {
+                let val = self.eval_init_scalar(&item.init);
+                self.write_bitfield_to_bytes(bytes, field_offset, &val, field_ir_ty, bo, bw);
+            } else {
+                if let Some(val) = self.eval_const_expr(expr) {
+                    self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                }
+            }
+        } else if let Initializer::List(ref inner_items) = item.init {
+            if is_ptr_array {
+                let arr_size = match &field.ty {
+                    CType::Array(_, Some(s)) => *s,
+                    _ => inner_items.len(),
+                };
+                for (ai, inner_item) in inner_items.iter().enumerate() {
+                    if ai >= arr_size { break; }
+                    let elem_offset = field_offset + ai * 8;
+                    if let Initializer::Expr(ref expr) = inner_item.init {
+                        if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                            ptr_ranges.push((elem_offset, addr_init));
+                        } else if let Some(val) = self.eval_const_expr(expr) {
+                            self.write_const_to_bytes(bytes, elem_offset, &val, IrType::I64);
+                        }
+                    }
+                }
+            } else if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
+                let has_ptr = sub_layout.fields.iter().any(|f| {
+                    matches!(f.ty, CType::Pointer(_) | CType::Function(_))
+                    || Self::type_has_pointer_elements(&f.ty)
+                });
+                if has_ptr {
+                    self.fill_nested_struct_with_ptrs(
+                        inner_items, &sub_layout, field_offset,
+                        bytes, ptr_ranges,
+                    );
+                } else {
+                    self.fill_struct_global_bytes(inner_items, &sub_layout, bytes, field_offset);
+                }
+            } else {
+                let elem_size = match &field.ty {
+                    CType::Array(inner, _) => inner.size(),
+                    _ => field_ir_ty.size(),
+                };
+                let elem_ir_ty = match &field.ty {
+                    CType::Array(inner, _) => IrType::from_ctype(inner),
+                    _ => field_ir_ty,
+                };
+                for (ai, inner_item) in inner_items.iter().enumerate() {
+                    let elem_offset = field_offset + ai * elem_size;
+                    if let Initializer::Expr(ref expr) = inner_item.init {
+                        if let Some(val) = self.eval_const_expr(expr) {
+                            self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fill a struct array where items correspond 1-to-1 to array elements (sequential init).
+    /// Each item is either a braced list `{ .field = val, ... }` or a single expression.
+    fn fill_struct_array_sequential(
+        &mut self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        num_elems: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let struct_size = layout.size;
+        for elem_idx in 0..num_elems {
+            let item = items.get(elem_idx);
+            let base_offset = elem_idx * struct_size;
+
+            if let Some(item) = item {
+                match &item.init {
+                    Initializer::List(sub_items) => {
+                        let mut current_field_idx = 0usize;
+                        for sub_item in sub_items {
+                            let desig_name = match sub_item.designators.first() {
+                                Some(Designator::Field(ref name)) => Some(name.as_str()),
+                                _ => None,
+                            };
+                            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
+                                Some(idx) => idx,
+                                None => break,
+                            };
+                            let field = &layout.fields[field_idx];
+                            let field_offset = base_offset + field.offset;
+
+                            // Handle multi-level designators (e.g., .bs.keyword={"GET", -1})
+                            let has_nested_field_designator = sub_item.designators.len() > 1
+                                && matches!(sub_item.designators.first(), Some(Designator::Field(_)));
+
+                            if has_nested_field_designator {
+                                self.fill_nested_designator_with_ptrs(
+                                    sub_item, &field.ty, field_offset,
+                                    bytes, ptr_ranges,
+                                );
+                                current_field_idx = field_idx + 1;
+                                continue;
+                            }
+
+                            self.emit_struct_field_init_compound(
+                                sub_item, field, field_offset,
+                                bytes, ptr_ranges,
+                            );
+                            current_field_idx = field_idx + 1;
+                        }
+                    }
+                    Initializer::Expr(expr) => {
+                        // Single expression for first field
+                        if !layout.fields.is_empty() {
+                            let field = &layout.fields[0];
+                            let field_offset = base_offset + field.offset;
+                            let field_ir_ty = IrType::from_ctype(&field.ty);
+                            let is_ptr_field = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
+                            if is_ptr_field {
+                                if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                                    ptr_ranges.push((field_offset, addr_init));
+                                }
+                            } else if field.bit_offset.is_some() {
+                                if let Some(val) = self.eval_const_expr(expr) {
+                                    let bit_offset = field.bit_offset.unwrap();
+                                    let bit_width = field.bit_width.unwrap();
+                                    self.write_bitfield_to_bytes(bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
+                                }
+                            } else if let Some(val) = self.eval_const_expr(expr) {
+                                self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Handle a multi-level designated initializer within a struct array element.
