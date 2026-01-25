@@ -663,6 +663,9 @@ impl Lowerer {
             Expr::Comma(_, last, _) => {
                 self.get_layout_for_expr(last)
             }
+            Expr::VaArg(_, type_spec, _) => {
+                self.get_struct_layout_for_type(type_spec)
+            }
             _ => None,
         }
     }
