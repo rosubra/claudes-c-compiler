@@ -262,7 +262,14 @@ impl Lowerer {
         // Try CType-based resolution first for accurate type information
         if let Some(ctype) = self.get_expr_ctype(expr) {
             match &ctype {
-                CType::Pointer(pointee) => return self.resolve_ctype_size(pointee).max(1),
+                CType::Pointer(pointee) => {
+                    // GCC extension: function pointer arithmetic uses step size 1,
+                    // treating function pointers like void* for arithmetic purposes.
+                    if matches!(pointee.as_ref(), CType::Function(_)) {
+                        return 1;
+                    }
+                    return self.resolve_ctype_size(pointee).max(1);
+                }
                 CType::Array(elem, _) => return self.resolve_ctype_size(elem).max(1),
                 _ => {}
             }

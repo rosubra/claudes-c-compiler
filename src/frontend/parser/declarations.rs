@@ -276,10 +276,11 @@ impl Parser {
                 loop {
                     let (pname, pderived) = self.parse_declarator();
                     if let Some(ref name) = pname {
-                        let full_type = self.apply_kr_derivations(&type_spec, &pderived);
+                        let (full_type, fptr_params) = self.apply_kr_derivations(&type_spec, &pderived);
                         for param in kr_params.iter_mut() {
                             if param.name.as_deref() == Some(name.as_str()) {
                                 param.type_spec = full_type.clone();
+                                param.fptr_params = fptr_params.clone();
                                 break;
                             }
                         }
@@ -297,12 +298,50 @@ impl Parser {
     }
 
     /// Apply derived declarators to build a K&R parameter's full type.
+    /// Returns (type_specifier, optional_fptr_params).
+    /// For function pointer parameters like `int (*fp)(int, int)`, this returns
+    /// (Pointer(Int), Some([ParamDecl for int, ParamDecl for int])) to match
+    /// the modern-style parameter handling path.
     fn apply_kr_derivations(
         &self,
         type_spec: &TypeSpecifier,
         pderived: &[DerivedDeclarator],
-    ) -> TypeSpecifier {
+    ) -> (TypeSpecifier, Option<Vec<ParamDecl>>) {
         let mut full_type = type_spec.clone();
+
+        // Check if this is a function pointer parameter.
+        // For `int (*fp)(int)`, pderived = [Pointer, FunctionPointer([int], false)]
+        // The Pointer is the syntax marker from `(*fp)`, not a real pointer level.
+        // We need to: (1) not apply the syntax-marker Pointer, (2) extract the
+        // FunctionPointer params, and (3) apply one Pointer wrap for decay.
+        let fptr_info = pderived.iter().find_map(|d| {
+            if let DerivedDeclarator::FunctionPointer(params, variadic) = d {
+                Some((params.clone(), *variadic))
+            } else {
+                None
+            }
+        });
+
+        if let Some((fptr_params, _variadic)) = fptr_info {
+            // Function pointer parameter in K&R style.
+            // Count how many Pointer derivations exist. For `int (*fp)()`:
+            //   pderived = [Pointer, FunctionPointer([], false)]
+            //   One Pointer is the syntax marker - skip it.
+            //   Any additional Pointers are return-type pointer levels.
+            // For `int *(*fp)()`:
+            //   pderived = [Pointer, Pointer, FunctionPointer([], false)]
+            //   First Pointer is return-type pointer, second is syntax marker.
+            let ptr_count = pderived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
+            // Apply all pointers except the syntax marker (last one)
+            for _ in 0..ptr_count.saturating_sub(1) {
+                full_type = TypeSpecifier::Pointer(Box::new(full_type));
+            }
+            // Apply one Pointer wrapping for the function-pointer-to-pointer decay
+            full_type = TypeSpecifier::Pointer(Box::new(full_type));
+            return (full_type, Some(fptr_params));
+        }
+
+        // Not a function pointer - apply all derivations normally.
         // Apply pointers
         for d in pderived {
             if let DerivedDeclarator::Pointer = d {
@@ -324,16 +363,13 @@ impl Parser {
             }
             full_type = TypeSpecifier::Pointer(Box::new(full_type));
         }
-        // Function/FunctionPointer params decay to pointers
+        // Function params (bare function names) decay to pointers
         for d in pderived {
-            match d {
-                DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _) => {
-                    full_type = TypeSpecifier::Pointer(Box::new(full_type));
-                }
-                _ => {}
+            if let DerivedDeclarator::Function(_, _) = d {
+                full_type = TypeSpecifier::Pointer(Box::new(full_type));
             }
         }
-        full_type
+        (full_type, None)
     }
 
     /// Parse the rest of a declaration (not a function definition).
