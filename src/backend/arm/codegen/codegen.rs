@@ -232,14 +232,24 @@ impl ArmCodegen {
     }
 
     /// Get the access size in bytes for an AArch64 load/store instruction and register.
-    /// For str/ldr, the access size depends on the register (w=4, x=8).
+    /// For str/ldr, the access size depends on the register:
+    /// w registers = 4 bytes, x registers = 8 bytes,
+    /// s (single-precision float) = 4 bytes, d (double-precision float) = 8 bytes,
+    /// q (SIMD/quad) = 16 bytes.
     fn access_size_for_instr(instr: &str, reg: &str) -> i64 {
         match instr {
             "strb" | "ldrb" | "ldrsb" => 1,
             "strh" | "ldrh" | "ldrsh" => 2,
             "ldrsw" => 4,
             "str" | "ldr" => {
-                if reg.starts_with('w') { 4 } else { 8 }
+                if reg.starts_with('w') || reg.starts_with('s') {
+                    4
+                } else if reg.starts_with('q') {
+                    16
+                } else {
+                    // x registers and d registers are both 8 bytes
+                    8
+                }
             }
             _ => 1, // conservative default
         }
@@ -328,6 +338,31 @@ impl ArmCodegen {
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add {}, x29, x17", dest));
+        }
+    }
+
+    /// Emit load from an arbitrary base register with offset, handling large offsets via x17.
+    /// For offsets that exceed the ARM64 unsigned immediate range, materializes the
+    /// effective address into x17 and loads from [x17].
+    fn emit_load_from_reg(&mut self, dest: &str, base: &str, offset: i64, instr: &str) {
+        if Self::is_valid_imm_offset(offset, instr, dest) {
+            self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, dest, base, offset));
+        } else {
+            self.load_large_imm("x17", offset);
+            self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+            self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, dest));
+        }
+    }
+
+    /// Emit store to an arbitrary base register with offset, handling large offsets via x17.
+    #[allow(dead_code)]
+    fn emit_store_to_reg(&mut self, src: &str, base: &str, offset: i64, instr: &str) {
+        if Self::is_valid_imm_offset(offset, instr, src) {
+            self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, src, base, offset));
+        } else {
+            self.load_large_imm("x17", offset);
+            self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+            self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, src));
         }
     }
 
@@ -1750,7 +1785,7 @@ impl ArchCodegen for ArmCodegen {
                         }
                         for qi in 0..n_dwords {
                             let src_off = (qi * 8) as i64;
-                            self.state.emit_fmt(format_args!("    ldr x1, [x0, #{}]", src_off));
+                            self.emit_load_from_reg("x1", "x0", src_off, "ldr");
                             self.emit_store_to_sp("x1", stack_offset + src_off, "str");
                         }
                         stack_offset += (n_dwords as i64) * 8;
@@ -1827,7 +1862,7 @@ impl ArchCodegen for ArmCodegen {
                                 self.state.emit("    stp x9, x10, [sp, #-16]!");
                                 self.state.emit("    bl __extenddftf2");
                                 self.state.emit("    ldp x9, x10, [sp], #16");
-                                self.state.emit_fmt(format_args!("    str q0, [sp, #{}]", stack_offset));
+                                self.emit_store_to_sp("q0", stack_offset, "str");
                             }
                         }
                         stack_offset += 16;
