@@ -301,15 +301,26 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
         }
         GlobalInit::Array(values) => {
             for val in values {
-                // Use the constant's own type for byte-serialized struct/array data
-                let elem_ty = match val {
+                // Determine the emission type for each array element.
+                // For byte-serialized struct data (g.ty == I8), use each constant's
+                // own type so that I8/I16/I32/F32/F64 fields are correctly sized.
+                // For typed arrays (e.g., pointer arrays where g.ty == Ptr), use
+                // the global's declared element type when it's wider than the
+                // constant's natural type. This ensures that e.g. IrConst::I32(0)
+                // in a pointer array emits .quad 0 (8 bytes) not .long 0 (4 bytes).
+                let const_ty = match val {
                     IrConst::I8(_) => IrType::I8,
                     IrConst::I16(_) => IrType::I16,
                     IrConst::I32(_) => IrType::I32,
                     IrConst::F32(_) => IrType::F32,
                     IrConst::F64(_) => IrType::F64,
-                    IrConst::LongDouble(_) => IrType::F128, // LongDouble emits 16 bytes
+                    IrConst::LongDouble(_) => IrType::F128,
                     _ => g.ty,
+                };
+                let elem_ty = if g.ty.size() > const_ty.size() {
+                    g.ty
+                } else {
+                    const_ty
                 };
                 emit_const_data(out, val, elem_ty, ptr_dir);
             }
@@ -347,7 +358,9 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
             for elem in elements {
                 match elem {
                     GlobalInit::Scalar(c) => {
-                        // Use the const's own type for non-I64 scalars (e.g., I8 in struct byte init)
+                        // In Compound initializers, each element may have a different
+                        // type (e.g., struct with int and pointer fields). Use the
+                        // constant's own type, falling back to g.ty for I64 and wider.
                         let elem_ty = match c {
                             IrConst::I8(_) => IrType::I8,
                             IrConst::I16(_) => IrType::I16,
