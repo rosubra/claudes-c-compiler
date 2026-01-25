@@ -722,20 +722,6 @@ impl Lowerer {
         }
     }
 
-    /// Flatten a multi-dimensional array initializer list for global arrays.
-    /// Handles C initialization rules:
-    /// - Braced sub-lists map to the next sub-array dimension, padded with zeros
-    /// - Bare scalar expressions fill base elements left-to-right without sub-array padding
-    fn flatten_global_array_init(
-        &self,
-        items: &[InitializerItem],
-        array_dim_strides: &[usize],
-        base_ty: IrType,
-        values: &mut Vec<IrConst>,
-    ) {
-        self.flatten_global_array_init_bool(items, array_dim_strides, base_ty, values, false)
-    }
-
     fn flatten_global_array_init_bool(
         &self,
         items: &[InitializerItem],

@@ -10,37 +10,6 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType};
 
-/// Resolve a typedef's derived declarators into the final TypeSpecifier.
-/// Still used for FunctionTypedefInfo return_type (which stores TypeSpecifier for now).
-pub(super) fn resolve_typedef_derived(base: &TypeSpecifier, derived: &[DerivedDeclarator]) -> TypeSpecifier {
-    let mut resolved_type = base.clone();
-    let mut i = 0;
-    while i < derived.len() {
-        match &derived[i] {
-            DerivedDeclarator::Pointer => {
-                resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
-                i += 1;
-            }
-            DerivedDeclarator::Array(_) => {
-                let mut array_sizes: Vec<Option<Box<Expr>>> = Vec::new();
-                while i < derived.len() {
-                    if let DerivedDeclarator::Array(size) = &derived[i] {
-                        array_sizes.push(size.clone());
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                for size in array_sizes.into_iter().rev() {
-                    resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size);
-                }
-            }
-            _ => { i += 1; }
-        }
-    }
-    resolved_type
-}
-
 /// Type metadata shared between local and global variables.
 ///
 /// Both `LocalInfo` and `GlobalInfo` embed this struct via `Deref`, so field

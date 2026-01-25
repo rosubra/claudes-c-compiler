@@ -824,7 +824,7 @@ impl IrType {
             CType::Short => IrType::I16,
             CType::UShort => IrType::U16,
             CType::Int => IrType::I32,
-            CType::Enum(_) => IrType::U32,
+            CType::Enum(_) => IrType::I32, // C enum underlying type is int (signed)
             CType::UInt => IrType::U32,
             CType::Long | CType::LongLong => IrType::I64,
             CType::ULong | CType::ULongLong => IrType::U64,

@@ -219,18 +219,6 @@ impl FunctionBuildState {
         self.const_local_values.insert(name, value);
     }
 
-    /// Insert a var ctype, tracking the change in the current scope frame.
-    pub fn insert_var_ctype_scoped(&mut self, name: String, ctype: CType) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if let Some(prev) = self.var_ctypes.remove(&name) {
-                frame.var_ctypes_shadowed.push((name.clone(), prev));
-            } else {
-                frame.var_ctypes_added.push(name.clone());
-            }
-        }
-        self.var_ctypes.insert(name, ctype);
-    }
-
     /// Remove a local variable from `locals`, tracking the removal in the
     /// current scope frame so `pop_scope()` restores it.
     pub fn shadow_local_for_scope(&mut self, name: &str) {

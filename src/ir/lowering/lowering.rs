@@ -176,11 +176,6 @@ impl Lowerer {
         self.func_mut().insert_const_local_scoped(name, value);
     }
 
-    /// Insert a var ctype, tracking the change in the current scope frame.
-    pub(super) fn insert_var_ctype_scoped(&mut self, name: String, ctype: CType) {
-        self.func_mut().insert_var_ctype_scoped(name, ctype);
-    }
-
     // --- Top-level orchestration ---
 
     pub fn lower(mut self, tu: &TranslationUnit) -> IrModule {
@@ -544,11 +539,6 @@ impl Lowerer {
     }
 
     /// Lower an expression, cast to target type, then store at base + byte_offset.
-    pub(super) fn emit_init_expr_to_offset(&mut self, e: &Expr, base: Value, byte_offset: usize, target_ty: IrType) {
-        self.emit_init_expr_to_offset_bool(e, base, byte_offset, target_ty, false)
-    }
-
-    /// Like emit_init_expr_to_offset, but with _Bool awareness.
     /// When target_is_bool is true, normalizes the value (any nonzero -> 1) per C11 6.3.1.2.
     pub(super) fn emit_init_expr_to_offset_bool(&mut self, e: &Expr, base: Value, byte_offset: usize, target_ty: IrType, target_is_bool: bool) {
         let expr_ty = self.get_expr_type(e);
@@ -1418,7 +1408,7 @@ impl Lowerer {
                 while let CType::Array(inner, _) = ct {
                     ct = inner.as_ref();
                 }
-                base_ty = Self::ctype_to_ir(ct);
+                base_ty = IrType::from_ctype(ct);
             }
         }
 
@@ -1443,7 +1433,7 @@ impl Lowerer {
         let elem_ir_ty = if is_array && base_ty == IrType::Ptr && !is_array_of_pointers {
             let ctype = self.type_spec_to_ctype(type_spec);
             if let CType::Array(ref elem_ct, _) = ctype {
-                Self::ctype_to_ir(elem_ct)
+                IrType::from_ctype(elem_ct)
             } else {
                 base_ty
             }

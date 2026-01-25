@@ -491,20 +491,11 @@ impl ArmCodegen {
                     // For 32-bit lane equality, load q regs, use cmeq with .4s arrangement
                     self.operand_to_x0(&args[0]);
                     self.state.emit("    ldr q0, [x0]");
-                    match &args[1] {
-                        Operand::Value(v) => {
-                            if let Some(slot) = self.state.get_slot(v.0) {
-                                if self.state.is_alloca(v.0) {
-                                    self.emit_add_sp_offset("x1", slot.0);
-                                } else {
-                                    self.emit_load_from_sp("x1", slot.0, "ldr");
-                                }
-                            }
-                        }
-                        Operand::Const(_) => {
-                            self.operand_to_x0(&args[1]);
-                            self.state.emit("    mov x1, x0");
-                        }
+                    if let Operand::Value(v) = &args[1] {
+                        self.load_ptr_to_reg(v, "x1");
+                    } else {
+                        self.operand_to_x0(&args[1]);
+                        self.state.emit("    mov x1, x0");
                     }
                     self.state.emit("    ldr q1, [x1]");
                     self.state.emit("    cmeq v0.4s, v0.4s, v1.4s");
@@ -591,48 +582,20 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            IntrinsicOp::Crc32_8 => {
-                // Use crc32cb for CRC-32C (Castagnoli) to match x86 semantics
+            IntrinsicOp::Crc32_8 | IntrinsicOp::Crc32_16
+            | IntrinsicOp::Crc32_32 | IntrinsicOp::Crc32_64 => {
+                let is_64 = matches!(op, IntrinsicOp::Crc32_64);
+                let (save_reg, crc_inst) = match op {
+                    IntrinsicOp::Crc32_8  => ("w9", "crc32cb w9, w9, w0"),
+                    IntrinsicOp::Crc32_16 => ("w9", "crc32ch w9, w9, w0"),
+                    IntrinsicOp::Crc32_32 => ("w9", "crc32cw w9, w9, w0"),
+                    IntrinsicOp::Crc32_64 => ("x9", "crc32cx w9, w9, x0"),
+                    _ => unreachable!(),
+                };
                 self.operand_to_x0(&args[0]);
-                self.state.emit("    mov w9, w0");
+                self.state.emit(&format!("    mov {}, {}", save_reg, if is_64 { "x0" } else { "w0" }));
                 self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32cb w9, w9, w0");
-                self.state.emit("    mov x0, x9");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_16 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    mov w9, w0");
-                self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32ch w9, w9, w0");
-                self.state.emit("    mov x0, x9");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_32 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    mov w9, w0");
-                self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32cw w9, w9, w0");
-                self.state.emit("    mov x0, x9");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_64 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    mov x9, x0");
-                self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32cx w9, w9, x0");
+                self.state.emit(&format!("    {}", crc_inst));
                 self.state.emit("    mov x0, x9");
                 if let Some(d) = dest {
                     if let Some(slot) = self.state.get_slot(d.0) {

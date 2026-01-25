@@ -1657,33 +1657,8 @@ impl Lowerer {
     }
 
     pub(super) fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
-        // Use type_spec_to_ctype for typedef resolution, then map CType to IrType
+        // Use type_spec_to_ctype for typedef resolution, then canonical CType-to-IrType
         let ctype = self.type_spec_to_ctype(type_spec);
-        Self::ctype_to_ir_type(&ctype)
-    }
-
-    /// Map a CType to an IrType (used for va_arg type resolution).
-    fn ctype_to_ir_type(ctype: &CType) -> IrType {
-        match ctype {
-            CType::Int => IrType::I32,
-            CType::Long | CType::LongLong => IrType::I64,
-            CType::Short => IrType::I16,
-            CType::Char => IrType::I8,
-            CType::UChar => IrType::U8,
-            CType::UInt => IrType::U32,
-            CType::ULong | CType::ULongLong => IrType::U64,
-            CType::UShort => IrType::U16,
-            CType::Float => IrType::F32,
-            CType::Double => IrType::F64,
-            CType::LongDouble => IrType::F128,
-            CType::Pointer(_) => IrType::Ptr,
-            CType::Void => IrType::I64,
-            CType::Bool => IrType::I8,
-            CType::Int128 => IrType::I128,
-            CType::UInt128 => IrType::U128,
-            CType::Array(_, _) => IrType::Ptr,
-            CType::Struct(_) | CType::Union(_) => IrType::I64,
-            _ => IrType::I64,
-        }
+        IrType::from_ctype(&ctype)
     }
 }

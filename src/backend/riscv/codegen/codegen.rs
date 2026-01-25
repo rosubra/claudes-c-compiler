@@ -516,21 +516,8 @@ impl RiscvCodegen {
         self.operand_to_t0(&args[0]);
         self.state.emit("    ld t1, 0(t0)");
         self.state.emit("    ld t2, 8(t0)");
-        // Load args[1] pointer - use a6/a7 as temp to avoid clobbering t1/t2
-        match &args[1] {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
-                    } else {
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                    }
-                }
-            }
-            Operand::Const(_) => {
-                self.operand_to_t0(&args[1]);
-            }
-        }
+        // Load args[1] pointer
+        self.operand_to_t0(&args[1]);
         self.state.emit("    ld t3, 0(t0)");
         self.state.emit("    ld t4, 8(t0)");
         // Apply operation
@@ -547,20 +534,7 @@ impl RiscvCodegen {
         // Load source pointers
         self.operand_to_t0(&args[0]);
         self.state.emit("    mv a6, t0");
-        match &args[1] {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
-                    } else {
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                    }
-                }
-            }
-            Operand::Const(_) => {
-                self.operand_to_t0(&args[1]);
-            }
-        }
+        self.operand_to_t0(&args[1]);
         self.state.emit("    mv a7, t0");
         // Get dest address
         self.load_ptr_to_reg_rv(dest_ptr, "a5");
@@ -622,20 +596,7 @@ impl RiscvCodegen {
         // Load source pointers
         self.operand_to_t0(&args[0]);
         self.state.emit("    mv a6, t0");
-        match &args[1] {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
-                    } else {
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                    }
-                }
-            }
-            Operand::Const(_) => {
-                self.operand_to_t0(&args[1]);
-            }
-        }
+        self.operand_to_t0(&args[1]);
         self.state.emit("    mv a7, t0");
         self.load_ptr_to_reg_rv(dest_ptr, "a5");
         // Process 4 dwords (each 32-bit)
@@ -700,20 +661,7 @@ impl RiscvCodegen {
         self.operand_to_t0(&args[0]);
         self.state.emit("    mv a6, t0");
         // Load args[1] pointer (b)
-        match &args[1] {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
-                    } else {
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                    }
-                }
-            }
-            Operand::Const(_) => {
-                self.operand_to_t0(&args[1]);
-            }
-        }
+        self.operand_to_t0(&args[1]);
         self.state.emit("    mv a7, t0");
         // Get dest address
         self.load_ptr_to_reg_rv(dest_ptr, "a5");

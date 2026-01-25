@@ -10,7 +10,6 @@
 //! F128, or stack-passed), using the same `CallAbiConfig` that drives `classify_call_args`.
 
 use crate::ir::ir::IrFunction;
-use crate::common::types::IrType;
 use super::call_abi::CallAbiConfig;
 use super::generation::is_i128_type;
 

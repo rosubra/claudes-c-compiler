@@ -39,8 +39,8 @@ impl Lowerer {
         // Fall back to CType for typedef'd pointer/array types
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
-            CType::Pointer(inner) => Some(Self::ctype_to_ir(inner)),
-            CType::Array(inner, _) => Some(Self::ctype_to_ir(inner)),
+            CType::Pointer(inner) => Some(IrType::from_ctype(inner)),
+            CType::Array(inner, _) => Some(IrType::from_ctype(inner)),
             _ => None,
         }
     }

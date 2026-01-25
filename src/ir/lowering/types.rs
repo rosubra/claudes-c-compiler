@@ -24,36 +24,27 @@ impl Lowerer {
         current
     }
 
+    /// Resolve a TypeSpecifier to its underlying CType for typedef/typeof,
+    /// returning None for non-typedef/typeof specifiers.
+    /// This is a lightweight lookup (no array size evaluation or function pointer building).
+    fn resolve_typedef_ctype(&self, ts: &TypeSpecifier) -> Option<CType> {
+        match ts {
+            TypeSpecifier::TypedefName(name) => self.types.typedefs.get(name).cloned(),
+            TypeSpecifier::TypeofType(inner) => self.resolve_typedef_ctype(inner),
+            _ => None,
+        }
+    }
+
     /// Check if a TypeSpecifier resolves to a Bool type (through typedefs).
     pub(super) fn is_type_bool(&self, ts: &TypeSpecifier) -> bool {
-        match ts {
-            TypeSpecifier::Bool => true,
-            TypeSpecifier::TypedefName(name) => {
-                if let Some(ctype) = self.types.typedefs.get(name) {
-                    matches!(ctype, CType::Bool)
-                } else {
-                    false
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.is_type_bool(inner),
-            _ => false,
-        }
+        matches!(ts, TypeSpecifier::Bool)
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Bool))
     }
 
     /// Check if a TypeSpecifier resolves to a struct or union type (through typedefs).
     pub(super) fn is_type_struct_or_union(&self, ts: &TypeSpecifier) -> bool {
-        match ts {
-            TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => true,
-            TypeSpecifier::TypedefName(name) => {
-                if let Some(ctype) = self.types.typedefs.get(name) {
-                    matches!(ctype, CType::Struct(_) | CType::Union(_))
-                } else {
-                    false
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.is_type_struct_or_union(inner),
-            _ => false,
-        }
+        matches!(ts, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..))
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Struct(_) | CType::Union(_)))
     }
 
     /// Check if a TypeSpecifier is a transparent union (passed as first member for ABI).
@@ -80,34 +71,14 @@ impl Lowerer {
 
     /// Check if a TypeSpecifier resolves to a complex type (through typedefs).
     pub(super) fn is_type_complex(&self, ts: &TypeSpecifier) -> bool {
-        match ts {
-            TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble => true,
-            TypeSpecifier::TypedefName(name) => {
-                if let Some(ctype) = self.types.typedefs.get(name) {
-                    ctype.is_complex()
-                } else {
-                    false
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.is_type_complex(inner),
-            _ => false,
-        }
+        matches!(ts, TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble)
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| ct.is_complex())
     }
 
     /// Check if a TypeSpecifier resolves to a pointer type (through typedefs).
     pub(super) fn is_type_pointer(&self, ts: &TypeSpecifier) -> bool {
-        match ts {
-            TypeSpecifier::Pointer(_) => true,
-            TypeSpecifier::TypedefName(name) => {
-                if let Some(ctype) = self.types.typedefs.get(name) {
-                    matches!(ctype, CType::Pointer(_))
-                } else {
-                    false
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.is_type_pointer(inner),
-            _ => false,
-        }
+        matches!(ts, TypeSpecifier::Pointer(_))
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Pointer(_)))
     }
 
     /// Resolve typeof(expr) to a concrete TypeSpecifier by analyzing the expression type.
@@ -487,14 +458,14 @@ impl Lowerer {
             TypeSpecifier::TypedefName(name) => {
                 // Resolve typedef through CType
                 if let Some(ctype) = self.types.typedefs.get(name) {
-                    Self::ctype_to_ir(ctype)
+                    IrType::from_ctype(ctype)
                 } else {
                     IrType::I64 // fallback for unresolved typedef
                 }
             }
             TypeSpecifier::Typeof(expr) => {
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    Self::ctype_to_ir(&ctype)
+                    IrType::from_ctype(&ctype)
                 } else {
                     IrType::I64
                 }
@@ -503,33 +474,6 @@ impl Lowerer {
             TypeSpecifier::FunctionPointer(_, _, _) => IrType::Ptr, // function pointer is a pointer
             // AutoType should be resolved before reaching here (in lower_local_decl)
             TypeSpecifier::AutoType => IrType::I64,
-        }
-    }
-
-    /// Convert a CType to an IrType.
-    pub(super) fn ctype_to_ir(ctype: &CType) -> IrType {
-        match ctype {
-            CType::Void => IrType::Void,
-            CType::Bool => IrType::U8,
-            CType::Char => IrType::I8,
-            CType::UChar => IrType::U8,
-            CType::Short => IrType::I16,
-            CType::UShort => IrType::U16,
-            CType::Int => IrType::I32,
-            CType::UInt => IrType::U32,
-            CType::Long | CType::LongLong => IrType::I64,
-            CType::ULong | CType::ULongLong => IrType::U64,
-            CType::Int128 => IrType::I128,
-            CType::UInt128 => IrType::U128,
-            CType::Float => IrType::F32,
-            CType::Double => IrType::F64,
-            CType::LongDouble => IrType::F128,
-            CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => IrType::Ptr,
-            CType::Pointer(_) => IrType::Ptr,
-            CType::Array(_, _) => IrType::Ptr,
-            CType::Struct(_) | CType::Union(_) => IrType::Ptr,
-            CType::Enum(_) => IrType::I32,
-            CType::Function(_) => IrType::Ptr,
         }
     }
 

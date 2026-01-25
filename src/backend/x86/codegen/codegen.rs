@@ -104,12 +104,8 @@ impl X86Codegen {
                 }
             }
             Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                    } else {
-                        self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                    }
+                if self.state.get_slot(v.0).is_some() {
+                    self.value_to_reg(v, "rax");
                 } else {
                     self.state.emit("    xorq %rax, %rax");
                 }
@@ -121,6 +117,18 @@ impl X86Codegen {
     fn store_rax_to(&mut self, dest: &Value) {
         if let Some(slot) = self.state.get_slot(dest.0) {
             self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+        }
+    }
+
+    /// Load a Value into a named register. For allocas, loads the address (leaq);
+    /// for regular values, loads the data (movq).
+    fn value_to_reg(&mut self, val: &Value, reg: &str) {
+        if let Some(slot) = self.state.get_slot(val.0) {
+            if self.state.is_alloca(val.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %{}", slot.0, reg));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, reg));
+            }
         }
     }
 
@@ -483,13 +491,7 @@ impl X86Codegen {
                 }
             }
             Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.state.emit(&format!("    leaq {}(%rbp), %{}", slot.0, reg));
-                    } else {
-                        self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, reg));
-                    }
-                }
+                self.value_to_reg(v, reg);
             }
         }
     }
@@ -497,21 +499,13 @@ impl X86Codegen {
     /// Emit SSE binary 128-bit op: load xmm0 from arg0 ptr, xmm1 from arg1 ptr,
     /// apply the given SSE instruction, store result xmm0 to dest_ptr.
     fn emit_sse_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], sse_inst: &str) {
-        // arg0 and arg1 are pointers to 16-byte data
         self.operand_to_reg(&args[0], "rax");
         self.state.emit("    movdqu (%rax), %xmm0");
         self.operand_to_reg(&args[1], "rcx");
         self.state.emit("    movdqu (%rcx), %xmm1");
         self.state.emit(&format!("    {} %xmm1, %xmm0", sse_inst));
-        // Store result to dest_ptr
-        if let Some(slot) = self.state.get_slot(dest_ptr.0) {
-            if self.state.is_alloca(dest_ptr.0) {
-                self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-            } else {
-                self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-            }
-            self.state.emit("    movdqu %xmm0, (%rax)");
-        }
+        self.value_to_reg(dest_ptr, "rax");
+        self.state.emit("    movdqu %xmm0, (%rax)");
     }
 
     fn emit_intrinsic_impl(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
@@ -526,90 +520,48 @@ impl X86Codegen {
                 self.state.emit("    clflush (%rax)");
             }
             IntrinsicOp::Movnti => {
-                // dest_ptr = target address, args[0] = 32-bit value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        if self.state.is_alloca(ptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                    }
+                    self.value_to_reg(ptr, "rax");
                     self.state.emit("    movnti %ecx, (%rax)");
                 }
             }
             IntrinsicOp::Movnti64 => {
-                // dest_ptr = target address, args[0] = 64-bit value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        if self.state.is_alloca(ptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                    }
+                    self.value_to_reg(ptr, "rax");
                     self.state.emit("    movnti %rcx, (%rax)");
                 }
             }
             IntrinsicOp::Movntdq => {
-                // dest_ptr = target address, args[0] = ptr to 128-bit source
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
                     self.state.emit("    movdqu (%rcx), %xmm0");
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        if self.state.is_alloca(ptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                    }
+                    self.value_to_reg(ptr, "rax");
                     self.state.emit("    movntdq %xmm0, (%rax)");
                 }
             }
             IntrinsicOp::Movntpd => {
-                // dest_ptr = target address, args[0] = ptr to 128-bit double source
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
                     self.state.emit("    movupd (%rcx), %xmm0");
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        if self.state.is_alloca(ptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                    }
+                    self.value_to_reg(ptr, "rax");
                     self.state.emit("    movntpd %xmm0, (%rax)");
                 }
             }
             IntrinsicOp::Loaddqu => {
-                // args[0] = source pointer, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
                     self.state.emit("    movdqu (%rax), %xmm0");
-                    if let Some(slot) = self.state.get_slot(dptr.0) {
-                        if self.state.is_alloca(dptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                        self.state.emit("    movdqu %xmm0, (%rax)");
-                    }
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
             IntrinsicOp::Storedqu => {
-                // dest_ptr = target pointer, args[0] = source pointer to 128-bit data
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
                     self.state.emit("    movdqu (%rcx), %xmm0");
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        if self.state.is_alloca(ptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                    }
+                    self.value_to_reg(ptr, "rax");
                     self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
@@ -644,92 +596,47 @@ impl X86Codegen {
                 }
             }
             IntrinsicOp::Pmovmskb128 => {
-                // args[0] = pointer to 128-bit data, result is i32 in rax
                 self.operand_to_reg(&args[0], "rax");
                 self.state.emit("    movdqu (%rax), %xmm0");
                 self.state.emit("    pmovmskb %xmm0, %eax");
                 if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
-                    }
+                    self.store_rax_to(d);
                 }
             }
             IntrinsicOp::SetEpi8 => {
-                // args[0] = byte value to splat, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
-                    // Splat al to all 16 bytes: movd to xmm, then pshufb with zero mask
-                    // Simpler approach: use stack
                     self.state.emit("    movd %eax, %xmm0");
-                    // punpcklbw to splat byte: xmm0 = [al, al, ...]
                     self.state.emit("    punpcklbw %xmm0, %xmm0");
                     self.state.emit("    punpcklwd %xmm0, %xmm0");
                     self.state.emit("    pshufd $0, %xmm0, %xmm0");
-                    if let Some(slot) = self.state.get_slot(dptr.0) {
-                        if self.state.is_alloca(dptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                        self.state.emit("    movdqu %xmm0, (%rax)");
-                    }
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
             IntrinsicOp::SetEpi32 => {
-                // args[0] = 32-bit value to splat, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
                     self.state.emit("    movd %eax, %xmm0");
                     self.state.emit("    pshufd $0, %xmm0, %xmm0");
-                    if let Some(slot) = self.state.get_slot(dptr.0) {
-                        if self.state.is_alloca(dptr.0) {
-                            self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
-                        } else {
-                            self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
-                        }
-                        self.state.emit("    movdqu %xmm0, (%rax)");
-                    }
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
-            IntrinsicOp::Crc32_8 => {
-                // args: [crc_val, data_val]
+            IntrinsicOp::Crc32_8 | IntrinsicOp::Crc32_16
+            | IntrinsicOp::Crc32_32 | IntrinsicOp::Crc32_64 => {
                 self.operand_to_reg(&args[0], "rax");
                 self.operand_to_reg(&args[1], "rcx");
-                self.state.emit("    crc32b %cl, %eax");
+                let inst = match op {
+                    IntrinsicOp::Crc32_8  => "crc32b %cl, %eax",
+                    IntrinsicOp::Crc32_16 => "crc32w %cx, %eax",
+                    IntrinsicOp::Crc32_32 => "crc32l %ecx, %eax",
+                    IntrinsicOp::Crc32_64 => "crc32q %rcx, %rax",
+                    _ => unreachable!(),
+                };
+                self.state.emit(&format!("    {}", inst));
                 if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_16 => {
-                self.operand_to_reg(&args[0], "rax");
-                self.operand_to_reg(&args[1], "rcx");
-                self.state.emit("    crc32w %cx, %eax");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_32 => {
-                self.operand_to_reg(&args[0], "rax");
-                self.operand_to_reg(&args[1], "rcx");
-                self.state.emit("    crc32l %ecx, %eax");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
-                    }
-                }
-            }
-            IntrinsicOp::Crc32_64 => {
-                self.operand_to_reg(&args[0], "rax");
-                self.operand_to_reg(&args[1], "rcx");
-                self.state.emit("    crc32q %rcx, %rax");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
-                    }
+                    self.store_rax_to(d);
                 }
             }
         }

@@ -172,9 +172,6 @@ pub fn build_full_ctype(
                     result = CType::Array(Box::new(result), size);
                     i += 1;
                 }
-                _ => {
-                    i += 1;
-                }
             }
         }
 

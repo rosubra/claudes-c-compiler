@@ -8,6 +8,7 @@ Shared data types and utilities used across frontend, IR, and backend.
 - **symbol_table.rs** - Scoped symbol table used by sema and lowering. Push/pop scope, insert/lookup symbols by name.
 - **source.rs** - Source location tracking: `Span`, `SourceLocation`, `SourceManager` for mapping byte offsets back to file/line/column.
 - **error.rs** - Diagnostic infrastructure: `Diagnostic` with severity levels, spans, and notes.
+- **type_builder.rs** - Shared `build_full_ctype` and `find_function_pointer_core` functions used by both sema and lowering to convert declarator chains into `CType`. Uses a `TypeConvertContext` trait so both phases can share the same declarator-application logic without diverging.
 
 ## Why Types are Split
 
