@@ -1,5 +1,25 @@
 use crate::common::types::IrType;
 
+/// A basic block identifier. Uses a u32 index for zero-cost copies
+/// instead of heap-allocated String labels. The block's assembly label
+/// is generated on-the-fly during codegen as ".L{id}".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BlockId(pub u32);
+
+impl BlockId {
+    /// Format this block ID as an assembly label (e.g., ".L5").
+    #[inline]
+    pub fn as_label(&self) -> String {
+        format!(".L{}", self.0)
+    }
+}
+
+impl std::fmt::Display for BlockId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, ".L{}", self.0)
+    }
+}
+
 /// A compilation unit in the IR.
 #[derive(Debug)]
 pub struct IrModule {
@@ -79,7 +99,7 @@ pub struct IrParam {
 /// A basic block in the CFG.
 #[derive(Debug)]
 pub struct BasicBlock {
-    pub label: String,
+    pub label: BlockId,
     pub instructions: Vec<Instruction>,
     pub terminator: Terminator,
 }
@@ -202,16 +222,16 @@ pub enum Instruction {
     },
 
     /// SSA Phi node: merges values from different predecessor blocks.
-    /// Each entry in `incoming` is (value, block_label) indicating which value
+    /// Each entry in `incoming` is (value, block_id) indicating which value
     /// flows in from which predecessor block.
     Phi {
         dest: Value,
         ty: IrType,
-        incoming: Vec<(Operand, String)>,
+        incoming: Vec<(Operand, BlockId)>,
     },
 
     /// Get the address of a label (GCC computed goto extension: &&label)
-    LabelAddr { dest: Value, label: String },
+    LabelAddr { dest: Value, label: BlockId },
 
     /// Get the second F64 return value from a function call (for _Complex double returns).
     /// On x86-64: reads xmm1, on ARM64: reads d1, on RISC-V: reads fa1.
@@ -266,14 +286,14 @@ pub enum Terminator {
     Return(Option<Operand>),
 
     /// Unconditional branch
-    Branch(String),
+    Branch(BlockId),
 
     /// Conditional branch
-    CondBranch { cond: Operand, true_label: String, false_label: String },
+    CondBranch { cond: Operand, true_label: BlockId, false_label: BlockId },
 
     /// Indirect branch (computed goto): goto *addr
     /// possible_targets lists all labels that could be jumped to (for optimization/validation)
-    IndirectBranch { target: Operand, possible_targets: Vec<String> },
+    IndirectBranch { target: Operand, possible_targets: Vec<BlockId> },
 
     /// Unreachable (e.g., after noreturn call)
     Unreachable,

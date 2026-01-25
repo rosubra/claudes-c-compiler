@@ -43,17 +43,17 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
     let mut next_value = max_value + 1;
 
     // Build label -> block index map
-    let label_to_idx: HashMap<String, usize> = func.blocks
+    let label_to_idx: HashMap<BlockId, usize> = func.blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.label.clone(), i))
+        .map(|(i, b)| (b.label, i))
         .collect();
 
     // Collect phi information from all blocks.
-    // For each block, collect its phis: Vec<(dest, Vec<(src_operand, pred_label)>)>
+    // For each block, collect its phis: Vec<(dest, Vec<(src_operand, pred_block_id)>)>
     struct PhiInfo {
         dest: Value,
-        incoming: Vec<(Operand, String)>,
+        incoming: Vec<(Operand, BlockId)>,
     }
 
     let mut block_phis: Vec<Vec<PhiInfo>> = Vec::new();
@@ -96,7 +96,7 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
 
                 // In each predecessor, copy source to temporary
                 for (src, pred_label) in &phi.incoming {
-                    if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+                    if let Some(&pred_idx) = label_to_idx.get(&pred_label) {
                         pred_copies
                             .entry(pred_idx)
                             .or_default()
@@ -115,7 +115,7 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
             } else {
                 // Single phi: copy directly in predecessors, no temporary needed
                 for (src, pred_label) in &phi.incoming {
-                    if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+                    if let Some(&pred_idx) = label_to_idx.get(&pred_label) {
                         pred_copies
                             .entry(pred_idx)
                             .or_default()

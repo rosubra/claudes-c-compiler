@@ -304,18 +304,18 @@ fn add_operand_values(op: &Operand, used: &mut Vec<u32>) {
 }
 
 /// Build a map from block label to block index.
-fn build_label_map(func: &IrFunction) -> HashMap<String, usize> {
+fn build_label_map(func: &IrFunction) -> HashMap<BlockId, usize> {
     func.blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.label.clone(), i))
+        .map(|(i, b)| (b.label, i))
         .collect()
 }
 
 /// Build predecessor and successor lists from the function's CFG.
 fn build_cfg(
     func: &IrFunction,
-    label_to_idx: &HashMap<String, usize>,
+    label_to_idx: &HashMap<BlockId, usize>,
 ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let n = func.blocks.len();
     let mut preds = vec![Vec::new(); n];
@@ -335,7 +335,6 @@ fn build_cfg(
                     preds[t].push(i);
                 }
                 if let Some(&f) = label_to_idx.get(false_label) {
-                    // Avoid duplicate if both labels are the same
                     if !succs[i].contains(&f) {
                         succs[i].push(f);
                     }
@@ -541,7 +540,7 @@ fn rename_variables(
     phi_locations: &[HashSet<usize>],
     dom_children: &[Vec<usize>],
     preds: &[Vec<usize>],
-    label_to_idx: &HashMap<String, usize>,
+    label_to_idx: &HashMap<BlockId, usize>,
 ) {
     let num_allocas = alloca_infos.len();
 
@@ -627,7 +626,7 @@ fn rename_block(
     phi_dests: &[HashMap<usize, Value>],
     dom_children: &[Vec<usize>],
     preds: &[Vec<usize>],
-    label_to_idx: &HashMap<String, usize>,
+    label_to_idx: &HashMap<BlockId, usize>,
 ) {
     // Record stack depths so we can pop on exit
     let stack_depths: Vec<usize> = def_stacks.iter().map(|s| s.len()).collect();
@@ -684,10 +683,10 @@ fn rename_block(
 
     // Fill in phi incoming values in successor blocks
     let succ_labels = get_successor_labels(&func.blocks[block_idx].terminator);
-    let current_block_label = func.blocks[block_idx].label.clone();
+    let current_block_label = func.blocks[block_idx].label;
 
-    for succ_label in succ_labels {
-        if let Some(&succ_idx) = label_to_idx.get(&succ_label) {
+    for succ_label in &succ_labels {
+        if let Some(&succ_idx) = label_to_idx.get(succ_label) {
             // For each phi in the successor block, fill in our value
             for inst in &mut func.blocks[succ_idx].instructions {
                 if let Instruction::Phi { dest, incoming, .. } = inst {
@@ -699,7 +698,7 @@ fn rename_block(
                     {
                         let current_val = def_stacks[alloca_idx].last().cloned()
                             .unwrap_or(Operand::Const(IrConst::zero(alloca_infos[alloca_idx].ty)));
-                        incoming.push((current_val, current_block_label.clone()));
+                        incoming.push((current_val, current_block_label));
                     }
                 } else {
                     break; // Phis are always at the start of a block
@@ -732,14 +731,14 @@ fn rename_block(
 }
 
 /// Get successor labels from a terminator.
-fn get_successor_labels(term: &Terminator) -> Vec<String> {
+fn get_successor_labels(term: &Terminator) -> Vec<BlockId> {
     match term {
-        Terminator::Branch(label) => vec![label.clone()],
+        Terminator::Branch(label) => vec![*label],
         Terminator::CondBranch { true_label, false_label, .. } => {
             if true_label == false_label {
-                vec![true_label.clone()]
+                vec![*true_label]
             } else {
-                vec![true_label.clone(), false_label.clone()]
+                vec![*true_label, *false_label]
             }
         }
         Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
@@ -813,7 +812,7 @@ mod tests {
     fn make_simple_function() -> IrFunction {
         let mut func = IrFunction::new("f".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 // %0 = alloca i32
                 Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
@@ -864,7 +863,7 @@ mod tests {
 
         // entry: alloca for param, alloca for x, branch
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 // %0 = alloca i32 (param)
                 Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
@@ -882,14 +881,14 @@ mod tests {
             ],
             terminator: Terminator::CondBranch {
                 cond: Operand::Value(Value(3)),
-                true_label: "then".to_string(),
-                false_label: "else".to_string(),
+                true_label: BlockId(1),
+                false_label: BlockId(2),
             },
         });
 
         // then: store 1 to x, branch to merge
         func.blocks.push(BasicBlock {
-            label: "then".to_string(),
+            label: BlockId(1),
             instructions: vec![
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(1)),
@@ -897,12 +896,12 @@ mod tests {
                     ty: IrType::I32,
                 },
             ],
-            terminator: Terminator::Branch("merge".to_string()),
+            terminator: Terminator::Branch(BlockId(3)),
         });
 
         // else: store 2 to x, branch to merge
         func.blocks.push(BasicBlock {
-            label: "else".to_string(),
+            label: BlockId(2),
             instructions: vec![
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(2)),
@@ -910,12 +909,12 @@ mod tests {
                     ty: IrType::I32,
                 },
             ],
-            terminator: Terminator::Branch("merge".to_string()),
+            terminator: Terminator::Branch(BlockId(3)),
         });
 
         // merge: load x, return
         func.blocks.push(BasicBlock {
-            label: "merge".to_string(),
+            label: BlockId(3),
             instructions: vec![
                 Instruction::Load { dest: Value(4), ptr: Value(1), ty: IrType::I32 },
             ],
@@ -943,7 +942,7 @@ mod tests {
         // An alloca whose address is passed to a function should not be promoted
         let mut func = IrFunction::new("f".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 Instruction::Store {
@@ -986,19 +985,19 @@ mod tests {
 
         // entry: allocas, init, branch to loop header
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 }, // sum
                 Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0 }, // i
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(0), ty: IrType::I32 },
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(1), ty: IrType::I32 },
             ],
-            terminator: Terminator::Branch("loop_header".to_string()),
+            terminator: Terminator::Branch(BlockId(1)),
         });
 
         // loop_header: load i, cmp, cond branch
         func.blocks.push(BasicBlock {
-            label: "loop_header".to_string(),
+            label: BlockId(1),
             instructions: vec![
                 Instruction::Load { dest: Value(2), ptr: Value(1), ty: IrType::I32 },
                 Instruction::Cmp {
@@ -1010,14 +1009,14 @@ mod tests {
             ],
             terminator: Terminator::CondBranch {
                 cond: Operand::Value(Value(3)),
-                true_label: "loop_body".to_string(),
-                false_label: "exit".to_string(),
+                true_label: BlockId(2),
+                false_label: BlockId(3),
             },
         });
 
         // loop_body: sum += i, i++, branch back
         func.blocks.push(BasicBlock {
-            label: "loop_body".to_string(),
+            label: BlockId(2),
             instructions: vec![
                 Instruction::Load { dest: Value(4), ptr: Value(0), ty: IrType::I32 },
                 Instruction::Load { dest: Value(5), ptr: Value(1), ty: IrType::I32 },
@@ -1036,12 +1035,12 @@ mod tests {
                 },
                 Instruction::Store { val: Operand::Value(Value(7)), ptr: Value(1), ty: IrType::I32 },
             ],
-            terminator: Terminator::Branch("loop_header".to_string()),
+            terminator: Terminator::Branch(BlockId(1)),
         });
 
         // exit: load sum, return
         func.blocks.push(BasicBlock {
-            label: "exit".to_string(),
+            label: BlockId(3),
             instructions: vec![
                 Instruction::Load { dest: Value(8), ptr: Value(0), ty: IrType::I32 },
             ],

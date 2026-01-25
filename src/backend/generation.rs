@@ -100,8 +100,9 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     cg.emit_store_params(func);
 
     // Generate basic blocks
+    let entry_label = func.blocks.first().map(|b| b.label);
     for block in &func.blocks {
-        if block.label != "entry" {
+        if Some(block.label) != entry_label {
             cg.state().emit(&format!("{}:", block.label));
         }
         for inst in &block.instructions {
@@ -201,7 +202,8 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
             // Phi nodes are resolved before codegen by lowering to copies
         }
         Instruction::LabelAddr { dest, label } => {
-            cg.emit_label_addr(dest, label);
+            let label_str = label.as_label();
+            cg.emit_label_addr(dest, &label_str);
         }
         Instruction::GetReturnF64Second { dest } => {
             cg.emit_get_return_f64_second(dest);
@@ -231,10 +233,13 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
             cg.emit_return(val.as_ref(), frame_size);
         }
         Terminator::Branch(label) => {
-            cg.emit_branch(label);
+            let label_str = label.as_label();
+            cg.emit_branch(&label_str);
         }
         Terminator::CondBranch { cond, true_label, false_label } => {
-            cg.emit_cond_branch(cond, true_label, false_label);
+            let true_str = true_label.as_label();
+            let false_str = false_label.as_label();
+            cg.emit_cond_branch(cond, &true_str, &false_str);
         }
         Terminator::IndirectBranch { target, .. } => {
             cg.emit_indirect_branch(target);

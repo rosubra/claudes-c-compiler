@@ -196,10 +196,10 @@ pub(super) enum LValue {
 /// A single level of switch statement context, pushed/popped as switches nest.
 #[derive(Debug)]
 pub(super) struct SwitchFrame {
-    pub cases: Vec<(i64, String)>,
+    pub cases: Vec<(i64, BlockId)>,
     /// GNU case ranges: (low, high, label)
-    pub case_ranges: Vec<(i64, i64, String)>,
-    pub default_label: Option<String>,
+    pub case_ranges: Vec<(i64, i64, BlockId)>,
+    pub default_label: Option<BlockId>,
     pub expr_type: IrType,
 }
 

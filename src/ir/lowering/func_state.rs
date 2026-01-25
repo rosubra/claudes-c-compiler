@@ -64,7 +64,7 @@ pub(super) struct FunctionBuildState {
     /// Instructions for the current basic block being built
     pub instrs: Vec<Instruction>,
     /// Label of the current basic block
-    pub current_label: String,
+    pub current_label: BlockId,
     /// Name of the function currently being lowered
     pub name: String,
     /// Return type of the function currently being lowered
@@ -76,13 +76,13 @@ pub(super) struct FunctionBuildState {
     /// Variable -> alloca mapping with metadata
     pub locals: HashMap<String, LocalInfo>,
     /// Loop context: labels to jump to on `break`
-    pub break_labels: Vec<String>,
+    pub break_labels: Vec<BlockId>,
     /// Loop context: labels to jump to on `continue`
-    pub continue_labels: Vec<String>,
+    pub continue_labels: Vec<BlockId>,
     /// Stack of switch statement contexts
     pub switch_stack: Vec<SwitchFrame>,
     /// User-defined goto labels -> unique IR labels
-    pub user_labels: HashMap<String, String>,
+    pub user_labels: HashMap<String, BlockId>,
     /// Scope stack for function-local variable undo tracking
     pub scope_stack: Vec<FuncScopeFrame>,
     /// Static local variable name -> mangled global name
@@ -101,7 +101,7 @@ impl FunctionBuildState {
         Self {
             blocks: Vec::new(),
             instrs: Vec::new(),
-            current_label: String::new(),
+            current_label: BlockId(0),
             name,
             return_type,
             return_is_bool,

@@ -973,7 +973,7 @@ impl Lowerer {
                 } else if let Expr::LabelAddr(label_name, _) = expr {
                     // GCC &&label extension: emit label address as GlobalAddr
                     let scoped_label = self.get_or_create_user_label(label_name);
-                    elements.push(GlobalInit::GlobalAddr(scoped_label));
+                    elements.push(GlobalInit::GlobalAddr(scoped_label.as_label()));
                 } else if let Some(val) = self.eval_const_expr(expr) {
                     elements.push(GlobalInit::Scalar(val));
                 } else if let Some(addr) = self.eval_global_addr_expr(expr) {

@@ -250,7 +250,7 @@ mod tests {
         // Function with: %0 = alloca i32, %1 = add 3, 4 (dead), store 42 to %0, load from %0
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 // Dead instruction: result %1 is never used
@@ -303,7 +303,7 @@ mod tests {
         // Calls should never be removed even if result is unused
         let mut func = IrFunction::new("test".to_string(), IrType::Void, vec![], false);
         func.blocks.push(BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::Call {
                     dest: Some(Value(0)),

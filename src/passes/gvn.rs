@@ -164,7 +164,7 @@ mod tests {
     fn test_commutative_cse() {
         // Test that a + b and b + a are recognized as the same expression
         let mut block = BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 // %0 = add %a, %b
                 Instruction::BinOp {
@@ -203,7 +203,7 @@ mod tests {
     fn test_non_commutative_not_cse() {
         // Test that a - b and b - a are NOT treated as the same
         let mut block = BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::BinOp {
                     dest: Value(2),
@@ -231,7 +231,7 @@ mod tests {
     fn test_constant_cse() {
         // Two identical constant expressions should be CSE'd
         let mut block = BasicBlock {
-            label: "entry".to_string(),
+            label: BlockId(0),
             instructions: vec![
                 Instruction::BinOp {
                     dest: Value(0),

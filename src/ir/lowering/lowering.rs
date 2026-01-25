@@ -480,8 +480,8 @@ impl Lowerer {
         v
     }
 
-    pub(super) fn fresh_label(&mut self, prefix: &str) -> String {
-        let l = format!(".L{}_{}", prefix, self.next_label);
+    pub(super) fn fresh_label(&mut self) -> BlockId {
+        let l = BlockId(self.next_label);
         self.next_label += 1;
         l
     }
@@ -581,14 +581,14 @@ impl Lowerer {
 
     pub(super) fn terminate(&mut self, term: Terminator) {
         let block = BasicBlock {
-            label: self.func_mut().current_label.clone(),
+            label: self.func_mut().current_label,
             instructions: std::mem::take(&mut self.func_mut().instrs),
             terminator: term,
         };
         self.func_mut().blocks.push(block);
     }
 
-    pub(super) fn start_block(&mut self, label: String) {
+    pub(super) fn start_block(&mut self, label: BlockId) {
         self.func_mut().current_label = label;
         self.func_mut().instrs.clear();
     }
@@ -625,7 +625,8 @@ impl Lowerer {
         let param_info = self.build_ir_params(func);
 
         // Step 3: Allocate parameters as locals (3-phase)
-        self.start_block("entry".to_string());
+        let entry_label = self.fresh_label();
+        self.start_block(entry_label);
         self.func_mut().sret_ptr = None;
         self.allocate_function_params(func, &param_info);
 
@@ -1272,13 +1273,13 @@ impl Lowerer {
     }
 
     /// Get or create a unique IR label for a user-defined goto label.
-    pub(super) fn get_or_create_user_label(&mut self, name: &str) -> String {
+    pub(super) fn get_or_create_user_label(&mut self, name: &str) -> BlockId {
         let key = format!("{}::{}", self.func_mut().name, name);
-        if let Some(label) = self.func_mut().user_labels.get(&key) {
-            label.clone()
+        if let Some(&label) = self.func_mut().user_labels.get(&key) {
+            label
         } else {
-            let label = self.fresh_label(&format!("user_{}", name));
-            self.func_mut().user_labels.insert(key, label.clone());
+            let label = self.fresh_label();
+            self.func_mut().user_labels.insert(key, label);
             label
         }
     }

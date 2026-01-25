@@ -768,7 +768,7 @@ impl Lowerer {
             Stmt::Return(expr, _span) => {
                 let op = expr.as_ref().map(|e| self.lower_return_expr(e));
                 self.terminate(Terminator::Return(op));
-                let label = self.fresh_label("post_ret");
+                let label = self.fresh_label();
                 self.start_block(label);
             }
             Stmt::Expr(Some(expr)) => {
@@ -780,59 +780,59 @@ impl Lowerer {
             }
             Stmt::If(cond, then_stmt, else_stmt, _span) => {
                 let cond_val = self.lower_condition_expr(cond);
-                let then_label = self.fresh_label("then");
-                let else_label = self.fresh_label("else");
-                let end_label = self.fresh_label("endif");
+                let then_label = self.fresh_label();
+                let else_label = self.fresh_label();
+                let end_label = self.fresh_label();
 
                 if else_stmt.is_some() {
                     self.terminate(Terminator::CondBranch {
                         cond: cond_val,
-                        true_label: then_label.clone(),
-                        false_label: else_label.clone(),
+                        true_label: then_label,
+                        false_label: else_label,
                     });
                 } else {
                     self.terminate(Terminator::CondBranch {
                         cond: cond_val,
-                        true_label: then_label.clone(),
-                        false_label: end_label.clone(),
+                        true_label: then_label,
+                        false_label: end_label,
                     });
                 }
 
                 // Then block
                 self.start_block(then_label);
                 self.lower_stmt(then_stmt);
-                self.terminate(Terminator::Branch(end_label.clone()));
+                self.terminate(Terminator::Branch(end_label));
 
                 // Else block
                 if let Some(else_stmt) = else_stmt {
                     self.start_block(else_label);
                     self.lower_stmt(else_stmt);
-                    self.terminate(Terminator::Branch(end_label.clone()));
+                    self.terminate(Terminator::Branch(end_label));
                 }
 
                 self.start_block(end_label);
             }
             Stmt::While(cond, body, _span) => {
-                let cond_label = self.fresh_label("while_cond");
-                let body_label = self.fresh_label("while_body");
-                let end_label = self.fresh_label("while_end");
+                let cond_label = self.fresh_label();
+                let body_label = self.fresh_label();
+                let end_label = self.fresh_label();
 
-                self.func_mut().break_labels.push(end_label.clone());
-                self.func_mut().continue_labels.push(cond_label.clone());
+                self.func_mut().break_labels.push(end_label);
+                self.func_mut().continue_labels.push(cond_label);
 
-                self.terminate(Terminator::Branch(cond_label.clone()));
+                self.terminate(Terminator::Branch(cond_label));
 
                 self.start_block(cond_label);
                 let cond_val = self.lower_condition_expr(cond);
                 self.terminate(Terminator::CondBranch {
                     cond: cond_val,
-                    true_label: body_label.clone(),
-                    false_label: end_label.clone(),
+                    true_label: body_label,
+                    false_label: end_label,
                 });
 
                 self.start_block(body_label);
                 self.lower_stmt(body);
-                let label = self.func().continue_labels.last().unwrap().clone(); self.terminate(Terminator::Branch(label));
+                let label = *self.func().continue_labels.last().unwrap(); self.terminate(Terminator::Branch(label));
 
                 self.func_mut().break_labels.pop();
                 self.func_mut().continue_labels.pop();
@@ -857,33 +857,33 @@ impl Lowerer {
                     }
                 }
 
-                let cond_label = self.fresh_label("for_cond");
-                let body_label = self.fresh_label("for_body");
-                let inc_label = self.fresh_label("for_inc");
-                let end_label = self.fresh_label("for_end");
+                let cond_label = self.fresh_label();
+                let body_label = self.fresh_label();
+                let inc_label = self.fresh_label();
+                let end_label = self.fresh_label();
 
-                self.func_mut().break_labels.push(end_label.clone());
-                self.func_mut().continue_labels.push(inc_label.clone());
+                self.func_mut().break_labels.push(end_label);
+                self.func_mut().continue_labels.push(inc_label);
 
-                self.terminate(Terminator::Branch(cond_label.clone()));
+                self.terminate(Terminator::Branch(cond_label));
 
                 // Condition
-                self.start_block(cond_label.clone());
+                self.start_block(cond_label);
                 if let Some(cond) = cond {
                     let cond_val = self.lower_condition_expr(cond);
                     self.terminate(Terminator::CondBranch {
                         cond: cond_val,
-                        true_label: body_label.clone(),
-                        false_label: end_label.clone(),
+                        true_label: body_label,
+                        false_label: end_label,
                     });
                 } else {
-                    self.terminate(Terminator::Branch(body_label.clone()));
+                    self.terminate(Terminator::Branch(body_label));
                 }
 
                 // Body
                 self.start_block(body_label);
                 self.lower_stmt(body);
-                self.terminate(Terminator::Branch(inc_label.clone()));
+                self.terminate(Terminator::Branch(inc_label));
 
                 // Increment
                 self.start_block(inc_label);
@@ -903,25 +903,25 @@ impl Lowerer {
                 }
             }
             Stmt::DoWhile(body, cond, _span) => {
-                let body_label = self.fresh_label("do_body");
-                let cond_label = self.fresh_label("do_cond");
-                let end_label = self.fresh_label("do_end");
+                let body_label = self.fresh_label();
+                let cond_label = self.fresh_label();
+                let end_label = self.fresh_label();
 
-                self.func_mut().break_labels.push(end_label.clone());
-                self.func_mut().continue_labels.push(cond_label.clone());
+                self.func_mut().break_labels.push(end_label);
+                self.func_mut().continue_labels.push(cond_label);
 
-                self.terminate(Terminator::Branch(body_label.clone()));
+                self.terminate(Terminator::Branch(body_label));
 
-                self.start_block(body_label.clone());
+                self.start_block(body_label);
                 self.lower_stmt(body);
-                self.terminate(Terminator::Branch(cond_label.clone()));
+                self.terminate(Terminator::Branch(cond_label));
 
                 self.start_block(cond_label);
                 let cond_val = self.lower_condition_expr(cond);
                 self.terminate(Terminator::CondBranch {
                     cond: cond_val,
                     true_label: body_label,
-                    false_label: end_label.clone(),
+                    false_label: end_label,
                 });
 
                 self.func_mut().break_labels.pop();
@@ -930,16 +930,16 @@ impl Lowerer {
                 self.start_block(end_label);
             }
             Stmt::Break(_span) => {
-                if let Some(label) = self.func_mut().break_labels.last().cloned() {
+                if let Some(&label) = self.func_mut().break_labels.last() {
                     self.terminate(Terminator::Branch(label));
-                    let dead = self.fresh_label("post_break");
+                    let dead = self.fresh_label();
                     self.start_block(dead);
                 }
             }
             Stmt::Continue(_span) => {
-                if let Some(label) = self.func_mut().continue_labels.last().cloned() {
+                if let Some(&label) = self.func_mut().continue_labels.last() {
                     self.terminate(Terminator::Branch(label));
-                    let dead = self.fresh_label("post_continue");
+                    let dead = self.fresh_label();
                     self.start_block(dead);
                 }
             }
@@ -972,9 +972,9 @@ impl Lowerer {
                     ty: IrType::I64,
                 });
 
-                let dispatch_label = self.fresh_label("switch_dispatch");
-                let end_label = self.fresh_label("switch_end");
-                let body_label = self.fresh_label("switch_body");
+                let dispatch_label = self.fresh_label();
+                let end_label = self.fresh_label();
+                let body_label = self.fresh_label();
 
                 // Push switch context
                 self.func_mut().switch_stack.push(SwitchFrame {
@@ -983,28 +983,28 @@ impl Lowerer {
                     default_label: None,
                     expr_type: switch_expr_ty,
                 });
-                self.func_mut().break_labels.push(end_label.clone());
+                self.func_mut().break_labels.push(end_label);
 
                 // Jump to dispatch (which will be emitted after the body)
-                self.terminate(Terminator::Branch(dispatch_label.clone()));
+                self.terminate(Terminator::Branch(dispatch_label));
 
                 // Lower the switch body - case/default stmts will register
                 // their labels in switch_cases/switch_default
-                self.start_block(body_label.clone());
+                self.start_block(body_label);
                 self.lower_stmt(body);
                 // Fall off end of switch body -> go to end
-                self.terminate(Terminator::Branch(end_label.clone()));
+                self.terminate(Terminator::Branch(end_label));
 
                 // Pop switch context and collect the case/default info
                 let switch_frame = self.func_mut().switch_stack.pop();
                 self.func_mut().break_labels.pop();
                 let cases = switch_frame.as_ref().map(|f| f.cases.clone()).unwrap_or_default();
                 let case_ranges = switch_frame.as_ref().map(|f| f.case_ranges.clone()).unwrap_or_default();
-                let default_label = switch_frame.as_ref().and_then(|f| f.default_label.clone());
+                let default_label = switch_frame.as_ref().and_then(|f| f.default_label);
 
                 // Now emit the dispatch chain: a series of comparison blocks
                 // that check each case value and branch accordingly.
-                let fallback = default_label.unwrap_or_else(|| end_label.clone());
+                let fallback = default_label.unwrap_or(end_label);
                 let total_checks = cases.len() + case_ranges.len();
 
                 self.start_block(dispatch_label);
@@ -1027,15 +1027,15 @@ impl Lowerer {
 
                         check_idx += 1;
                         let next_check = if check_idx < total_checks {
-                            self.fresh_label("switch_check")
+                            self.fresh_label()
                         } else {
-                            fallback.clone()
+                            fallback
                         };
 
                         self.terminate(Terminator::CondBranch {
                             cond: Operand::Value(cmp_result),
-                            true_label: case_label.clone(),
-                            false_label: next_check.clone(),
+                            true_label: *case_label,
+                            false_label: next_check,
                         });
 
                         if check_idx < total_checks {
@@ -1067,15 +1067,15 @@ impl Lowerer {
 
                         check_idx += 1;
                         let next_check = if check_idx < total_checks {
-                            self.fresh_label("switch_check")
+                            self.fresh_label()
                         } else {
-                            fallback.clone()
+                            fallback
                         };
 
                         self.terminate(Terminator::CondBranch {
                             cond: Operand::Value(and_result),
-                            true_label: range_label.clone(),
-                            false_label: next_check.clone(),
+                            true_label: *range_label,
+                            false_label: next_check,
                         });
 
                         if check_idx < total_checks {
@@ -1108,16 +1108,16 @@ impl Lowerer {
                 }
 
                 // Create a label for this case
-                let label = self.fresh_label("case");
+                let label = self.fresh_label();
 
                 // Register this case with the enclosing switch
                 if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.cases.push((case_val, label.clone()));
+                    frame.cases.push((case_val, label));
                 }
 
                 // Terminate current block and start the case block.
                 // The previous case falls through to this one (C semantics).
-                self.terminate(Terminator::Branch(label.clone()));
+                self.terminate(Terminator::Branch(label));
                 self.start_block(label);
                 self.lower_stmt(stmt);
             }
@@ -1153,48 +1153,48 @@ impl Lowerer {
                 }
 
                 // Create a label for this case range
-                let label = self.fresh_label("case_range");
+                let label = self.fresh_label();
 
                 // Register with the enclosing switch
                 if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.case_ranges.push((low_val, high_val, label.clone()));
+                    frame.case_ranges.push((low_val, high_val, label));
                 }
 
                 // Fallthrough from previous case
-                self.terminate(Terminator::Branch(label.clone()));
+                self.terminate(Terminator::Branch(label));
                 self.start_block(label);
                 self.lower_stmt(stmt);
             }
             Stmt::Default(stmt, _span) => {
-                let label = self.fresh_label("default");
+                let label = self.fresh_label();
 
                 // Register as default with enclosing switch
                 if let Some(frame) = self.func_mut().switch_stack.last_mut() {
-                    frame.default_label = Some(label.clone());
+                    frame.default_label = Some(label);
                 }
 
                 // Fallthrough from previous case
-                self.terminate(Terminator::Branch(label.clone()));
+                self.terminate(Terminator::Branch(label));
                 self.start_block(label);
                 self.lower_stmt(stmt);
             }
             Stmt::Goto(label, _span) => {
                 let scoped_label = self.get_or_create_user_label(label);
                 self.terminate(Terminator::Branch(scoped_label));
-                let dead = self.fresh_label("post_goto");
+                let dead = self.fresh_label();
                 self.start_block(dead);
             }
             Stmt::GotoIndirect(expr, _span) => {
                 let target = self.lower_expr(expr);
                 // Collect all known user labels as possible targets
-                let possible_targets: Vec<String> = self.func_mut().user_labels.values().cloned().collect();
+                let possible_targets: Vec<BlockId> = self.func_mut().user_labels.values().copied().collect();
                 self.terminate(Terminator::IndirectBranch { target, possible_targets });
-                let dead = self.fresh_label("post_indirect_goto");
+                let dead = self.fresh_label();
                 self.start_block(dead);
             }
             Stmt::Label(name, stmt, _span) => {
                 let label = self.get_or_create_user_label(name);
-                self.terminate(Terminator::Branch(label.clone()));
+                self.terminate(Terminator::Branch(label));
                 self.start_block(label);
                 self.lower_stmt(stmt);
             }

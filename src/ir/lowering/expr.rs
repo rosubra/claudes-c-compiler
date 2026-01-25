@@ -509,27 +509,27 @@ impl Lowerer {
         if self.expr_is_pointer(else_expr) { else_ty = IrType::I64; }
         let common_ty = Self::common_type(then_ty, else_ty);
 
-        let then_label = self.fresh_label("ternary_then");
-        let else_label = self.fresh_label("ternary_else");
-        let end_label = self.fresh_label("ternary_end");
+        let then_label = self.fresh_label();
+        let else_label = self.fresh_label();
+        let end_label = self.fresh_label();
 
         self.terminate(Terminator::CondBranch {
             cond: cond_val,
-            true_label: then_label.clone(),
-            false_label: else_label.clone(),
+            true_label: then_label,
+            false_label: else_label,
         });
 
         self.start_block(then_label);
         let then_val = self.lower_expr(then_expr);
         let then_val = self.emit_implicit_cast(then_val, then_ty, common_ty);
         self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
+        self.terminate(Terminator::Branch(end_label));
 
         self.start_block(else_label);
         let else_val = self.lower_expr(else_expr);
         let else_val = self.emit_implicit_cast(else_val, else_ty, common_ty);
         self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
+        self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
@@ -554,26 +554,26 @@ impl Lowerer {
             lhs: cond_val.clone(), rhs: zero, ty: IrType::I64,
         });
 
-        let then_label = self.fresh_label("gnu_cond_then");
-        let else_label = self.fresh_label("gnu_cond_else");
-        let end_label = self.fresh_label("gnu_cond_end");
+        let then_label = self.fresh_label();
+        let else_label = self.fresh_label();
+        let end_label = self.fresh_label();
 
         self.terminate(Terminator::CondBranch {
             cond: Operand::Value(cond_bool),
-            true_label: then_label.clone(),
-            false_label: else_label.clone(),
+            true_label: then_label,
+            false_label: else_label,
         });
 
         self.start_block(then_label);
         let then_val = self.emit_implicit_cast(cond_val, cond_ty, common_ty);
         self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
+        self.terminate(Terminator::Branch(end_label));
 
         self.start_block(else_label);
         let else_val = self.lower_expr(else_expr);
         let else_val = self.emit_implicit_cast(else_val, else_ty, common_ty);
         self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
+        self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
@@ -1243,9 +1243,8 @@ impl Lowerer {
         let result_alloca = self.fresh_value();
         self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
 
-        let prefix = if is_and { "and" } else { "or" };
-        let rhs_label = self.fresh_label(&format!("{}_rhs", prefix));
-        let end_label = self.fresh_label(&format!("{}_end", prefix));
+        let rhs_label = self.fresh_label();
+        let end_label = self.fresh_label();
 
         let lhs_val = self.lower_condition_expr(lhs);
 
@@ -1256,9 +1255,9 @@ impl Lowerer {
         });
 
         let (true_label, false_label) = if is_and {
-            (rhs_label.clone(), end_label.clone())
+            (rhs_label, end_label)
         } else {
-            (end_label.clone(), rhs_label.clone())
+            (end_label, rhs_label)
         };
         self.terminate(Terminator::CondBranch { cond: lhs_val, true_label, false_label });
 
@@ -1266,7 +1265,7 @@ impl Lowerer {
         let rhs_val = self.lower_condition_expr(rhs);
         let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(IrConst::I64(0)), IrType::I64);
         self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 });
-        self.terminate(Terminator::Branch(end_label.clone()));
+        self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
