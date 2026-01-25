@@ -1,0 +1,64 @@
+High-Impact Runtime Performance Improvements
+Priority: HIGH
+
+Profiling zlib shows our generated code is ~8x slower than GCC (-O2).
+The main bottlenecks are:
+
+1. STACK-CENTRIC CODEGEN MODEL
+   Our codegen generates ~5x more assembly than GCC for the same source.
+   Root cause: every IR value gets a stack slot, and most operations
+   route through load-from-stack -> compute -> store-to-stack.
+
+   Key metric for deflate.c:
+   - Our compiler: 23,500 lines of assembly, 9,889 stack loads, 9,889 stack stores
+   - GCC -O2: 4,864 lines of assembly
+
+   Fix: The register allocator only uses 5 callee-saved registers (rbx, r12-r15).
+   It should also use caller-saved registers (rdi, rsi, rdx, r8-r11) in regions
+   without function calls. This is the single biggest performance opportunity.
+
+2. STRUCT FIELD ACCESS OVERHEAD
+   Every struct field access (ptr + offset) generates:
+     movq %rdi, %rax         ; load ptr
+     movq $180, %rcx          ; load constant offset
+     addq %rcx, %rax          ; add
+   Instead of: leaq 180(%rdi), %rax   (1 instruction)
+
+   Fix: Detect GEP with constant offset and emit leaq/add-immediate.
+
+3. LOOP INDUCTION VARIABLE STRENGTH REDUCTION
+   Array accesses in loops compute index*stride every iteration:
+     movslq i, %rax; shlq $2, %rax; addq base, %rax; movl (%rax), ...
+   Instead of incrementing a pointer: addq $4, %rdi; movl (%rdi), ...
+
+   Fix: Add a loop strength reduction pass that converts i*stride+base
+   to an incremented pointer.
+
+4. REDUNDANT SIGN EXTENSIONS
+   The lowering emits Cast i32->i64 for array indices even when the
+   value is already 64-bit. The codegen then emits redundant movslq/cltq.
+   The peephole catches some but not all cases.
+
+   Fix: Track value widths in the IR and eliminate redundant casts.
+
+5. REDUNDANT REGISTER-REGISTER MOVES
+   Many patterns like: movq %rax, %r14; movq %r14, %r15
+   These arise because the codegen model routes through %rax as
+   accumulator, then copies to callee-saved registers.
+
+   Fix: Better peephole patterns, or teach the register allocator
+   to avoid the accumulator roundtrip for register-to-register ops.
+
+These are ordered by estimated impact. Item 1 alone could provide 2-4x speedup.
+
+Relationship to other ideas:
+- register_allocator.txt: describes remaining register allocator work (item 1)
+- high_value_location_abstraction.txt: ValueLocation enum for items 1 and 5
+- optimization_passes_future.txt: lists strength reduction as future pass (item 3)
+
+Key files:
+- src/backend/regalloc.rs (current linear scan allocator)
+- src/backend/liveness.rs (live interval computation)
+- src/backend/x86/codegen/codegen.rs (GEP emission, instruction selection)
+- src/backend/x86/codegen/peephole.rs (redundant move elimination)
+- src/passes/simplify.rs (algebraic simplification, redundant cast elimination)
