@@ -74,6 +74,22 @@ pub enum GlobalInit {
     Compound(Vec<GlobalInit>),
 }
 
+impl GlobalInit {
+    /// Returns the byte size of this initializer element in a compound context.
+    /// Used when flattening nested Compound elements into a parent Compound.
+    pub fn byte_size(&self) -> usize {
+        match self {
+            GlobalInit::Scalar(_) => 1,
+            GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+            GlobalInit::Compound(inner) => inner.len(),
+            GlobalInit::Array(vals) => vals.len(),
+            GlobalInit::Zero => 0,
+            GlobalInit::String(s) => s.len(),
+            GlobalInit::WideString(ws) => ws.len() * 4,
+        }
+    }
+}
+
 /// An IR function.
 #[derive(Debug)]
 pub struct IrFunction {

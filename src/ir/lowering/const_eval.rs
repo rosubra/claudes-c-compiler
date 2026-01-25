@@ -494,9 +494,9 @@ impl Lowerer {
                                 current_layout = match &f.ty {
                                     CType::Struct(key) | CType::Union(key) => {
                                         self.types.struct_layouts.get(key).cloned()
-                                            .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                                            .unwrap_or_else(StructLayout::empty)
                                     }
-                                    _ => StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false },
+                                    _ => StructLayout::empty(),
                                 };
                                 found = true;
                                 break;

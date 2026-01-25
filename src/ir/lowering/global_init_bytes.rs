@@ -1127,7 +1127,7 @@ impl Lowerer {
         match ty {
             CType::Struct(key) | CType::Union(key) => {
                 self.types.struct_layouts.get(key).cloned()
-                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: matches!(ty, CType::Union(_)), is_transparent_union: false })
+                    .unwrap_or(if matches!(ty, CType::Union(_)) { StructLayout::empty_union() } else { StructLayout::empty() })
             }
             _ => unreachable!("get_composite_layout called on non-composite type"),
         }

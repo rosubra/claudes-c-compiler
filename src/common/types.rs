@@ -95,6 +95,31 @@ pub struct StructLayout {
     pub is_transparent_union: bool,
 }
 
+impl StructLayout {
+    /// Create an empty StructLayout (zero-size, no fields).
+    /// Used as a fallback when a struct/union layout is not found.
+    pub fn empty() -> Self {
+        StructLayout {
+            fields: Vec::new(),
+            size: 0,
+            align: 1,
+            is_union: false,
+            is_transparent_union: false,
+        }
+    }
+
+    /// Create an empty union StructLayout (zero-size, no fields, is_union=true).
+    pub fn empty_union() -> Self {
+        StructLayout {
+            fields: Vec::new(),
+            size: 0,
+            align: 1,
+            is_union: true,
+            is_transparent_union: false,
+        }
+    }
+}
+
 /// Result of resolving a designated initializer field name.
 #[derive(Debug, Clone)]
 pub enum InitFieldResolution {

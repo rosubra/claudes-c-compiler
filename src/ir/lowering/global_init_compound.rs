@@ -154,43 +154,12 @@ impl Lowerer {
                         let sub_layout = match &layout.fields[fi].ty {
                             CType::Struct(key) | CType::Union(key) => {
                                 self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                                    .unwrap_or_else(StructLayout::empty)
                             }
                             _ => unreachable!(),
                         };
                         let sub_items = vec![sub_item];
-                        if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
-                            let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
-                            if let GlobalInit::Compound(nested_elems) = nested {
-                                let mut emitted = 0;
-                                for elem in nested_elems {
-                                    if emitted >= field_size { break; }
-                                    let elem_size = match &elem {
-                                        GlobalInit::Scalar(_) => 1,
-                                        GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
-                                        GlobalInit::Compound(inner) => inner.len(),
-                                        GlobalInit::Array(vals) => vals.len(),
-                                        GlobalInit::Zero => 0,
-                                        GlobalInit::String(s) => s.len(),
-                                        GlobalInit::WideString(ws) => ws.len() * 4,
-                                    };
-                                    elements.push(elem);
-                                    emitted += elem_size;
-                                }
-                                while emitted < field_size {
-                                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-                                    emitted += 1;
-                                }
-                            } else {
-                                push_zero_bytes(&mut elements, field_size);
-                            }
-                        } else {
-                            let mut bytes = vec![0u8; field_size];
-                            self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
-                            for b in &bytes {
-                                elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
-                            }
-                        }
+                        self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                     } else if has_nested_designator {
                         self.emit_compound_nested_designator_init(
                             &mut elements, item, &layout.fields[fi].ty, field_size);
@@ -211,42 +180,11 @@ impl Lowerer {
                         let sub_layout = match &layout.fields[fi].ty {
                             CType::Struct(key) | CType::Union(key) => {
                                 self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                                    .unwrap_or_else(StructLayout::empty)
                             }
                             _ => unreachable!(),
                         };
-                        if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
-                            let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
-                            if let GlobalInit::Compound(nested_elems) = nested {
-                                let mut emitted = 0;
-                                for elem in nested_elems {
-                                    if emitted >= field_size { break; }
-                                    let elem_size = match &elem {
-                                        GlobalInit::Scalar(_) => 1,
-                                        GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
-                                        GlobalInit::Compound(inner) => inner.len(),
-                                        GlobalInit::Array(vals) => vals.len(),
-                                        GlobalInit::Zero => 0,
-                                        GlobalInit::String(s) => s.len(),
-                                        GlobalInit::WideString(ws) => ws.len() * 4,
-                                    };
-                                    elements.push(elem);
-                                    emitted += elem_size;
-                                }
-                                while emitted < field_size {
-                                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-                                    emitted += 1;
-                                }
-                            } else {
-                                push_zero_bytes(&mut elements, field_size);
-                            }
-                        } else {
-                            let mut bytes = vec![0u8; field_size];
-                            self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
-                            for b in &bytes {
-                                elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
-                            }
-                        }
+                        self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                     } else {
                         self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
                     }
@@ -346,7 +284,7 @@ impl Lowerer {
                 let sub_layout = match anon_field_ty {
                     CType::Struct(key) | CType::Union(key) => {
                         self.types.struct_layouts.get(key).cloned()
-                            .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                            .unwrap_or_else(StructLayout::empty)
                     }
                     _ => { push_zero_bytes(&mut elements, field_size); current_offset += field_size; fi += 1; continue; }
                 };
@@ -390,43 +328,12 @@ impl Lowerer {
                     let sub_layout = match &layout.fields[fi].ty {
                         CType::Struct(key) | CType::Union(key) => {
                             self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                                .unwrap_or_else(StructLayout::empty)
                         }
                         _ => unreachable!(),
                     };
                     let sub_items = vec![sub_item];
-                    if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
-                        let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
-                        if let GlobalInit::Compound(nested_elems) = nested {
-                            let mut emitted = 0;
-                            for elem in nested_elems {
-                                if emitted >= field_size { break; }
-                                let elem_size = match &elem {
-                                    GlobalInit::Scalar(_) => 1,
-                                    GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
-                                    GlobalInit::Compound(inner) => inner.len(),
-                                    GlobalInit::Array(vals) => vals.len(),
-                                    GlobalInit::Zero => 0,
-                                    GlobalInit::String(s) => s.len(),
-                                    GlobalInit::WideString(ws) => ws.len() * 4,
-                                };
-                                elements.push(elem);
-                                emitted += elem_size;
-                            }
-                            while emitted < field_size {
-                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-                                emitted += 1;
-                            }
-                        } else {
-                            push_zero_bytes(&mut elements, field_size);
-                        }
-                    } else {
-                        let mut bytes = vec![0u8; field_size];
-                        self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
-                        for b in &bytes {
-                            elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
-                        }
-                    }
+                    self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                 } else if has_nested_field_designator {
                     self.emit_compound_nested_designator_field(
                         &mut elements, item, &layout.fields[fi].ty, field_size);
@@ -468,42 +375,11 @@ impl Lowerer {
                     let sub_layout = match &layout.fields[fi].ty {
                         CType::Struct(key) | CType::Union(key) => {
                             self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
+                                .unwrap_or_else(StructLayout::empty)
                         }
                         _ => unreachable!(),
                     };
-                    if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
-                        let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
-                        if let GlobalInit::Compound(nested_elems) = nested {
-                            let mut emitted = 0;
-                            for elem in nested_elems {
-                                if emitted >= field_size { break; }
-                                let elem_size = match &elem {
-                                    GlobalInit::Scalar(_) => 1,
-                                    GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
-                                    GlobalInit::Compound(inner) => inner.len(),
-                                    GlobalInit::Array(vals) => vals.len(),
-                                    GlobalInit::Zero => 0,
-                                    GlobalInit::String(s) => s.len(),
-                                    GlobalInit::WideString(ws) => ws.len() * 4,
-                                };
-                                elements.push(elem);
-                                emitted += elem_size;
-                            }
-                            while emitted < field_size {
-                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-                                emitted += 1;
-                            }
-                        } else {
-                            push_zero_bytes(&mut elements, field_size);
-                        }
-                    } else {
-                        let mut bytes = vec![0u8; field_size];
-                        self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
-                        for b in &bytes {
-                            elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
-                        }
-                    }
+                    self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                 } else {
                     // flat array init
                     self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
@@ -522,6 +398,47 @@ impl Lowerer {
         }
 
         GlobalInit::Compound(elements)
+    }
+
+    /// Emit a sub-struct's initialization into compound elements, choosing between
+    /// compound (relocation-aware) and byte-level approaches based on whether any
+    /// field contains address expressions.
+    fn emit_sub_struct_to_compound(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        sub_items: &[InitializerItem],
+        sub_layout: &StructLayout,
+        field_size: usize,
+    ) {
+        if self.struct_init_has_addr_fields(sub_items, sub_layout) {
+            let nested = self.lower_struct_global_init_compound(sub_items, sub_layout);
+            Self::append_nested_compound(elements, nested, field_size);
+        } else {
+            let mut bytes = vec![0u8; field_size];
+            self.fill_struct_global_bytes(sub_items, sub_layout, &mut bytes, 0);
+            for b in &bytes {
+                elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
+            }
+        }
+    }
+
+    /// Append the elements from a nested GlobalInit::Compound into `elements`,
+    /// padding/truncating to exactly `target_size` bytes.
+    fn append_nested_compound(elements: &mut Vec<GlobalInit>, nested: GlobalInit, target_size: usize) {
+        if let GlobalInit::Compound(nested_elems) = nested {
+            let mut emitted = 0;
+            for elem in nested_elems {
+                if emitted >= target_size { break; }
+                emitted += elem.byte_size();
+                elements.push(elem);
+            }
+            while emitted < target_size {
+                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                emitted += 1;
+            }
+        } else {
+            push_zero_bytes(elements, target_size);
+        }
     }
 
     /// Emit a single field initializer in compound (relocation-aware) mode.
@@ -707,42 +624,7 @@ impl Lowerer {
         if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field_ty_clone) {
             // Check if the sub-init has address fields that need compound handling
             let sub_items = vec![sub_item];
-            if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
-                // Recursively handle as compound
-                let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
-                if let GlobalInit::Compound(nested_elems) = nested {
-                    // Pad/truncate to field_size
-                    let mut emitted = 0;
-                    for elem in nested_elems {
-                        if emitted >= field_size { break; }
-                        let elem_size = match &elem {
-                            GlobalInit::Scalar(_) => 1,
-                            GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
-                            GlobalInit::Compound(inner) => inner.len(),
-                            GlobalInit::Array(vals) => vals.len(),
-                            GlobalInit::Zero => 0,
-                            GlobalInit::String(s) => s.len(),
-                            GlobalInit::WideString(ws) => ws.len() * 4,
-                        };
-                        elements.push(elem);
-                        emitted += elem_size;
-                    }
-                    // Zero-fill any remaining bytes
-                    while emitted < field_size {
-                        elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-                        emitted += 1;
-                    }
-                } else {
-                    push_zero_bytes(elements, field_size);
-                }
-            } else {
-                // No address fields - use byte-level approach
-                let mut bytes = vec![0u8; field_size];
-                self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
-                for b in &bytes {
-                    elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
-                }
-            }
+            self.emit_sub_struct_to_compound(elements, &sub_items, &sub_layout, field_size);
         } else {
             // Not a struct/union - shouldn't have nested designators, but handle gracefully
             let field_is_pointer = matches!(field_ty, CType::Pointer(_) | CType::Function(_));
