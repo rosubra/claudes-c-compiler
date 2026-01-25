@@ -91,7 +91,7 @@ See `git log` for full history. Key milestones:
 | libffi | PASS | All 6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args, closure) |
 | musl | PASS | All 6 tests pass (hello, malloc, string_ops, math, io, environ) |
 | tcc | PASS | All 78 tests pass (version, hello world, tests2 suite) |
-| mbedtls | PARTIAL | 4/7 pass; ECP and RSA tests fail (self-test and individual tests) |
+| mbedtls | PARTIAL | 6/7 pass; ARIA-ECB-128 encryption fails (register allocator liveness issue) |
 | jq | PASS | All 12 tests pass (version, filters, regex, map/select, keys, group_by, recursive descent, try-catch, reduce) |
 | liburing | FAIL | Builds but all 5 runtime tests fail (io_uring init returns -1) |
 | postgres | FAIL | Builds but initdb fails at runtime |
