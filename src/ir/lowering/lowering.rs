@@ -640,6 +640,12 @@ impl Lowerer {
         // Use the return type from the already-registered signature, which has
         // complex ABI overrides applied (e.g., ComplexDouble -> F64, ComplexFloat -> F64/F32).
         if let Some(sig) = self.func_meta.sigs.get(&func.name) {
+            // Two-register struct returns (9-16 bytes) are packed into I128 by the
+            // IR lowering (Shl+Or), so the function's return type must be I128 to
+            // ensure the codegen uses the register-pair return path (a0+a1).
+            if sig.two_reg_ret_size.is_some() {
+                return IrType::I128;
+            }
             return sig.return_type;
         }
 

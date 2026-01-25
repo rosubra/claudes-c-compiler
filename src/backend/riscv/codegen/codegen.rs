@@ -1458,7 +1458,13 @@ impl ArchCodegen for RiscvCodegen {
                         }
                         for qi in 0..n_dwords {
                             let src_off = (qi * 8) as i64;
-                            self.state.emit_fmt(format_args!("    ld t1, {}(t0)", src_off));
+                            if Self::fits_imm12(src_off) {
+                                self.state.emit_fmt(format_args!("    ld t1, {}(t0)", src_off));
+                            } else {
+                                self.state.emit_fmt(format_args!("    li t6, {}", src_off));
+                                self.state.emit("    add t6, t0, t6");
+                                self.state.emit("    ld t1, 0(t6)");
+                            }
                             self.emit_store_to_sp("t1", offset as i64 + src_off, "sd");
                         }
                         offset += n_dwords * 8;

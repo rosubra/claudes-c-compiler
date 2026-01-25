@@ -79,11 +79,11 @@ See `git log` for full history. Key milestones:
 | sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
-| libsodium | PARTIAL | 6/7 tests pass; "box" test fails (runtime issue) |
+| libsodium | PASS | All 7 tests pass |
+| redis | PASS | All 3 tests pass (version, cli, SET/GET roundtrip) |
 | liburing | PARTIAL | Builds successfully; tests require io_uring kernel support |
 | mquickjs | PARTIAL | Builds; JS tests fail at runtime (JS parser error) |
-| redis | PARTIAL | Builds; version/cli work; server has bind EFAULT issue (same as postgres) |
-| postgres | PARTIAL | Build succeeds; initdb fully works; `make check` temp-install succeeds but postmaster has bind EFAULT issue |
+| postgres | PARTIAL | Build succeeds; `make check` initdb fails during regression |
 
 ### What's Not Yet Implemented
 - Some GNU C extensions in system headers (partial `__attribute__` support)

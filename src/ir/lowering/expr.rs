@@ -759,6 +759,15 @@ impl Lowerer {
             }
         }
 
+        // Get the element CType for dispatching struct/union/array element init
+        let elem_ctype = {
+            let ctype = self.type_spec_to_ctype(type_spec);
+            match ctype {
+                CType::Array(elem_ct, _) => Some((*elem_ct).clone()),
+                _ => None,
+            }
+        };
+
         let has_designators = items.iter().any(|item| !item.designators.is_empty());
         if has_designators {
             self.zero_init_alloca(alloca, size);
@@ -772,21 +781,65 @@ impl Lowerer {
                 }
             }
 
-            let val = match &item.init {
-                Initializer::Expr(expr) => self.lower_expr(expr),
-                _ => Operand::Const(IrConst::I64(0)),
-            };
+            let elem_offset = current_idx * elem_size;
 
-            if current_idx == 0 && items.len() == 1 && elem_size == size {
-                self.emit(Instruction::Store { val, ptr: alloca, ty });
-            } else {
-                let offset_val = Operand::Const(IrConst::I64((current_idx * elem_size) as i64));
-                let elem_ptr = self.fresh_value();
-                self.emit(Instruction::GetElementPtr {
-                    dest: elem_ptr, base: alloca, offset: offset_val, ty,
-                });
-                let store_ty = Self::ir_type_for_size(elem_size);
-                self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty });
+            match &item.init {
+                Initializer::Expr(expr) => {
+                    let val = self.lower_expr(expr);
+                    if current_idx == 0 && items.len() == 1 && elem_size == size {
+                        self.emit(Instruction::Store { val, ptr: alloca, ty });
+                    } else {
+                        let offset_val = Operand::Const(IrConst::I64(elem_offset as i64));
+                        let elem_ptr = self.fresh_value();
+                        self.emit(Instruction::GetElementPtr {
+                            dest: elem_ptr, base: alloca, offset: offset_val, ty,
+                        });
+                        let store_ty = Self::ir_type_for_size(elem_size);
+                        self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty });
+                    }
+                }
+                Initializer::List(sub_items) => {
+                    // Handle list initializers for array elements (e.g., struct or nested array)
+                    match &elem_ctype {
+                        Some(CType::Struct(key)) | Some(CType::Union(key)) => {
+                            if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                // Zero-init the element region first for partial initialization
+                                self.zero_init_region(alloca, elem_offset, elem_size);
+                                self.emit_struct_init(sub_items, alloca, &sub_layout, elem_offset);
+                            }
+                        }
+                        Some(CType::Array(inner_elem_ty, Some(inner_size))) => {
+                            // Nested array: initialize element-by-element
+                            let inner_elem_size = self.resolve_ctype_size(inner_elem_ty);
+                            let inner_ir_ty = IrType::from_ctype(inner_elem_ty);
+                            let inner_is_bool = **inner_elem_ty == CType::Bool;
+                            for (si, sub_item) in sub_items.iter().enumerate() {
+                                if si >= *inner_size { break; }
+                                if let Initializer::Expr(e) = &sub_item.init {
+                                    let inner_offset = elem_offset + si * inner_elem_size;
+                                    self.emit_init_expr_to_offset_bool(
+                                        e, alloca, inner_offset, inner_ir_ty, inner_is_bool,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            // Scalar array element with list init: use the first expression
+                            if let Some(first) = sub_items.first() {
+                                if let Initializer::Expr(expr) = &first.init {
+                                    let val = self.lower_expr(expr);
+                                    let offset_val = Operand::Const(IrConst::I64(elem_offset as i64));
+                                    let elem_ptr = self.fresh_value();
+                                    self.emit(Instruction::GetElementPtr {
+                                        dest: elem_ptr, base: alloca, offset: offset_val, ty,
+                                    });
+                                    let store_ty = Self::ir_type_for_size(elem_size);
+                                    self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty });
+                                }
+                            }
+                        }
+                    }
+                }
             }
             current_idx += 1;
         }
@@ -953,9 +1006,17 @@ impl Lowerer {
                 }
             }
             Initializer::List(items) => {
-                if let Some(ref layout) = struct_layout {
-                    self.zero_init_alloca(alloca, layout.size);
-                    self.emit_struct_init(items, alloca, layout, 0);
+                // Check if the type is an array — even arrays of structs should
+                // use the array init path, not emit_struct_init.
+                let ctype = self.type_spec_to_ctype(type_spec);
+                let is_array = matches!(ctype, CType::Array(_, _));
+                if !is_array {
+                    if let Some(ref layout) = struct_layout {
+                        self.zero_init_alloca(alloca, layout.size);
+                        self.emit_struct_init(items, alloca, layout, 0);
+                    } else {
+                        self.init_array_compound_literal(alloca, items, type_spec, ty, size);
+                    }
                 } else {
                     self.init_array_compound_literal(alloca, items, type_spec, ty, size);
                 }
