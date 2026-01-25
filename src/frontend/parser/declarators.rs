@@ -8,7 +8,7 @@
 
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::Parser;
+use super::parser::{ModeKind, Parser};
 
 impl Parser {
     pub(super) fn parse_declarator(&mut self) -> (Option<String>, Vec<DerivedDeclarator>) {
@@ -17,8 +17,8 @@ impl Parser {
     }
 
     /// Parse a declarator, also returning attribute info:
-    /// (name, derived, has_mode_ti, has_common, aligned_value)
-    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, bool, bool, Option<usize>) {
+    /// (name, derived, mode_kind, has_common, aligned_value)
+    pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, Option<ModeKind>, bool, Option<usize>) {
         let mut derived = Vec::new();
 
         let mut pre_aligned: Option<usize> = None;
@@ -82,7 +82,7 @@ impl Parser {
         // Combine using inside-out rule
         let combined = self.combine_declarator_parts(derived, inner_derived, outer_suffixes);
 
-        let (_, post_aligned, has_mode_ti, has_common) = self.parse_gcc_attributes();
+        let (_, post_aligned, mode_kind, has_common) = self.parse_gcc_attributes();
         let aligned = match (pre_aligned, post_aligned) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
@@ -90,7 +90,7 @@ impl Parser {
             (None, None) => None,
         };
 
-        (name, combined, has_mode_ti, has_common, aligned)
+        (name, combined, mode_kind, has_common, aligned)
     }
 
     /// Determine if a '(' starts a parenthesized declarator vs. a parameter list.

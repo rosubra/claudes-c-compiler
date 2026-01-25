@@ -7,7 +7,7 @@
 
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::Parser;
+use super::parser::{ModeKind, Parser};
 
 impl Parser {
     /// Parse a complete type specifier. Returns None if no type specifier found.
@@ -35,7 +35,7 @@ impl Parser {
         let mut has_union = false;
         let mut has_enum = false;
         let mut has_typeof = false;
-        let mut has_mode_ti = false;
+        let mut mode_kind: Option<ModeKind> = None;
         let mut typedef_name: Option<String> = None;
         let mut any_base_specifier = false;
 
@@ -87,8 +87,8 @@ impl Parser {
                 }
                 // GNU extensions
                 TokenKind::Attribute => {
-                    let (_, aligned, mode_ti, _) = self.parse_gcc_attributes();
-                    has_mode_ti = has_mode_ti || mode_ti;
+                    let (_, aligned, mk, _) = self.parse_gcc_attributes();
+                    mode_kind = mode_kind.or(mk);
                     if let Some(a) = aligned {
                         self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
                     }
@@ -208,7 +208,7 @@ impl Parser {
         self.collect_trailing_specifiers(
             &mut has_char, &mut has_short, &mut has_int, &mut long_count,
             &mut has_signed, &mut has_unsigned, &mut has_float, &mut has_double,
-            &mut has_complex, &mut has_mode_ti,
+            &mut has_complex, &mut mode_kind,
         );
 
         if !any_base_specifier {
@@ -225,15 +225,9 @@ impl Parser {
         // Handle trailing _Complex, qualifiers, and storage classes after the base type
         let base = self.consume_trailing_qualifiers(base);
 
-        // Apply __attribute__((mode(TI))): transform type to 128-bit
-        let base = if has_mode_ti {
-            match base {
-                TypeSpecifier::Int | TypeSpecifier::Long | TypeSpecifier::LongLong
-                | TypeSpecifier::Signed => TypeSpecifier::Int128,
-                TypeSpecifier::UnsignedInt | TypeSpecifier::UnsignedLong
-                | TypeSpecifier::UnsignedLongLong | TypeSpecifier::Unsigned => TypeSpecifier::UnsignedInt128,
-                other => other,
-            }
+        // Apply __attribute__((mode(...))): transform type to the specified bit-width
+        let base = if let Some(mk) = mode_kind {
+            mk.apply(base)
         } else {
             base
         };
@@ -249,7 +243,7 @@ impl Parser {
         has_char: &mut bool, has_short: &mut bool, has_int: &mut bool,
         long_count: &mut u32, has_signed: &mut bool, has_unsigned: &mut bool,
         has_float: &mut bool, has_double: &mut bool, has_complex: &mut bool,
-        has_mode_ti: &mut bool,
+        mode_kind: &mut Option<ModeKind>,
     ) {
         if *has_char || *has_short || *has_int || *long_count > 0 {
             loop {
@@ -267,8 +261,8 @@ impl Parser {
                     TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Attribute => {
-                        let (_, aligned, mode_ti, _) = self.parse_gcc_attributes();
-                        *has_mode_ti = *has_mode_ti || mode_ti;
+                        let (_, aligned, mk, _) = self.parse_gcc_attributes();
+                        *mode_kind = mode_kind.or(mk);
                         if let Some(a) = aligned {
                             self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
                         }

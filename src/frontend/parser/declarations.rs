@@ -10,7 +10,7 @@
 use crate::common::source::Span;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::Parser;
+use super::parser::{ModeKind, Parser};
 
 impl Parser {
     pub(super) fn parse_external_decl(&mut self) -> Option<ExternalDecl> {
@@ -105,9 +105,9 @@ impl Parser {
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
         self.consume_post_type_qualifiers();
 
-        let (name, derived, decl_mode_ti, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
-        let (post_ctor, post_dtor, post_mode_ti, post_common, post_aligned) = self.parse_asm_and_attributes();
-        let mode_ti = decl_mode_ti || post_mode_ti;
+        let (name, derived, decl_mode, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
+        let (post_ctor, post_dtor, post_mode, post_common, post_aligned) = self.parse_asm_and_attributes();
+        let mode_kind = decl_mode.or(post_mode);
         let is_common = decl_common || post_common;
         // Merge alignment from _Alignas (type specifier), declarator attrs, and post-declarator attrs.
         // Per C11, alignment can only increase (6.7.5), so take the maximum.
@@ -124,9 +124,9 @@ impl Parser {
         let visibility = self.parsing_visibility.take();
         let section = self.parsing_section.take();
 
-        // Apply __attribute__((mode(TI))): transform type to 128-bit
-        let type_spec = if mode_ti {
-            Self::apply_mode_ti(type_spec)
+        // Apply __attribute__((mode(...))): transform type to specified bit-width
+        let type_spec = if let Some(mk) = mode_kind {
+            mk.apply(type_spec)
         } else {
             type_spec
         };
@@ -467,12 +467,12 @@ impl Parser {
             return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, is_transparent_union: false, alignment: None, span: start });
         }
 
-        let mut mode_ti = false;
+        let mut mode_kind: Option<ModeKind> = None;
         let mut alignment: Option<usize> = None;
         loop {
-            let (name, derived, decl_mode_ti, _, decl_aligned) = self.parse_declarator_with_attrs();
-            let (skip_mode_ti, skip_aligned) = self.skip_asm_and_attributes();
-            mode_ti = decl_mode_ti || skip_mode_ti || mode_ti;
+            let (name, derived, decl_mode, _, decl_aligned) = self.parse_declarator_with_attrs();
+            let (skip_mode, skip_aligned) = self.skip_asm_and_attributes();
+            mode_kind = mode_kind.or(decl_mode).or(skip_mode);
             // Merge alignment from declarator and post-declarator attributes
             for a in [decl_aligned, skip_aligned].iter().copied().flatten() {
                 alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
@@ -503,9 +503,9 @@ impl Parser {
             }
         }
 
-        // Apply __attribute__((mode(TI))): transform type to 128-bit
-        let type_spec = if mode_ti {
-            Self::apply_mode_ti(type_spec)
+        // Apply __attribute__((mode(...))): transform type to specified bit-width
+        let type_spec = if let Some(mk) = mode_kind {
+            mk.apply(type_spec)
         } else {
             type_spec
         };
@@ -750,15 +750,4 @@ impl Parser {
         }
     }
 
-    /// Apply __attribute__((mode(TI))) to a type specifier: promotes to 128-bit integer.
-    fn apply_mode_ti(ts: TypeSpecifier) -> TypeSpecifier {
-        match ts {
-            TypeSpecifier::Int | TypeSpecifier::Long | TypeSpecifier::LongLong
-            | TypeSpecifier::Signed => TypeSpecifier::Int128,
-            TypeSpecifier::UnsignedInt | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::UnsignedLongLong | TypeSpecifier::Unsigned => TypeSpecifier::UnsignedInt128,
-            // If already 128-bit or unknown, leave as is
-            other => other,
-        }
-    }
 }

@@ -14,6 +14,35 @@ use crate::common::source::Span;
 use crate::frontend::lexer::token::{Token, TokenKind};
 use super::ast::*;
 
+/// GCC __attribute__((mode(...))) integer mode specifier.
+/// Controls the bit-width of an integer type regardless of the base type keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModeKind {
+    QI,  // 8-bit (quarter integer)
+    HI,  // 16-bit (half integer)
+    SI,  // 32-bit (single integer)
+    DI,  // 64-bit (double integer)
+    TI,  // 128-bit (tetra integer)
+}
+
+impl ModeKind {
+    /// Apply mode to a type specifier, preserving signedness.
+    pub(super) fn apply(self, ts: TypeSpecifier) -> TypeSpecifier {
+        let is_unsigned = matches!(ts,
+            TypeSpecifier::UnsignedInt | TypeSpecifier::UnsignedLong
+            | TypeSpecifier::UnsignedLongLong | TypeSpecifier::Unsigned
+            | TypeSpecifier::UnsignedChar | TypeSpecifier::UnsignedShort
+        );
+        match self {
+            ModeKind::QI => if is_unsigned { TypeSpecifier::UnsignedChar } else { TypeSpecifier::Char },
+            ModeKind::HI => if is_unsigned { TypeSpecifier::UnsignedShort } else { TypeSpecifier::Short },
+            ModeKind::SI => if is_unsigned { TypeSpecifier::UnsignedInt } else { TypeSpecifier::Int },
+            ModeKind::DI => if is_unsigned { TypeSpecifier::UnsignedLongLong } else { TypeSpecifier::LongLong },
+            ModeKind::TI => if is_unsigned { TypeSpecifier::UnsignedInt128 } else { TypeSpecifier::Int128 },
+        }
+    }
+}
+
 /// Recursive descent parser for C.
 pub struct Parser {
     pub(super) tokens: Vec<Token>,
@@ -287,11 +316,11 @@ impl Parser {
     }
 
     /// Parse __attribute__((...)) and __extension__, returning struct attribute flags.
-    /// Returns (is_packed, aligned_value).
-    pub(super) fn parse_gcc_attributes(&mut self) -> (bool, Option<usize>, bool, bool) {
+    /// Returns (is_packed, aligned_value, mode_kind, is_common).
+    pub(super) fn parse_gcc_attributes(&mut self) -> (bool, Option<usize>, Option<ModeKind>, bool) {
         let mut is_packed = false;
         let mut _aligned = None;
-        let mut has_mode_ti = false;
+        let mut mode_kind: Option<ModeKind> = None;
         let mut is_common = false;
         loop {
             match self.peek() {
@@ -402,11 +431,21 @@ impl Parser {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.advance(); // consume (
-                                            // Check for TI mode (128-bit integer)
+                                            // Parse mode specifier: QI (8-bit), HI (16-bit),
+                                            // SI (32-bit), DI (64-bit), TI (128-bit)
                                             if let TokenKind::Identifier(mode_name) = self.peek() {
-                                                if mode_name == "TI" || mode_name == "__TI__" {
-                                                    has_mode_ti = true;
-                                                }
+                                                mode_kind = match mode_name.as_str() {
+                                                    "QI" | "__QI__" | "byte" | "__byte__" => Some(ModeKind::QI),
+                                                    "HI" | "__HI__" => Some(ModeKind::HI),
+                                                    "SI" | "__SI__" => Some(ModeKind::SI),
+                                                    "DI" | "__DI__" => Some(ModeKind::DI),
+                                                    "TI" | "__TI__" => Some(ModeKind::TI),
+                                                    // "word" = machine word size (64-bit on x86-64/aarch64/riscv64)
+                                                    "word" | "__word__" => Some(ModeKind::DI),
+                                                    // "pointer" = pointer-sized (same as word on 64-bit)
+                                                    "pointer" | "__pointer__" => Some(ModeKind::DI),
+                                                    _ => mode_kind, // unknown mode, leave unchanged
+                                                };
                                             }
                                             // Skip to closing paren
                                             while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
@@ -452,22 +491,22 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_packed, _aligned, has_mode_ti, is_common)
+        (is_packed, _aligned, mode_kind, is_common)
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (has_mode_ti, aligned_value).
-    pub(super) fn skip_asm_and_attributes(&mut self) -> (bool, Option<usize>) {
-        let (_, _, mode_ti, _, aligned) = self.parse_asm_and_attributes();
-        (mode_ti, aligned)
+    /// Returns (mode_kind, aligned_value).
+    pub(super) fn skip_asm_and_attributes(&mut self) -> (Option<ModeKind>, Option<usize>) {
+        let (_, _, mk, _, aligned) = self.parse_asm_and_attributes();
+        (mk, aligned)
     }
 
     /// Parse __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (is_constructor, is_destructor, has_mode_ti, is_common, aligned_value).
-    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, bool, bool, Option<usize>) {
+    /// Returns (is_constructor, is_destructor, mode_kind, is_common, aligned_value).
+    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, Option<ModeKind>, bool, Option<usize>) {
         let mut is_constructor = false;
         let mut is_destructor = false;
-        let mut has_mode_ti = false;
+        let mut mode_kind: Option<ModeKind> = None;
         let mut has_common = false;
         let mut aligned: Option<usize> = None;
         loop {
@@ -480,8 +519,8 @@ impl Parser {
                     }
                 }
                 TokenKind::Attribute => {
-                    let (_, attr_aligned, mode_ti, common) = self.parse_gcc_attributes();
-                    has_mode_ti = has_mode_ti || mode_ti;
+                    let (_, attr_aligned, mk, common) = self.parse_gcc_attributes();
+                    mode_kind = mode_kind.or(mk);
                     has_common = has_common || common;
                     if let Some(a) = attr_aligned {
                         aligned = Some(aligned.map_or(a, |prev| prev.max(a)));
@@ -495,7 +534,7 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_constructor, is_destructor, has_mode_ti, has_common, aligned)
+        (is_constructor, is_destructor, mode_kind, has_common, aligned)
     }
 
     /// Parse the ((...)) parameter list of __attribute__.
