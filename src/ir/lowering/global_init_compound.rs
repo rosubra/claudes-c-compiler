@@ -151,13 +151,8 @@ impl Lowerer {
                             designators: item.designators.clone(),
                             init: item.init.clone(),
                         };
-                        let sub_layout = match &layout.fields[fi].ty {
-                            CType::Struct(key) | CType::Union(key) => {
-                                self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or_else(StructLayout::empty)
-                            }
-                            _ => unreachable!(),
-                        };
+                        let sub_layout = self.get_struct_layout_for_ctype(&layout.fields[fi].ty)
+                            .unwrap_or_else(StructLayout::empty);
                         let sub_items = vec![sub_item];
                         self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                     } else if has_nested_designator {
@@ -177,13 +172,8 @@ impl Lowerer {
                                 init: item.init.clone(),
                             }
                         }).collect();
-                        let sub_layout = match &layout.fields[fi].ty {
-                            CType::Struct(key) | CType::Union(key) => {
-                                self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or_else(StructLayout::empty)
-                            }
-                            _ => unreachable!(),
-                        };
+                        let sub_layout = self.get_struct_layout_for_ctype(&layout.fields[fi].ty)
+                            .unwrap_or_else(StructLayout::empty);
                         self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                     } else {
                         self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
@@ -281,12 +271,9 @@ impl Lowerer {
                 // Anonymous member with designated inits targeting its sub-fields.
                 // Recursively lower the anonymous struct/union with the synthetic items.
                 let anon_field_ty = &layout.fields[fi].ty;
-                let sub_layout = match anon_field_ty {
-                    CType::Struct(key) | CType::Union(key) => {
-                        self.types.struct_layouts.get(key).cloned()
-                            .unwrap_or_else(StructLayout::empty)
-                    }
-                    _ => { push_zero_bytes(&mut elements, field_size); current_offset += field_size; fi += 1; continue; }
+                let sub_layout = match self.get_struct_layout_for_ctype(anon_field_ty) {
+                    Some(l) => l,
+                    None => { push_zero_bytes(&mut elements, field_size); current_offset += field_size; fi += 1; continue; }
                 };
                 let sub_init = self.lower_struct_global_init_compound(&anon_items_for_fi, &sub_layout);
                 if let GlobalInit::Compound(sub_elems) = sub_init {
@@ -325,13 +312,8 @@ impl Lowerer {
                         designators: item.designators.clone(),
                         init: item.init.clone(),
                     };
-                    let sub_layout = match &layout.fields[fi].ty {
-                        CType::Struct(key) | CType::Union(key) => {
-                            self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or_else(StructLayout::empty)
-                        }
-                        _ => unreachable!(),
-                    };
+                    let sub_layout = self.get_struct_layout_for_ctype(&layout.fields[fi].ty)
+                        .unwrap_or_else(StructLayout::empty);
                     let sub_items = vec![sub_item];
                     self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                 } else if has_nested_field_designator {
@@ -372,13 +354,8 @@ impl Lowerer {
                             init: item.init.clone(),
                         }
                     }).collect();
-                    let sub_layout = match &layout.fields[fi].ty {
-                        CType::Struct(key) | CType::Union(key) => {
-                            self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or_else(StructLayout::empty)
-                        }
-                        _ => unreachable!(),
-                    };
+                    let sub_layout = self.get_struct_layout_for_ctype(&layout.fields[fi].ty)
+                        .unwrap_or_else(StructLayout::empty);
                     self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
                 } else {
                     // flat array init
@@ -441,6 +418,33 @@ impl Lowerer {
         }
     }
 
+    /// Build a GlobalInit::Compound from a byte buffer and sorted pointer relocation ranges.
+    /// Emits byte-level I8 constants for non-pointer regions and GlobalAddr entries at
+    /// pointer offsets. This is the shared finalization step for struct arrays with
+    /// pointer fields.
+    fn build_compound_from_bytes_and_ptrs(
+        bytes: Vec<u8>,
+        mut ptr_ranges: Vec<(usize, GlobalInit)>,
+        total_size: usize,
+    ) -> GlobalInit {
+        ptr_ranges.sort_by_key(|&(off, _)| off);
+        let mut compound_elements: Vec<GlobalInit> = Vec::new();
+        let mut pos = 0;
+        for (ptr_off, ref addr_init) in &ptr_ranges {
+            while pos < *ptr_off {
+                compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
+                pos += 1;
+            }
+            compound_elements.push(addr_init.clone());
+            pos += 8; // pointer is 8 bytes
+        }
+        while pos < total_size {
+            compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
+            pos += 1;
+        }
+        GlobalInit::Compound(compound_elements)
+    }
+
     /// Emit a single field initializer in compound (relocation-aware) mode.
     pub(super) fn emit_compound_field_init(
         &mut self,
@@ -493,25 +497,9 @@ impl Lowerer {
                     } else {
                         push_zero_bytes(elements, field_size);
                     }
-                } else if let Some(val) = self.eval_const_expr(expr) {
-                    // Scalar constant - coerce to field type and emit as bytes
-                    // _Bool fields: normalize (any nonzero -> 1) per C11 6.3.1.2
-                    let coerced = if *field_ty == CType::Bool {
-                        val.bool_normalize()
-                    } else {
-                        let field_ir_ty = IrType::from_ctype(field_ty);
-                        val.coerce_to(field_ir_ty)
-                    };
-                    self.push_const_as_bytes(elements, &coerced, field_size);
-                } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
-                    // String literal +/- offset expression - emit as relocation
-                    elements.push(addr_init);
-                } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                    // Address expression - emit as relocation
-                    elements.push(addr_init);
                 } else {
-                    // Unknown - zero fill
-                    push_zero_bytes(elements, field_size);
+                    // Scalar constant, string literal addr, global addr, or zero fallback
+                    self.emit_scalar_or_addr_field(elements, expr, field_ty, field_size);
                 }
             }
             Initializer::List(nested_items) => {
@@ -736,19 +724,7 @@ impl Lowerer {
             if ai >= arr_size { break; }
 
             if let Initializer::Expr(ref expr) = item.init {
-                if let Expr::StringLiteral(s, _) = expr {
-                    let label = self.intern_string_literal(s);
-                    elements.push(GlobalInit::GlobalAddr(label));
-                } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
-                    elements.push(addr_init);
-                } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                    elements.push(addr_init);
-                } else if let Some(val) = self.eval_const_expr(expr) {
-                    self.push_const_as_bytes(elements, &val, ptr_size);
-                } else {
-                    // zero
-                    push_zero_bytes(elements, ptr_size);
-                }
+                self.emit_expr_as_compound_element(elements, expr, ptr_size);
             } else {
                 // Nested list - zero fill this element
                 push_zero_bytes(elements, ptr_size);
@@ -796,18 +772,7 @@ impl Lowerer {
         for ai in 0..arr_size {
             if let Some(init) = index_inits[ai] {
                 if let Initializer::Expr(ref expr) = init {
-                    if let Expr::StringLiteral(s, _) = expr {
-                        let label = self.intern_string_literal(s);
-                        elements.push(GlobalInit::GlobalAddr(label));
-                    } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(val) = self.eval_const_expr(expr) {
-                        self.push_const_as_bytes(elements, &val, ptr_size);
-                    } else {
-                        push_zero_bytes(elements, ptr_size);
-                    }
+                    self.emit_expr_as_compound_element(elements, expr, ptr_size);
                 } else {
                     push_zero_bytes(elements, ptr_size);
                 }
@@ -851,18 +816,7 @@ impl Lowerer {
 
             if let Initializer::Expr(ref expr) = item.init {
                 if elem_is_pointer {
-                    if let Expr::StringLiteral(s, _) = expr {
-                        let label = self.intern_string_literal(s);
-                        elements.push(GlobalInit::GlobalAddr(label));
-                    } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(val) = self.eval_const_expr(expr) {
-                        self.push_const_as_bytes(elements, &val, ptr_size);
-                    } else {
-                        push_zero_bytes(elements, ptr_size);
-                    }
+                    self.emit_expr_as_compound_element(elements, expr, ptr_size);
                 } else {
                     if let Some(val) = self.eval_const_expr(expr) {
                         let elem_ir_ty = IrType::from_ctype(elem_ty);
@@ -899,6 +853,58 @@ impl Lowerer {
         };
         layout.resolve_init_field_idx(designator_name, current_field_idx, &self.types)
             .unwrap_or(current_field_idx)
+    }
+
+    /// Emit a single expression as a compound element: tries string literal interning,
+    /// string literal addr, global addr, then const eval, then zero-fill.
+    /// Used for pointer array elements and similar contexts where the expression
+    /// resolves to either an address relocation or a scalar constant.
+    fn emit_expr_as_compound_element(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        expr: &Expr,
+        element_size: usize,
+    ) {
+        if let Expr::StringLiteral(s, _) = expr {
+            let label = self.intern_string_literal(s);
+            elements.push(GlobalInit::GlobalAddr(label));
+        } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
+            elements.push(addr_init);
+        } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
+            elements.push(addr_init);
+        } else if let Some(val) = self.eval_const_expr(expr) {
+            self.push_const_as_bytes(elements, &val, element_size);
+        } else {
+            push_zero_bytes(elements, element_size);
+        }
+    }
+
+    /// Emit a scalar field value: tries const eval (with type coercion), then
+    /// string literal addr, global addr, then zero-fill.
+    /// Unlike emit_expr_as_compound_element, this first tries const eval and applies
+    /// type coercion (for _Bool normalization and field type matching).
+    fn emit_scalar_or_addr_field(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        expr: &Expr,
+        field_ty: &CType,
+        field_size: usize,
+    ) {
+        if let Some(val) = self.eval_const_expr(expr) {
+            let coerced = if *field_ty == CType::Bool {
+                val.bool_normalize()
+            } else {
+                let field_ir_ty = IrType::from_ctype(field_ty);
+                val.coerce_to(field_ir_ty)
+            };
+            self.push_const_as_bytes(elements, &coerced, field_size);
+        } else if let Some(addr_init) = self.eval_string_literal_addr_expr(expr) {
+            elements.push(addr_init);
+        } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
+            elements.push(addr_init);
+        } else {
+            push_zero_bytes(elements, field_size);
+        }
     }
 
     /// Resolve a pointer field's initializer expression to a GlobalInit.
@@ -950,7 +956,6 @@ impl Lowerer {
         array_dim_strides: &[usize],
     ) -> GlobalInit {
         let struct_size = layout.size;
-        let mut compound_elements: Vec<GlobalInit> = Vec::new();
         let mut bytes = vec![0u8; total_size];
         let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new();
 
@@ -959,23 +964,7 @@ impl Lowerer {
             &mut bytes, &mut ptr_ranges, 0, total_size,
         );
 
-        // Sort ptr_ranges by offset and emit byte stream with pointer relocations
-        ptr_ranges.sort_by_key(|&(off, _)| off);
-        let mut pos = 0;
-        for (ptr_off, ref addr_init) in &ptr_ranges {
-            while pos < *ptr_off {
-                compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
-                pos += 1;
-            }
-            compound_elements.push(addr_init.clone());
-            pos += 8;
-        }
-        while pos < total_size {
-            compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
-            pos += 1;
-        }
-
-        GlobalInit::Compound(compound_elements)
+        Self::build_compound_from_bytes_and_ptrs(bytes, ptr_ranges, total_size)
     }
 
     /// Recursively fill a multi-dimensional struct array into byte buffer + ptr_ranges.
@@ -1120,12 +1109,10 @@ impl Lowerer {
         //   - GlobalAddr for pointer fields
         let struct_size = layout.size;
         let total_size = num_elems * struct_size;
-        let mut compound_elements: Vec<GlobalInit> = Vec::new();
 
-        // Initialize with zero bytes
+        // Initialize with zero bytes and track pointer relocation ranges
         let mut bytes = vec![0u8; total_size];
-        // Track which byte ranges are pointer fields that need address relocations
-        let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new(); // (byte_offset, addr_init)
+        let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new();
 
         // Check if items use [N].field designated initializer pattern.
         // In this pattern, each item has designators like [Index(N), Field("name")]
@@ -1210,28 +1197,7 @@ impl Lowerer {
             );
         }
 
-        // Sort ptr_ranges by offset
-        ptr_ranges.sort_by_key(|&(off, _)| off);
-
-        // Emit the byte stream, replacing pointer-sized regions with GlobalAddr elements
-        let mut pos = 0;
-        for (ptr_off, ref addr_init) in &ptr_ranges {
-            // Emit bytes before this pointer
-            while pos < *ptr_off {
-                compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
-                pos += 1;
-            }
-            // Emit the pointer reference
-            compound_elements.push(addr_init.clone());
-            pos += 8; // pointer is 8 bytes
-        }
-        // Emit remaining bytes
-        while pos < total_size {
-            compound_elements.push(GlobalInit::Scalar(IrConst::I8(bytes[pos] as i8)));
-            pos += 1;
-        }
-
-        GlobalInit::Compound(compound_elements)
+        Self::build_compound_from_bytes_and_ptrs(bytes, ptr_ranges, total_size)
     }
 
     /// Emit a single struct field initialization into the byte buffer and ptr_ranges.

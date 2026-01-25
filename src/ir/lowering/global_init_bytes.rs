@@ -1122,14 +1122,17 @@ impl Lowerer {
     }
 
     /// Get the StructLayout for a composite (struct or union) CType.
+    /// Like `get_struct_layout_for_ctype` but returns a fallback empty layout instead of None.
+    /// Panics if called on a non-composite type.
     pub(super) fn get_composite_layout(&self, ty: &CType) -> StructLayout {
-        match ty {
-            CType::Struct(key) | CType::Union(key) => {
-                self.types.struct_layouts.get(key).cloned()
-                    .unwrap_or(if matches!(ty, CType::Union(_)) { StructLayout::empty_union() } else { StructLayout::empty() })
-            }
-            _ => unreachable!("get_composite_layout called on non-composite type"),
-        }
+        self.get_struct_layout_for_ctype(ty)
+            .unwrap_or_else(|| {
+                if matches!(ty, CType::Struct(_) | CType::Union(_)) {
+                    if matches!(ty, CType::Union(_)) { StructLayout::empty_union() } else { StructLayout::empty() }
+                } else {
+                    unreachable!("get_composite_layout called on non-composite type")
+                }
+            })
     }
 
     /// Push a constant value as individual bytes into a compound init element list.

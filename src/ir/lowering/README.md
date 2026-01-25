@@ -109,6 +109,13 @@ be fully serialized to a `Vec<u8>` byte buffer, which is simpler and more effici
 The **compound path** (`global_init_compound.rs`) also handles struct arrays with pointer
 fields via a hybrid approach: serializes scalar fields to bytes, collects pointer relocations
 separately, then merges them into a single `GlobalInit::Compound` vector. Key helpers:
+- `emit_expr_as_compound_element()` — Resolves an expression to a compound element: tries
+  string literal interning, string addr expr, global addr, const eval, then zero-fill.
+  Consolidates the resolve-to-GlobalInit cascade that previously appeared inline in 5+ places.
+- `emit_scalar_or_addr_field()` — Like the above but tries const eval first (with type coercion
+  for `_Bool` normalization), then falls back to address expressions.
+- `build_compound_from_bytes_and_ptrs()` — Merges a byte buffer and sorted pointer relocation
+  list into a `GlobalInit::Compound`. Used by both 1D and multidim struct array paths.
 - `write_expr_to_bytes_or_ptrs()` — Writes a scalar expression to either the byte buffer
   (for non-pointer types) or the ptr_ranges relocation list (for pointer/function types).
   Handles bitfields too. Eliminates duplicated is-ptr/bitfield/scalar dispatch.

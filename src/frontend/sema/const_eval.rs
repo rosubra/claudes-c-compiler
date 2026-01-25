@@ -336,8 +336,13 @@ impl<'a> SemaConstEval<'a> {
 
     /// Convert a TypeSpecifier to CType using sema's type resolution.
     fn type_spec_to_ctype(&self, spec: &TypeSpecifier) -> CType {
-        // Delegate to a simple inline conversion. For sema const_eval we need
-        // the basic type mapping but don't need the full TypeConvertContext trait.
+        // Handle typeof(expr) which requires expression type inference - the
+        // standalone ctype_from_type_spec function can't handle this because it
+        // lacks access to the symbol table and expression type checker.
+        if let TypeSpecifier::Typeof(expr) = spec {
+            return self.infer_expr_ctype(expr).unwrap_or(CType::Int);
+        }
+        // Delegate to a simple inline conversion for all other cases.
         ctype_from_type_spec(spec, self.types)
     }
 
