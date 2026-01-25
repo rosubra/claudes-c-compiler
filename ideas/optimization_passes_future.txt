@@ -7,7 +7,9 @@ The following passes are implemented and working:
 - Copy propagation (copy_prop.rs)
 - Dead code elimination (dce.rs)
 - Local value numbering / CSE (gvn.rs)
-- Algebraic simplification (simplify.rs)
+- Algebraic simplification + strength reduction (simplify.rs)
+  - Includes: mul/div/rem by power-of-2 -> shift/and,
+    redundant Cast elimination, GEP zero-offset elimination
 - x86-64 peephole optimizer (peephole.rs in backend/x86/codegen/)
 
 Next passes to add:
