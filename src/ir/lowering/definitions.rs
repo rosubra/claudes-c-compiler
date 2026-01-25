@@ -6,7 +6,6 @@
 //! metadata, and typedef helpers.
 
 use crate::common::fx_hash::FxHashMap;
-use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType};
 
@@ -170,48 +169,6 @@ pub(super) struct SwitchFrame {
     pub case_ranges: Vec<(i64, i64, BlockId)>,
     pub default_label: Option<BlockId>,
     pub expr_type: IrType,
-}
-
-/// Information about a function typedef (e.g., `typedef int func_t(int, int);`).
-/// Used to detect when a declaration like `func_t add;` is a function declaration
-/// rather than a variable declaration.
-#[derive(Debug, Clone)]
-pub struct FunctionTypedefInfo {
-    /// The return TypeSpecifier of the function typedef
-    pub return_type: TypeSpecifier,
-    /// Parameters of the function typedef
-    pub params: Vec<ParamDecl>,
-    /// Whether the function is variadic
-    pub variadic: bool,
-}
-
-/// Extract function pointer typedef info from a declarator with `FunctionPointer`
-/// derived declarators.
-///
-/// For typedefs like `typedef void *(*lua_Alloc)(void *, ...)`, finds the
-/// `FunctionPointer` derived and builds the return type. The last `Pointer` before
-/// `FunctionPointer` is the `(*)` indirection, not a return-type pointer.
-pub(super) fn extract_fptr_typedef_info(
-    base_type: &TypeSpecifier,
-    derived: &[DerivedDeclarator],
-) -> Option<FunctionTypedefInfo> {
-    let (params, variadic) = derived.iter().find_map(|d| {
-        if let DerivedDeclarator::FunctionPointer(p, v) = d { Some((p, v)) } else { None }
-    })?;
-    let ptr_count_before_fptr = derived.iter()
-        .take_while(|d| !matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-        .filter(|d| matches!(d, DerivedDeclarator::Pointer))
-        .count();
-    let ret_ptr_count = ptr_count_before_fptr.saturating_sub(1);
-    let mut return_type = base_type.clone();
-    for _ in 0..ret_ptr_count {
-        return_type = TypeSpecifier::Pointer(Box::new(return_type));
-    }
-    Some(FunctionTypedefInfo {
-        return_type,
-        params: params.clone(),
-        variadic: *variadic,
-    })
 }
 
 /// Consolidated function signature metadata.

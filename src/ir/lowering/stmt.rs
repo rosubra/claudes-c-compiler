@@ -2,7 +2,8 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType, StructLayout};
 use super::lowering::Lowerer;
-use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, LValue, extract_fptr_typedef_info};
+use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, LValue};
+use crate::frontend::sema::type_context::extract_fptr_typedef_info;
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {

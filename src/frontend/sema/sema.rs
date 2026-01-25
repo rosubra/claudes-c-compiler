@@ -16,7 +16,7 @@ use crate::common::types::{CType, FunctionType, StructLayout};
 use crate::common::source::Span;
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins;
-use crate::ir::lowering::{TypeContext, FunctionTypedefInfo};
+use super::type_context::{TypeContext, FunctionTypedefInfo};
 
 use std::cell::Cell;
 use crate::common::fx_hash::FxHashMap;

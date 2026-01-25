@@ -23,5 +23,6 @@ mod pointer_analysis;
 mod ref_collection;
 
 pub use lowering::Lowerer;
-pub use type_context::TypeContext;
-pub use definitions::FunctionTypedefInfo;
+// TypeContext and FunctionTypedefInfo are defined in frontend::sema::type_context.
+// Re-exported here for backward compatibility with external imports.
+pub use crate::frontend::sema::type_context::{TypeContext, FunctionTypedefInfo};
