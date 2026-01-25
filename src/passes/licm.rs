@@ -756,7 +756,7 @@ fn topological_sort_instructions(mut insts: Vec<Instruction>) -> Vec<Instruction
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::IrType;
+    use crate::common::types::{AddressSpace, IrType};
 
     /// Helper to create a simple loop: preheader -> header -> body -> header, header -> exit
     fn make_loop_func() -> IrFunction {
@@ -945,11 +945,8 @@ mod tests {
                     align: 4,
                     volatile: false,
                 },
-                Instruction::Store {
-                    val: Operand::Const(IrConst::I32(42)),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Store { val: Operand::Const(IrConst::I32(42)), ptr: Value(0), ty: IrType::I32,
+                seg_override: AddressSpace::Default },
                 Instruction::Copy {
                     dest: Value(1),
                     src: Operand::Const(IrConst::I32(0)),
@@ -970,11 +967,8 @@ mod tests {
                         (Operand::Value(Value(5)), BlockId(2)),
                     ],
                 },
-                Instruction::Load {
-                    dest: Value(3),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Load { dest: Value(3), ptr: Value(0), ty: IrType::I32,
+                seg_override: AddressSpace::Default },
                 Instruction::Cmp {
                     dest: Value(4),
                     op: IrCmpOp::Slt,
@@ -1049,11 +1043,8 @@ mod tests {
                     align: 4,
                     volatile: false,
                 },
-                Instruction::Store {
-                    val: Operand::Const(IrConst::I32(0)),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(0), ty: IrType::I32,
+                seg_override: AddressSpace::Default },
             ],
             terminator: Terminator::Branch(BlockId(1)),
         });
@@ -1062,11 +1053,8 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: BlockId(1),
             instructions: vec![
-                Instruction::Load {
-                    dest: Value(1),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I32,
+                seg_override: AddressSpace::Default },
                 Instruction::Cmp {
                     dest: Value(2),
                     op: IrCmpOp::Slt,
@@ -1093,11 +1081,8 @@ mod tests {
                     rhs: Operand::Const(IrConst::I32(1)),
                     ty: IrType::I32,
                 },
-                Instruction::Store {
-                    val: Operand::Value(Value(3)),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Store { val: Operand::Value(Value(3)), ptr: Value(0), ty: IrType::I32,
+                seg_override: AddressSpace::Default },
             ],
             terminator: Terminator::Branch(BlockId(1)),
         });

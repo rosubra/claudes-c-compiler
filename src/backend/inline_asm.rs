@@ -11,7 +11,7 @@
 //! orchestrates the phases.
 
 use crate::ir::ir::{BlockId, Operand, Value};
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use super::state::CodegenState;
 
 /// Operand classification for inline asm. Each backend classifies its constraints
@@ -61,11 +61,14 @@ pub struct AsmOperand {
     pub operand_type: IrType,
     /// Original constraint string, used for fallback decisions.
     pub constraint: String,
+    /// Segment prefix for memory operands (e.g., "%gs:" or "%fs:").
+    /// Set from AddressSpace for __seg_gs/__seg_fs pointer dereferences.
+    pub seg_prefix: String,
 }
 
 impl AsmOperand {
     pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
-        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, imm_symbol: None, operand_type: IrType::I64, constraint: String::new() }
+        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, imm_symbol: None, operand_type: IrType::I64, constraint: String::new(), seg_prefix: String::new() }
     }
 
     /// Copy register assignment and addressing metadata from another operand.
@@ -225,6 +228,19 @@ pub fn emit_inline_asm_common(
     operand_types: &[IrType],
     goto_labels: &[(String, BlockId)],
     input_symbols: &[Option<String>],
+) {
+    emit_inline_asm_common_impl(emitter, template, outputs, inputs, operand_types, goto_labels, input_symbols, &[]);
+}
+
+pub fn emit_inline_asm_common_impl(
+    emitter: &mut dyn InlineAsmEmitter,
+    template: &str,
+    outputs: &[(String, Value, Option<String>)],
+    inputs: &[(String, Operand, Option<String>)],
+    operand_types: &[IrType],
+    goto_labels: &[(String, BlockId)],
+    input_symbols: &[Option<String>],
+    seg_overrides: &[AddressSpace],
 ) {
     emitter.reset_scratch_state();
     let total_operands = outputs.len() + inputs.len();
@@ -426,6 +442,19 @@ pub fn emit_inline_asm_common(
         let op_idx = outputs.len() + i;
         if matches!(operands[op_idx].kind, AsmOperandKind::Memory) {
             emitter.resolve_memory_operand(&mut operands[op_idx], val);
+        }
+    }
+
+    // Apply segment prefixes to memory operands (for __seg_gs/__seg_fs)
+    if !seg_overrides.is_empty() {
+        for (i, op) in operands.iter_mut().enumerate() {
+            if i < seg_overrides.len() {
+                match seg_overrides[i] {
+                    AddressSpace::SegGs => op.seg_prefix = "%gs:".to_string(),
+                    AddressSpace::SegFs => op.seg_prefix = "%fs:".to_string(),
+                    AddressSpace::Default => {}
+                }
+            }
         }
     }
 

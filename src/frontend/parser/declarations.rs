@@ -8,6 +8,7 @@
 // are declared separately after the parameter name list.
 
 use crate::common::source::Span;
+use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::{ModeKind, Parser};
@@ -28,6 +29,7 @@ impl Parser {
         self.parsing_visibility = None;
         self.parsing_section = None;
         self.parsing_gnu_inline = false;
+        self.parsing_address_space = AddressSpace::Default;
 
         self.skip_gcc_extensions();
 
@@ -234,7 +236,7 @@ impl Parser {
                         );
                     }
                     DerivedDeclarator::Pointer => {
-                        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                        return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
                     }
                     _ => {}
                 }
@@ -243,7 +245,7 @@ impl Parser {
             for d in &derived[..fpos] {
                 match d {
                     DerivedDeclarator::Pointer => {
-                        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                        return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
                     }
                     DerivedDeclarator::Array(size_expr) => {
                         return_type = TypeSpecifier::Array(
@@ -259,7 +261,7 @@ impl Parser {
             for d in derived {
                 match d {
                     DerivedDeclarator::Pointer => {
-                        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                        return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
                     }
                     _ => break,
                 }
@@ -334,10 +336,10 @@ impl Parser {
             let ptr_count = pderived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
             // Apply all pointers except the syntax marker (last one)
             for _ in 0..ptr_count.saturating_sub(1) {
-                full_type = TypeSpecifier::Pointer(Box::new(full_type));
+                full_type = TypeSpecifier::Pointer(Box::new(full_type), AddressSpace::Default);
             }
             // Apply one Pointer wrapping for the function-pointer-to-pointer decay
-            full_type = TypeSpecifier::Pointer(Box::new(full_type));
+            full_type = TypeSpecifier::Pointer(Box::new(full_type), AddressSpace::Default);
             return (full_type, Some(fptr_params));
         }
 
@@ -345,7 +347,7 @@ impl Parser {
         // Apply pointers
         for d in pderived {
             if let DerivedDeclarator::Pointer = d {
-                full_type = TypeSpecifier::Pointer(Box::new(full_type));
+                full_type = TypeSpecifier::Pointer(Box::new(full_type), AddressSpace::Default);
             }
         }
         // Collect array dimensions
@@ -361,12 +363,12 @@ impl Parser {
             for dim in array_dims.iter().skip(1).rev() {
                 full_type = TypeSpecifier::Array(Box::new(full_type), dim.clone());
             }
-            full_type = TypeSpecifier::Pointer(Box::new(full_type));
+            full_type = TypeSpecifier::Pointer(Box::new(full_type), AddressSpace::Default);
         }
         // Function params (bare function names) decay to pointers
         for d in pderived {
             if let DerivedDeclarator::Function(_, _) = d {
-                full_type = TypeSpecifier::Pointer(Box::new(full_type));
+                full_type = TypeSpecifier::Pointer(Box::new(full_type), AddressSpace::Default);
             }
         }
         (full_type, None)
@@ -510,6 +512,7 @@ impl Parser {
         self.parsing_inline = false;
         self.parsing_const = false;
         self.parsing_volatile = false;
+        self.parsing_address_space = AddressSpace::Default;
         let type_spec = self.parse_type_specifier()?;
 
         self.consume_post_type_qualifiers();
@@ -780,6 +783,8 @@ impl Parser {
                 TokenKind::Volatile => { self.advance(); self.parsing_volatile = true; }
                 TokenKind::Restrict
                 | TokenKind::Inline | TokenKind::Register | TokenKind::Auto => { self.advance(); }
+                TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                 TokenKind::Alignas => {
                     self.advance();
                     if let Some(align) = self.parse_alignas_argument() {

@@ -18,6 +18,7 @@
 /// unify constant expression evaluation between sema and lowering.
 
 use crate::common::types::CType;
+use crate::common::types::AddressSpace;
 use crate::common::const_arith;
 use crate::ir::ir::IrConst;
 use crate::frontend::parser::ast::*;
@@ -319,7 +320,7 @@ impl<'a> SemaConstEval<'a> {
     fn extract_null_pointer_cast_with_offset(&self, expr: &Expr) -> Option<(TypeSpecifier, usize)> {
         match expr {
             Expr::Cast(ref type_spec, inner, _) => {
-                if let TypeSpecifier::Pointer(inner_ts) = type_spec {
+                if let TypeSpecifier::Pointer(inner_ts, _) = type_spec {
                     if const_arith::is_zero_expr(inner) {
                         return Some((*inner_ts.clone(), 0));
                     }
@@ -345,7 +346,7 @@ impl<'a> SemaConstEval<'a> {
     fn ctypes_compatible(&self, t1: &CType, t2: &CType) -> bool {
         // Strip qualifiers (CType doesn't carry them) and compare
         match (t1, t2) {
-            (CType::Pointer(a), CType::Pointer(b)) => self.ctypes_compatible(a, b),
+            (CType::Pointer(a, _), CType::Pointer(b, _)) => self.ctypes_compatible(a, b),
             (CType::Array(a, _), CType::Array(b, _)) => self.ctypes_compatible(a, b),
             _ => t1 == t2,
         }
@@ -485,7 +486,7 @@ impl<'a> SemaConstEval<'a> {
             TypeSpecifier::ComplexFloat => Some(8),
             TypeSpecifier::ComplexDouble => Some(16),
             TypeSpecifier::ComplexLongDouble => Some(32),
-            TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => Some(8),
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => Some(8),
             TypeSpecifier::Array(elem, Some(size)) => {
                 let elem_size = self.sizeof_type_spec(elem)?;
                 let n = self.eval_const_expr(size)?.to_i64()?;
@@ -605,7 +606,7 @@ impl<'a> SemaConstEval<'a> {
             TypeSpecifier::ComplexFloat => 4,
             TypeSpecifier::ComplexDouble => 8,
             TypeSpecifier::ComplexLongDouble => 16,
-            TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
             TypeSpecifier::Array(elem, _) => self.alignof_type_spec(elem),
             TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
                 if let Some(tag) = tag {
@@ -709,7 +710,7 @@ fn ctype_from_type_spec(spec: &TypeSpecifier, types: &TypeContext) -> CType {
         TypeSpecifier::Float => CType::Float,
         TypeSpecifier::Double => CType::Double,
         TypeSpecifier::LongDouble => CType::LongDouble,
-        TypeSpecifier::Pointer(inner) => CType::Pointer(Box::new(ctype_from_type_spec(inner, types))),
+        TypeSpecifier::Pointer(inner, addr_space) => CType::Pointer(Box::new(ctype_from_type_spec(inner, types)), *addr_space),
         TypeSpecifier::Array(elem, size) => {
             let elem_ty = ctype_from_type_spec(elem, types);
             // TODO: evaluate array size expression when available
@@ -747,7 +748,7 @@ fn ctype_from_type_spec(spec: &TypeSpecifier, types: &TypeContext) -> CType {
         TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
         TypeSpecifier::TypeofType(inner) => ctype_from_type_spec(inner, types),
         TypeSpecifier::FunctionPointer(_, _, _) => {
-            CType::Pointer(Box::new(CType::Void)) // function pointers are pointer-sized
+            CType::Pointer(Box::new(CType::Void), AddressSpace::Default) // function pointers are pointer-sized
         }
         _ => CType::Int, // fallback
     }
@@ -766,7 +767,7 @@ fn ctype_from_type_spec_with_derived(
     for d in derived {
         match d {
             DerivedDeclarator::Pointer => {
-                ty = CType::Pointer(Box::new(ty));
+                ty = CType::Pointer(Box::new(ty), AddressSpace::Default);
             }
             DerivedDeclarator::Array(Some(size_expr)) => {
                 let expr: &Expr = size_expr;
@@ -781,7 +782,7 @@ fn ctype_from_type_spec_with_derived(
                 ty = CType::Array(Box::new(ty), None);
             }
             DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _) => {
-                ty = CType::Pointer(Box::new(CType::Void)); // function -> pointer
+                ty = CType::Pointer(Box::new(CType::Void), AddressSpace::Default); // function -> pointer
             }
         }
     }

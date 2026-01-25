@@ -264,7 +264,7 @@ fn has_side_effects(inst: &Instruction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::IrType;
+    use crate::common::types::{AddressSpace, IrType};
 
     fn make_simple_func() -> IrFunction {
         // Function with: %0 = alloca i32, %1 = add 3, 4 (dead), store 42 to %0, load from %0
@@ -281,16 +281,8 @@ mod tests {
                     rhs: Operand::Const(IrConst::I32(4)),
                     ty: IrType::I32,
                 },
-                Instruction::Store {
-                    val: Operand::Const(IrConst::I32(42)),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
-                Instruction::Load {
-                    dest: Value(2),
-                    ptr: Value(0),
-                    ty: IrType::I32,
-                },
+                Instruction::Store { val: Operand::Const(IrConst::I32(42)), ptr: Value(0), ty: IrType::I32, seg_override: AddressSpace::Default },
+                Instruction::Load { dest: Value(2), ptr: Value(0), ty: IrType::I32, seg_override: AddressSpace::Default },
             ],
             terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
         });

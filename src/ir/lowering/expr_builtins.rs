@@ -11,7 +11,7 @@
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins::{self, BuiltinKind, BuiltinIntrinsic};
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -311,14 +311,14 @@ impl Lowerer {
                     };
                     let alloca = self.fresh_value();
                     self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val: real_val, ptr: alloca, ty: comp_ty });
+                    self.emit(Instruction::Store { val: real_val, ptr: alloca, ty: comp_ty , seg_override: AddressSpace::Default });
                     let imag_ptr = self.fresh_value();
                     self.emit(Instruction::GetElementPtr {
                         dest: imag_ptr, base: alloca,
                         offset: Operand::Const(IrConst::I64(comp_size as i64)),
                         ty: IrType::I8,
                     });
-                    self.emit(Instruction::Store { val: imag_val, ptr: imag_ptr, ty: comp_ty });
+                    self.emit(Instruction::Store { val: imag_val, ptr: imag_ptr, ty: comp_ty , seg_override: AddressSpace::Default });
                     Some(Operand::Value(alloca))
                 } else {
                     Some(Operand::Const(IrConst::I64(0)))
@@ -649,11 +649,8 @@ impl Lowerer {
         let result = self.emit_binop_val(op, lhs_val.clone(), rhs_val.clone(), result_ir_ty);
 
         // Store the (possibly truncated/wrapped) result
-        self.emit(Instruction::Store {
-            val: Operand::Value(result),
-            ptr: result_ptr,
-            ty: result_ir_ty,
-        });
+        self.emit(Instruction::Store { val: Operand::Value(result), ptr: result_ptr, ty: result_ir_ty,
+         seg_override: AddressSpace::Default });
 
         // Compute the overflow flag
         let overflow = if is_signed {
@@ -700,7 +697,7 @@ impl Lowerer {
 
         // Generic variant: determine type from the pointer argument's pointee type
         let result_ctype = self.expr_ctype(result_ptr_expr);
-        if let CType::Pointer(pointee) = &result_ctype {
+        if let CType::Pointer(pointee, _) = &result_ctype {
             let is_signed = pointee.is_signed();
             let ir_ty = IrType::from_ctype(pointee);
             return (ir_ty, is_signed);
@@ -845,10 +842,10 @@ impl Lowerer {
         self.emit(Instruction::Alloca { dest: tmp_alloca, size, ty: float_ty, align: 0, volatile: false });
 
         let val_v = self.operand_to_value(val);
-        self.emit(Instruction::Store { val: Operand::Value(val_v), ptr: tmp_alloca, ty: float_ty });
+        self.emit(Instruction::Store { val: Operand::Value(val_v), ptr: tmp_alloca, ty: float_ty , seg_override: AddressSpace::Default });
 
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty: int_ty });
+        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty: int_ty , seg_override: AddressSpace::Default });
 
         (Operand::Value(result), int_ty)
     }
@@ -1032,7 +1029,7 @@ fn classify_ctype(ty: &CType) -> i64 {
         CType::Float | CType::Double | CType::LongDouble => 8, // real_type_class
         CType::ComplexFloat | CType::ComplexDouble
         | CType::ComplexLongDouble => 9, // complex_type_class
-        CType::Pointer(_) => 5,      // pointer_type_class
+        CType::Pointer(_, _) => 5,      // pointer_type_class
         CType::Array(_, _) => 5,     // GCC decays arrays to pointers
         CType::Function(_) => 5,     // function decays to pointer
         CType::Struct(_) => 12,      // record_type_class

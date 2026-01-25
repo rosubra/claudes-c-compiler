@@ -14,7 +14,7 @@
 //! The `ExprTypeChecker` operates on immutable references and does not modify
 //! any state. It is designed to be called from `SemanticAnalyzer::analyze_expr`.
 
-use crate::common::types::{CType, FunctionType};
+use crate::common::types::{AddressSpace, CType, FunctionType};
 use crate::common::symbol_table::SymbolTable;
 use crate::common::fx_hash::FxHashMap;
 use crate::frontend::parser::ast::*;
@@ -73,13 +73,13 @@ impl<'a> ExprTypeChecker<'a> {
             Expr::ImaginaryLiteral(_, _) => Some(CType::ComplexDouble),
             Expr::ImaginaryLiteralF32(_, _) => Some(CType::ComplexFloat),
             Expr::ImaginaryLiteralLongDouble(_, _) => Some(CType::ComplexLongDouble),
-            Expr::StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Char))),
-            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int))),
+            Expr::StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default)),
+            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
 
             // Identifiers: look up in symbol table or enum constants
             Expr::Identifier(name, _) => {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
-                    return Some(CType::Pointer(Box::new(CType::Char)));
+                    return Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default));
                 }
                 if self.types.enum_constants.contains_key(name) {
                     return Some(CType::Int);
@@ -109,10 +109,10 @@ impl<'a> ExprTypeChecker<'a> {
             // Address-of wraps in Pointer
             Expr::AddressOf(inner, _) => {
                 if let Some(inner_ct) = self.infer_expr_ctype(inner) {
-                    Some(CType::Pointer(Box::new(inner_ct)))
+                    Some(CType::Pointer(Box::new(inner_ct), AddressSpace::Default))
                 } else {
                     // Even if inner type unknown, result is some pointer
-                    Some(CType::Pointer(Box::new(CType::Void)))
+                    Some(CType::Pointer(Box::new(CType::Void), AddressSpace::Default))
                 }
             }
 
@@ -120,7 +120,7 @@ impl<'a> ExprTypeChecker<'a> {
             Expr::Deref(inner, _) => {
                 if let Some(inner_ct) = self.infer_expr_ctype(inner) {
                     match inner_ct {
-                        CType::Pointer(pointee) => Some(*pointee),
+                        CType::Pointer(pointee, _) => Some(*pointee),
                         CType::Array(elem, _) => Some(*elem),
                         // Dereferencing a function is a no-op in C
                         CType::Function(_) => Some(inner_ct),
@@ -137,7 +137,7 @@ impl<'a> ExprTypeChecker<'a> {
                 if let Some(base_ct) = self.infer_expr_ctype(base) {
                     match base_ct {
                         CType::Array(elem, _) => return Some(*elem),
-                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Pointer(pointee, _) => return Some(*pointee),
                         _ => {}
                     }
                 }
@@ -145,7 +145,7 @@ impl<'a> ExprTypeChecker<'a> {
                 if let Some(idx_ct) = self.infer_expr_ctype(index) {
                     match idx_ct {
                         CType::Array(elem, _) => return Some(*elem),
-                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Pointer(pointee, _) => return Some(*pointee),
                         _ => {}
                     }
                 }
@@ -234,7 +234,7 @@ impl<'a> ExprTypeChecker<'a> {
             }
 
             // Label address: void*
-            Expr::LabelAddr(_, _) => Some(CType::Pointer(Box::new(CType::Void))),
+            Expr::LabelAddr(_, _) => Some(CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
 
             // __builtin_types_compatible_p: int
             Expr::BuiltinTypesCompatibleP(_, _, _) => Some(CType::Int),
@@ -272,7 +272,7 @@ impl<'a> ExprTypeChecker<'a> {
         if matches!(op, BinOp::Add | BinOp::Sub) {
             if let Some(ref l) = lct {
                 match l {
-                    CType::Pointer(_) => {
+                    CType::Pointer(_, _) => {
                         if *op == BinOp::Sub {
                             if let Some(ref r) = rct {
                                 if r.is_pointer_like() {
@@ -290,7 +290,7 @@ impl<'a> ExprTypeChecker<'a> {
                                 }
                             }
                         }
-                        return Some(CType::Pointer(elem.clone()));
+                        return Some(CType::Pointer(elem.clone(), AddressSpace::Default));
                     }
                     _ => {}
                 }
@@ -299,8 +299,8 @@ impl<'a> ExprTypeChecker<'a> {
                 // int + ptr case
                 if let Some(ref r) = rct {
                     match r {
-                        CType::Pointer(_) => return rct,
-                        CType::Array(elem, _) => return Some(CType::Pointer(elem.clone())),
+                        CType::Pointer(_, _) => return rct,
+                        CType::Array(elem, _) => return Some(CType::Pointer(elem.clone(), AddressSpace::Default)),
                         _ => {}
                     }
                 }
@@ -352,10 +352,10 @@ impl<'a> ExprTypeChecker<'a> {
     fn extract_return_ctype_from_type(ct: &CType) -> Option<CType> {
         match ct {
             CType::Function(ft) => Some(ft.return_type.clone()),
-            CType::Pointer(inner) => match inner.as_ref() {
+            CType::Pointer(inner, _) => match inner.as_ref() {
                 CType::Function(ft) => Some(ft.return_type.clone()),
                 // Pointer-to-function-pointer
-                CType::Pointer(inner2) => match inner2.as_ref() {
+                CType::Pointer(inner2, _) => match inner2.as_ref() {
                     CType::Function(ft) => Some(ft.return_type.clone()),
                     _ => Some(inner.as_ref().clone()),
                 },
@@ -369,7 +369,7 @@ impl<'a> ExprTypeChecker<'a> {
     fn infer_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> Option<CType> {
         let base_ctype = if is_pointer {
             match self.infer_expr_ctype(base_expr)? {
-                CType::Pointer(inner) => *inner,
+                CType::Pointer(inner, _) => *inner,
                 CType::Array(inner, _) => *inner,
                 _ => return None,
             }
@@ -421,7 +421,7 @@ impl<'a> ExprTypeChecker<'a> {
         // Exact match
         if std::mem::discriminant(controlling) == std::mem::discriminant(assoc) {
             match (controlling, assoc) {
-                (CType::Pointer(a), CType::Pointer(b)) => {
+                (CType::Pointer(a, _), CType::Pointer(b, _)) => {
                     return self.ctype_matches_generic(a, b);
                 }
                 (CType::Array(a, _), CType::Array(b, _)) => {
@@ -432,7 +432,7 @@ impl<'a> ExprTypeChecker<'a> {
         }
         // Array decays to pointer for _Generic matching
         if let CType::Array(elem, _) = controlling {
-            if let CType::Pointer(pointee) = assoc {
+            if let CType::Pointer(pointee, _) = assoc {
                 return self.ctype_matches_generic(elem, pointee);
             }
         }
@@ -471,8 +471,8 @@ impl<'a> ExprTypeChecker<'a> {
             TypeSpecifier::ComplexFloat => CType::ComplexFloat,
             TypeSpecifier::ComplexDouble => CType::ComplexDouble,
             TypeSpecifier::ComplexLongDouble => CType::ComplexLongDouble,
-            TypeSpecifier::Pointer(inner) => {
-                CType::Pointer(Box::new(self.resolve_type_spec(inner)))
+            TypeSpecifier::Pointer(inner, addr_space) => {
+                CType::Pointer(Box::new(self.resolve_type_spec(inner)), *addr_space)
             }
             TypeSpecifier::Array(elem, size) => {
                 let elem_ct = self.resolve_type_spec(elem);
@@ -521,7 +521,7 @@ impl<'a> ExprTypeChecker<'a> {
                     return_type: ret_ct,
                     params: param_cts,
                     variadic: *variadic,
-                }))))
+                }))), AddressSpace::Default)
             }
             // TODO: handle remaining TypeSpecifier variants
             _ => CType::Int,
@@ -599,7 +599,7 @@ impl<'a> ExprTypeChecker<'a> {
             "__builtin_memcpy" | "__builtin_memmove" | "__builtin_memset"
             | "__builtin_alloca" | "__builtin_alloca_with_align"
             | "__builtin_frame_address" | "__builtin_return_address" => {
-                Some(CType::Pointer(Box::new(CType::Void)))
+                Some(CType::Pointer(Box::new(CType::Void), AddressSpace::Default))
             }
 
             // Void-returning builtins

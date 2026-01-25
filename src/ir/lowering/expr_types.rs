@@ -6,7 +6,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{CType, IrType};
+use crate::common::types::{AddressSpace, CType, IrType};
 use super::lowering::Lowerer;
 
 /// Promote small integer types to I32, matching C integer promotion rules.
@@ -132,7 +132,7 @@ impl Lowerer {
     ///   - Function(ft): direct function type
     fn extract_func_ptr_return_type(ctype: &CType) -> IrType {
         match ctype {
-            CType::Pointer(inner) => match inner.as_ref() {
+            CType::Pointer(inner, _) => match inner.as_ref() {
                 CType::Function(ft) => IrType::from_ctype(&ft.return_type),
                 // For parameter function pointers, CType is just Pointer(ReturnType)
                 // without the Function wrapper
@@ -306,14 +306,14 @@ impl Lowerer {
         if let Some(base_ctype) = self.get_expr_ctype(base) {
             match base_ctype {
                 CType::Array(elem, _) => return IrType::from_ctype(&elem),
-                CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                CType::Pointer(pointee, _) => return IrType::from_ctype(&pointee),
                 _ => {}
             }
         }
         if let Some(idx_ctype) = self.get_expr_ctype(index) {
             match idx_ctype {
                 CType::Array(elem, _) => return IrType::from_ctype(&elem),
-                CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                CType::Pointer(pointee, _) => return IrType::from_ctype(&pointee),
                 _ => {}
             }
         }
@@ -350,7 +350,7 @@ impl Lowerer {
                     if let CType::Array(elem_ty, _) = &ctype {
                         return IrType::from_ctype(elem_ty);
                     }
-                    if let CType::Pointer(pointee) = &ctype {
+                    if let CType::Pointer(pointee, _) = &ctype {
                         return IrType::from_ctype(pointee);
                     }
                 }
@@ -523,7 +523,7 @@ impl Lowerer {
             Expr::Deref(inner, _) => {
                 if let Some(inner_ctype) = self.get_expr_ctype(inner) {
                     match inner_ctype {
-                        CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                        CType::Pointer(pointee, _) => return IrType::from_ctype(&pointee),
                         CType::Array(elem, _) => return IrType::from_ctype(&elem),
                         _ => {}
                     }
@@ -605,7 +605,7 @@ impl Lowerer {
         // Use CType-based resolution first
         if let Some(inner_ctype) = self.get_expr_ctype(inner) {
             match &inner_ctype {
-                CType::Pointer(pointee) => {
+                CType::Pointer(pointee, _) => {
                     // GCC extension: sizeof(*void_ptr) == 1, sizeof(*func_ptr) == 1
                     if matches!(pointee.as_ref(), CType::Void | CType::Function(_)) {
                         return 1;
@@ -629,7 +629,7 @@ impl Lowerer {
                     if matches!(ct, CType::Function(_)) {
                         return 1;
                     }
-                    if let CType::Pointer(pointee) = ct {
+                    if let CType::Pointer(pointee, _) = ct {
                         if matches!(pointee.as_ref(), CType::Function(_)) {
                             return 1;
                         }
@@ -653,7 +653,7 @@ impl Lowerer {
         if let Some(base_ctype) = self.get_expr_ctype(base) {
             match &base_ctype {
                 CType::Array(elem, _) => return self.resolve_ctype_size(elem).max(1),
-                CType::Pointer(pointee) => return self.resolve_ctype_size(pointee).max(1),
+                CType::Pointer(pointee, _) => return self.resolve_ctype_size(pointee).max(1),
                 _ => {}
             }
         }
@@ -661,7 +661,7 @@ impl Lowerer {
         if let Some(idx_ctype) = self.get_expr_ctype(index) {
             match &idx_ctype {
                 CType::Array(elem, _) => return self.resolve_ctype_size(elem).max(1),
-                CType::Pointer(pointee) => return self.resolve_ctype_size(pointee).max(1),
+                CType::Pointer(pointee, _) => return self.resolve_ctype_size(pointee).max(1),
                 _ => {}
             }
         }
@@ -679,7 +679,7 @@ impl Lowerer {
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                     match &ctype {
                         CType::Array(elem_ty, _) => return self.resolve_ctype_size(elem_ty).max(1),
-                        CType::Pointer(pointee) => return self.resolve_ctype_size(pointee).max(1),
+                        CType::Pointer(pointee, _) => return self.resolve_ctype_size(pointee).max(1),
                         _ => {}
                     }
                 }
@@ -738,7 +738,7 @@ impl Lowerer {
             return true;
         }
         if let Some(ctype) = self.get_expr_ctype(expr) {
-            return matches!(ctype, CType::Pointer(_) | CType::Array(_, _));
+            return matches!(ctype, CType::Pointer(_, _) | CType::Array(_, _));
         }
         false
     }
@@ -918,7 +918,7 @@ impl Lowerer {
         if matches!(op, BinOp::Add | BinOp::Sub) {
             if let Some(lct) = self.get_expr_ctype(lhs) {
                 match &lct {
-                    CType::Pointer(_) => {
+                    CType::Pointer(_, _) => {
                         if *op == BinOp::Sub {
                             // ptr - ptr = ptrdiff_t (long)
                             if let Some(rct) = self.get_expr_ctype(rhs) {
@@ -938,7 +938,7 @@ impl Lowerer {
                                 }
                             }
                         }
-                        return Some(CType::Pointer(elem.clone()));
+                        return Some(CType::Pointer(elem.clone(), AddressSpace::Default));
                     }
                     _ => {}
                 }
@@ -947,8 +947,8 @@ impl Lowerer {
                 // int + ptr case
                 if let Some(rct) = self.get_expr_ctype(rhs) {
                     match rct {
-                        CType::Pointer(_) => return Some(rct),
-                        CType::Array(elem, _) => return Some(CType::Pointer(elem)),
+                        CType::Pointer(_, _) => return Some(rct),
+                        CType::Array(elem, _) => return Some(CType::Pointer(elem, AddressSpace::Default)),
                         _ => {}
                     }
                 }
@@ -1014,7 +1014,7 @@ impl Lowerer {
             // For p->field, get CType of p, then dereference
             // Arrays decay to pointers, so arr->field is valid when arr is an array
             match self.get_expr_ctype(base_expr)? {
-                CType::Pointer(inner) => *inner,
+                CType::Pointer(inner, _) => *inner,
                 CType::Array(inner, _) => *inner,
                 _ => return None,
             }
@@ -1092,7 +1092,7 @@ impl Lowerer {
                 // Dereferencing peels off one Pointer/Array layer
                 if let Some(inner_ct) = self.get_expr_ctype(inner) {
                     match inner_ct {
-                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Pointer(pointee, _) => return Some(*pointee),
                         CType::Array(elem, _) => return Some(*elem),
                         _ => {}
                     }
@@ -1102,7 +1102,7 @@ impl Lowerer {
             Expr::AddressOf(inner, _) => {
                 // Address-of wraps in Pointer
                 if let Some(inner_ct) = self.get_expr_ctype(inner) {
-                    return Some(CType::Pointer(Box::new(inner_ct)));
+                    return Some(CType::Pointer(Box::new(inner_ct), AddressSpace::Default));
                 }
                 None
             }
@@ -1111,7 +1111,7 @@ impl Lowerer {
                 if let Some(base_ct) = self.get_expr_ctype(base) {
                     match base_ct {
                         CType::Array(elem, _) => return Some(*elem),
-                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Pointer(pointee, _) => return Some(*pointee),
                         _ => {}
                     }
                 }
@@ -1119,7 +1119,7 @@ impl Lowerer {
                 if let Some(idx_ct) = self.get_expr_ctype(index) {
                     match idx_ct {
                         CType::Array(elem, _) => return Some(*elem),
-                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Pointer(pointee, _) => return Some(*pointee),
                         _ => {}
                     }
                 }
@@ -1149,7 +1149,7 @@ impl Lowerer {
             Expr::Comma(_, last, _) => self.get_expr_ctype(last),
             Expr::StringLiteral(_, _) => {
                 // String literals have type char[] which decays to char*
-                Some(CType::Pointer(Box::new(CType::Char)))
+                Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default))
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 self.get_binop_ctype(op, lhs, rhs)
@@ -1164,7 +1164,7 @@ impl Lowerer {
             Expr::FloatLiteralF32(_, _) => Some(CType::Float),
             Expr::FloatLiteralLongDouble(_, _) => Some(CType::LongDouble),
             // Wide string literal L"..." has type wchar_t* (which is int* on all targets)
-            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int))),
+            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     // First check lowerer's own func_meta (has ABI-adjusted return_ctype)

@@ -11,7 +11,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -68,6 +68,7 @@ impl Lowerer {
             val: real,
             ptr,
             ty: comp_ty,
+            seg_override: AddressSpace::Default,
         });
 
         // Store imag part at offset comp_size
@@ -78,11 +79,8 @@ impl Lowerer {
             offset: Operand::Const(IrConst::I64(comp_size as i64)),
             ty: IrType::I8, // byte offset
         });
-        self.emit(Instruction::Store {
-            val: imag,
-            ptr: imag_ptr,
-            ty: comp_ty,
-        });
+        self.emit(Instruction::Store { val: imag, ptr: imag_ptr, ty: comp_ty,
+         seg_override: AddressSpace::Default });
     }
 
     /// Load the real part of a complex value from a pointer.
@@ -93,6 +91,7 @@ impl Lowerer {
             dest,
             ptr,
             ty: comp_ty,
+            seg_override: AddressSpace::Default,
         });
         Operand::Value(dest)
     }
@@ -113,6 +112,7 @@ impl Lowerer {
             dest,
             ptr: imag_ptr,
             ty: comp_ty,
+            seg_override: AddressSpace::Default,
         });
         Operand::Value(dest)
     }
@@ -478,7 +478,7 @@ impl Lowerer {
             }
             Expr::PointerMemberAccess(base, field, _) => {
                 let base_ct = self.expr_ctype(base);
-                if let CType::Pointer(inner) = &base_ct {
+                if let CType::Pointer(inner, _) = &base_ct {
                     self.resolve_field_type(inner, field)
                 } else {
                     CType::Int
@@ -487,7 +487,7 @@ impl Lowerer {
             Expr::Deref(inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
                 match inner_ct {
-                    CType::Pointer(pointee) => *pointee,
+                    CType::Pointer(pointee, _) => *pointee,
                     // Arrays decay to pointers, so *array yields the element type
                     CType::Array(elem, _) => *elem,
                     _ => CType::Int,
@@ -496,7 +496,7 @@ impl Lowerer {
             Expr::ArraySubscript(base, _, _) => {
                 let base_ct = self.expr_ctype(base);
                 match base_ct {
-                    CType::Array(elem, _) | CType::Pointer(elem) => *elem,
+                    CType::Array(elem, _) | CType::Pointer(elem, _) => *elem,
                     _ => CType::Int,
                 }
             }
@@ -518,7 +518,7 @@ impl Lowerer {
             }
             Expr::AddressOf(inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
-                CType::Pointer(Box::new(inner_ct))
+                CType::Pointer(Box::new(inner_ct), AddressSpace::Default)
             }
             _ => {
                 // Fallback: try get_expr_ctype for more precise type info
@@ -574,7 +574,7 @@ impl Lowerer {
                 IrType::U32 => CType::UInt,
                 IrType::I64 => CType::Long,
                 IrType::U64 => CType::ULong,
-                IrType::Ptr => CType::Pointer(Box::new(CType::Void)),
+                IrType::Ptr => CType::Pointer(Box::new(CType::Void), AddressSpace::Default),
                 _ => CType::Int,
             };
         }
@@ -754,7 +754,7 @@ impl Lowerer {
                 let base_val = self.lower_expr(base);
                 let base_ptr = self.operand_to_value(base_val);
                 let base_ct = self.expr_ctype(base);
-                if let CType::Pointer(ref inner) = base_ct {
+                if let CType::Pointer(ref inner, _) = base_ct {
                     if let CType::Struct(ref key) | CType::Union(ref key) = **inner {
                         if let Some(layout) = self.types.struct_layouts.get(&**key) {
                             if let Some((offset, _)) = layout.field_offset(field, &self.types) {
@@ -955,12 +955,12 @@ impl Lowerer {
                 let packed = self.fresh_value();
                 if packs_cf_variadic && is_variadic_arg && !uses_packed_cf {
                     // RISC-V variadic: load as I64 (two packed F32s in one GP register)
-                    self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::I64 });
+                    self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::I64 , seg_override: AddressSpace::Default });
                     new_vals.push(Operand::Value(packed));
                     new_types.push(IrType::I64);
                 } else {
                     // x86-64: load as F64 (two packed F32s in one XMM register)
-                    self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::F64 });
+                    self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::F64 , seg_override: AddressSpace::Default });
                     new_vals.push(Operand::Value(packed));
                     new_types.push(IrType::F64);
                 }

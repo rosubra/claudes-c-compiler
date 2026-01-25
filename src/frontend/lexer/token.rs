@@ -92,6 +92,10 @@ pub enum TokenKind {
     AutoType,
     /// __label__ - GCC extension for local label declarations in block scope
     GnuLabel,
+    /// __seg_gs - GCC named address space qualifier (x86 %gs segment)
+    SegGs,
+    /// __seg_fs - GCC named address space qualifier (x86 %fs segment)
+    SegFs,
 
     /// #pragma pack directive, emitted by preprocessor as synthetic token.
     /// Variants: Set(N), Push(N), PushOnly (push without change), Pop, Reset (pack())
@@ -242,6 +246,8 @@ impl TokenKind {
             "__imag__" | "__imag" => Some(TokenKind::ImagPart),
             "__auto_type" => Some(TokenKind::AutoType),
             "__label__" => Some(TokenKind::GnuLabel),
+            "__seg_gs" => Some(TokenKind::SegGs),
+            "__seg_fs" => Some(TokenKind::SegFs),
             // __builtin_va_start, __builtin_va_end, __builtin_va_copy remain as
             // Identifier tokens so they flow through the normal builtin call path
             _ => None,

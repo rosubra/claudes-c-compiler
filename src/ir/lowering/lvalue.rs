@@ -1,6 +1,6 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use super::lowering::Lowerer;
 use super::definitions::LValue;
 
@@ -152,14 +152,14 @@ impl Lowerer {
     pub(super) fn load_lvalue_typed(&mut self, lv: &LValue, ty: IrType) -> Operand {
         let addr = self.lvalue_addr(lv);
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty });
+        self.emit(Instruction::Load { dest, ptr: addr, ty , seg_override: AddressSpace::Default });
         Operand::Value(dest)
     }
 
     /// Store a value to an lvalue with a specific type.
     pub(super) fn store_lvalue_typed(&mut self, lv: &LValue, val: Operand, ty: IrType) {
         let addr = self.lvalue_addr(lv);
-        self.emit(Instruction::Store { val, ptr: addr, ty });
+        self.emit(Instruction::Store { val, ptr: addr, ty , seg_override: AddressSpace::Default });
     }
 
     /// Compute the address of an array element: base_addr + index * elem_size.
@@ -258,7 +258,7 @@ impl Lowerer {
                             return Operand::Value(addr);
                         } else {
                             let loaded = self.fresh_value();
-                            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr });
+                            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr , seg_override: AddressSpace::Default });
                             return Operand::Value(loaded);
                         }
                     }
@@ -266,7 +266,7 @@ impl Lowerer {
                         return Operand::Value(info.alloca);
                     } else {
                         let loaded = self.fresh_value();
-                        self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr });
+                        self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr , seg_override: AddressSpace::Default });
                         return Operand::Value(loaded);
                     }
                 }
@@ -279,7 +279,7 @@ impl Lowerer {
                             return Operand::Value(addr);
                         } else {
                             let loaded = self.fresh_value();
-                            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr });
+                            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr , seg_override: AddressSpace::Default });
                             return Operand::Value(loaded);
                         }
                     }
@@ -291,7 +291,7 @@ impl Lowerer {
                         return Operand::Value(addr);
                     } else {
                         let loaded = self.fresh_value();
-                        self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr });
+                        self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: IrType::Ptr , seg_override: AddressSpace::Default });
                         return Operand::Value(loaded);
                     }
                 }
@@ -453,7 +453,7 @@ impl Lowerer {
                     let sz = self.resolve_ctype_size(elem_ty);
                     if sz > 0 { return Some(sz); }
                 }
-                CType::Pointer(pointee_ty) => {
+                CType::Pointer(pointee_ty, _) => {
                     let sz = self.resolve_ctype_size(pointee_ty);
                     if sz > 0 { return Some(sz); }
                 }
@@ -483,7 +483,7 @@ impl Lowerer {
         // try to resolve the element size via CType.
         if let Some(ctype) = self.get_expr_ctype(base) {
             match &ctype {
-                CType::Pointer(pointee) => {
+                CType::Pointer(pointee, _) => {
                     let sz = self.resolve_ctype_size(pointee);
                     if sz > 0 { return sz; }
                 }
@@ -551,7 +551,7 @@ impl Lowerer {
         let mut ty = ctype;
         for _ in 0..depth {
             match ty {
-                CType::Pointer(inner) => ty = inner,
+                CType::Pointer(inner, _) => ty = inner,
                 CType::Array(inner, _) => ty = inner,
                 _ => return None,
             }
@@ -559,7 +559,7 @@ impl Lowerer {
         // ty is now the type after peeling `depth` levels.
         // It should be a pointer or array; return the size of what it points to.
         match ty {
-            CType::Pointer(pointee) => {
+            CType::Pointer(pointee, _) => {
                 let sz = self.resolve_ctype_size(pointee);
                 if sz > 0 { Some(sz) } else { None }
             }
@@ -607,14 +607,14 @@ impl Lowerer {
         // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match &resolved {
-            TypeSpecifier::Pointer(inner) => return self.sizeof_type(inner),
+            TypeSpecifier::Pointer(inner, _) => return self.sizeof_type(inner),
             TypeSpecifier::Array(inner, _) => return self.sizeof_type(inner),
             _ => {}
         }
         // Fall back to CType for typedef'd pointer/array types
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
-            CType::Pointer(inner) | CType::Array(inner, _) =>
+            CType::Pointer(inner, _) | CType::Array(inner, _) =>
                 inner.size_ctx(&self.types.struct_layouts),
             _ => 0,
         }

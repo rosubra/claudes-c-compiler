@@ -243,8 +243,8 @@ impl Preprocessor {
             // the lexer (token.rs), not as macros, because GCC treats them as reserved
             // keywords immune to #define redefinition.
             ("__alignof", "_Alignof"), ("__alignof__", "_Alignof"),
-            // Named address spaces (Linux kernel): strip since we don't support them
-            ("__seg_gs", ""), ("__seg_fs", ""),
+            // Named address spaces (Linux kernel): __seg_gs/__seg_fs are handled
+            // as keyword tokens in the lexer (token.rs), not as macros.
             // __float128 -> long double (glibc compat)
             ("__float128", "long double"), ("__SIZEOF_FLOAT128__", "16"),
             // MSVC integer type specifiers

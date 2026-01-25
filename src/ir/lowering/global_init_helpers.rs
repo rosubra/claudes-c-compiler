@@ -93,7 +93,7 @@ pub(super) fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_a
 /// Check if a CType contains pointer elements (directly or through arrays/structs).
 pub(super) fn type_has_pointer_elements(ty: &CType, ctx: &dyn StructLayoutProvider) -> bool {
     match ty {
-        CType::Pointer(_) | CType::Function(_) => true,
+        CType::Pointer(_, _) | CType::Function(_) => true,
         CType::Array(inner, _) => type_has_pointer_elements(inner, ctx),
         CType::Struct(key) | CType::Union(key) => {
             if let Some(layout) = ctx.get_struct_layout(key) {

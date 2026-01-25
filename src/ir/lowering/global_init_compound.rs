@@ -11,7 +11,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, StructLayout, CType, InitFieldResolution};
+use crate::common::types::{AddressSpace, IrType, StructLayout, CType, InitFieldResolution};
 use super::lowering::Lowerer;
 use super::global_init_helpers as h;
 use h::{push_zero_bytes, push_bytes_as_elements, push_string_as_elements};
@@ -351,7 +351,7 @@ impl Lowerer {
                 if let CType::Array(elem_ty, Some(arr_size)) = field_ty {
                     if h::type_has_pointer_elements(elem_ty, &self.types) {
                         // Distinguish: direct pointer array vs struct-with-pointer-fields array
-                        if matches!(elem_ty.as_ref(), CType::Pointer(_) | CType::Function(_)) {
+                        if matches!(elem_ty.as_ref(), CType::Pointer(_, _) | CType::Function(_)) {
                             // Array of direct pointers: emit each element as a GlobalAddr or zero
                             self.emit_compound_ptr_array_init(elements, nested_items, elem_ty, *arr_size);
                             return;
@@ -406,7 +406,7 @@ impl Lowerer {
         field: &crate::common::types::StructFieldLayout,
         field_size: usize,
     ) {
-        let field_is_pointer = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
+        let field_is_pointer = matches!(field.ty, CType::Pointer(_, _) | CType::Function(_));
 
         if inits.is_empty() {
             push_zero_bytes(elements, field_size);
@@ -484,7 +484,7 @@ impl Lowerer {
         let sub_offset = drill.byte_offset;
         let current_ty = drill.target_ty;
         let sub_size = self.resolve_ctype_size(&current_ty);
-        let sub_is_pointer = matches!(current_ty, CType::Pointer(_) | CType::Function(_));
+        let sub_is_pointer = matches!(current_ty, CType::Pointer(_, _) | CType::Function(_));
 
         // Emit zero bytes before the sub-field
         push_zero_bytes(elements, sub_offset);
@@ -615,7 +615,7 @@ impl Lowerer {
             _ => {
                 // Not an array - just use first item
                 if let Some(first) = inits.first() {
-                    let field_is_pointer = matches!(field_ty, CType::Pointer(_));
+                    let field_is_pointer = matches!(field_ty, CType::Pointer(_, _));
                     self.emit_compound_field_init(elements, &first.init, field_ty, field_size, field_is_pointer);
                 } else {
                     push_zero_bytes(elements, field_size);
@@ -901,13 +901,13 @@ impl Lowerer {
         // Only treat as a flat pointer array if elements are direct pointers/functions,
         // NOT if elements are structs that happen to contain pointer fields.
         let is_ptr_array = matches!(field.ty, CType::Array(ref elem_ty, _)
-            if matches!(elem_ty.as_ref(), CType::Pointer(_) | CType::Function(_)));
+            if matches!(elem_ty.as_ref(), CType::Pointer(_, _) | CType::Function(_)));
 
         if let Initializer::Expr(ref expr) = item.init {
             // For pointer arrays with a single expr, the first element is the addr
             let effective_ty = if is_ptr_array {
                 // Treat as a pointer write to the first element
-                &CType::Pointer(Box::new(CType::Void))
+                &CType::Pointer(Box::new(CType::Void), AddressSpace::Default)
             } else {
                 &field.ty
             };
@@ -922,7 +922,7 @@ impl Lowerer {
                     CType::Array(_, Some(s)) => *s,
                     _ => inner_items.len(),
                 };
-                let ptr_ty = CType::Pointer(Box::new(CType::Void));
+                let ptr_ty = CType::Pointer(Box::new(CType::Void), AddressSpace::Default);
                 for (ai, inner_item) in inner_items.iter().enumerate() {
                     if ai >= arr_size { break; }
                     let elem_offset = field_offset + ai * 8;
@@ -1212,7 +1212,7 @@ impl Lowerer {
         bytes: &mut [u8],
         ptr_ranges: &mut Vec<(usize, GlobalInit)>,
     ) {
-        let is_ptr = matches!(ty, CType::Pointer(_) | CType::Function(_));
+        let is_ptr = matches!(ty, CType::Pointer(_, _) | CType::Function(_));
         if is_ptr {
             if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
                 ptr_ranges.push((offset, addr_init));

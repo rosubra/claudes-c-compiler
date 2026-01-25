@@ -15,7 +15,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use std::rc::Rc;
-use crate::common::types::{StructLayout, RcLayout, CType};
+use crate::common::types::{AddressSpace, StructLayout, RcLayout, CType};
 use crate::frontend::parser::ast::{TypeSpecifier, ParamDecl, DerivedDeclarator};
 
 /// Information about a function typedef (e.g., `typedef int func_t(int, int);`).
@@ -54,7 +54,7 @@ pub fn extract_fptr_typedef_info(
     let ret_ptr_count = ptr_count_before_fptr.saturating_sub(1);
     let mut return_type = base_type.clone();
     for _ in 0..ret_ptr_count {
-        return_type = TypeSpecifier::Pointer(Box::new(return_type));
+        return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
     }
     Some(FunctionTypedefInfo {
         return_type,

@@ -1,5 +1,5 @@
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::backend::common::PtrDirective;
 use crate::backend::state::{CodegenState, StackSlot};
@@ -1690,6 +1690,46 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
+    /// Emit a load with x86 segment override prefix (%gs: or %fs:).
+    /// Used for GCC named address space: *(typeof(x) __seg_gs *)addr
+    /// Emits: movl %gs:(%rcx), %eax  (or appropriate sized variant).
+    fn emit_seg_load(&mut self, dest: &Value, ptr: &Value, ty: IrType, seg: AddressSpace) {
+        let seg_prefix = match seg {
+            AddressSpace::SegGs => "%gs:",
+            AddressSpace::SegFs => "%fs:",
+            AddressSpace::Default => unreachable!(),
+        };
+        // Load the pointer (address) into %rcx
+        self.emit_load_operand(&Operand::Value(*ptr));
+        self.state.emit("    movq %rax, %rcx");
+        // Emit segment-prefixed load
+        let load_instr = Self::mov_load_for_type(ty);
+        let dest_reg = Self::load_dest_reg(ty);
+        self.state.emit_fmt(format_args!("    {} {}(%rcx), {}", load_instr, seg_prefix, dest_reg));
+        self.emit_store_result(dest);
+    }
+
+    /// Emit a store with x86 segment override prefix (%gs: or %fs:).
+    /// Used for GCC named address space: *(typeof(x) __seg_gs *)addr = val
+    /// Emits: movl %edx, %gs:(%rcx)  (or appropriate sized variant).
+    fn emit_seg_store(&mut self, val: &Operand, ptr: &Value, ty: IrType, seg: AddressSpace) {
+        let seg_prefix = match seg {
+            AddressSpace::SegGs => "%gs:",
+            AddressSpace::SegFs => "%fs:",
+            AddressSpace::Default => unreachable!(),
+        };
+        // Load value into %rax, then save to %rdx
+        self.emit_load_operand(val);
+        self.state.emit("    movq %rax, %rdx");
+        // Load the pointer (address) into %rcx
+        self.emit_load_operand(&Operand::Value(*ptr));
+        self.state.emit("    movq %rax, %rcx");
+        // Emit segment-prefixed store
+        let store_instr = Self::mov_store_for_type(ty);
+        let store_reg = Self::reg_for_type("rdx", ty);
+        self.state.emit_fmt(format_args!("    {} %{}, {}(%rcx)", store_instr, store_reg, seg_prefix));
+    }
+
     /// Override emit_store_with_const_offset to handle F128 (long double) via x87.
     /// The default implementation uses movq which is wrong for F128 - we need fstpt.
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
@@ -3154,6 +3194,11 @@ impl ArchCodegen for X86Codegen {
         self.state.reg_cache.invalidate_all(); // inline asm may clobber rax
     }
 
+    fn emit_inline_asm_with_segs(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>], seg_overrides: &[AddressSpace]) {
+        crate::backend::inline_asm::emit_inline_asm_common_impl(self, template, outputs, inputs, operand_types, goto_labels, input_symbols, seg_overrides);
+        self.state.reg_cache.invalidate_all();
+    }
+
     fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
         self.operand_to_rax_rdx(src);
         self.store_rax_rdx_to(dest);
@@ -3651,7 +3696,13 @@ impl InlineAsmEmitter for X86Codegen {
         let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
         let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
         let op_is_memory: Vec<bool> = operands.iter().map(|o| matches!(o.kind, AsmOperandKind::Memory)).collect();
-        let op_mem_addrs: Vec<String> = operands.iter().map(|o| o.mem_addr.clone()).collect();
+        let op_mem_addrs: Vec<String> = operands.iter().map(|o| {
+            if o.seg_prefix.is_empty() {
+                o.mem_addr.clone()
+            } else {
+                format!("{}{}", o.seg_prefix, o.mem_addr)
+            }
+        }).collect();
         let op_imm_values: Vec<Option<i64>> = operands.iter().map(|o| o.imm_value).collect();
         let op_imm_symbols: Vec<Option<String>> = operands.iter().map(|o| o.imm_symbol.clone()).collect();
 

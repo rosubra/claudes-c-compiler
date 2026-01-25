@@ -537,6 +537,7 @@ fn apply_diamond(func: &mut IrFunction, diamond: &DiamondInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::AddressSpace;
 
     #[test]
     fn test_simple_diamond_conversion() {
@@ -705,11 +706,7 @@ mod tests {
             label: BlockId(1),
             instructions: vec![
                 // Side-effecting store!
-                Instruction::Store {
-                    val: Operand::Const(IrConst::I32(42)),
-                    ptr: Value(10),
-                    ty: IrType::I32,
-                },
+                Instruction::Store { val: Operand::Const(IrConst::I32(42)), ptr: Value(10), ty: IrType::I32, seg_override: AddressSpace::Default },
             ],
             terminator: Terminator::Branch(BlockId(3)),
         });

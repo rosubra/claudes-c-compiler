@@ -719,7 +719,7 @@ impl Lowerer {
         };
         let current_ty = drill.target_ty;
 
-        if matches!(&current_ty, CType::Pointer(_) | CType::Function(_)) {
+        if matches!(&current_ty, CType::Pointer(_, _) | CType::Function(_)) {
             return self.init_has_addr_exprs(&item.init);
         }
 

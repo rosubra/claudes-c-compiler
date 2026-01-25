@@ -17,7 +17,7 @@
 
 use crate::common::symbol_table::{Symbol, SymbolTable, StorageClass};
 use crate::common::type_builder;
-use crate::common::types::{CType, FunctionType, StructLayout};
+use crate::common::types::{AddressSpace, CType, FunctionType, StructLayout};
 use crate::common::source::Span;
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins;
@@ -243,7 +243,7 @@ impl SemanticAnalyzer {
                             .count();
                         let mut return_type = decl.type_spec.clone();
                         for _ in 0..ptr_count {
-                            return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                            return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
                         }
                         self.result.type_context.function_typedefs.insert(
                             declarator.name.clone(),
@@ -268,7 +268,7 @@ impl SemanticAnalyzer {
                             let ret_ptr_count = if ptr_count > 0 { ptr_count - 1 } else { 0 };
                             let mut return_type = decl.type_spec.clone();
                             for _ in 0..ret_ptr_count {
-                                return_type = TypeSpecifier::Pointer(Box::new(return_type));
+                                return_type = TypeSpecifier::Pointer(Box::new(return_type), AddressSpace::Default);
                             }
                             self.result.type_context.func_ptr_typedefs.insert(declarator.name.clone());
                             self.result.type_context.func_ptr_typedef_info.insert(
@@ -487,7 +487,7 @@ impl SemanticAnalyzer {
                     self.collect_enum_constants_from_type_spec(&field.type_spec);
                 }
             }
-            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner) => {
+            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner, _) => {
                 self.collect_enum_constants_from_type_spec(inner);
             }
             _ => {}
@@ -853,19 +853,19 @@ impl SemanticAnalyzer {
             ("puts", CType::Int, false),
             ("putchar", CType::Int, false),
             ("getchar", CType::Int, false),
-            ("malloc", CType::Pointer(Box::new(CType::Void)), false),
-            ("calloc", CType::Pointer(Box::new(CType::Void)), false),
-            ("realloc", CType::Pointer(Box::new(CType::Void)), false),
+            ("malloc", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
+            ("calloc", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
+            ("realloc", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
             ("free", CType::Void, false),
             ("exit", CType::Void, false),
             ("abort", CType::Void, false),
-            ("memcpy", CType::Pointer(Box::new(CType::Void)), false),
-            ("memmove", CType::Pointer(Box::new(CType::Void)), false),
-            ("memset", CType::Pointer(Box::new(CType::Void)), false),
+            ("memcpy", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
+            ("memmove", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
+            ("memset", CType::Pointer(Box::new(CType::Void), AddressSpace::Default), false),
             ("memcmp", CType::Int, false),
             ("strlen", CType::ULong, false),
             ("strcmp", CType::Int, false),
-            ("strcpy", CType::Pointer(Box::new(CType::Char)), false),
+            ("strcpy", CType::Pointer(Box::new(CType::Char), AddressSpace::Default), false),
             ("atoi", CType::Int, false),
             ("atol", CType::Long, false),
             ("abs", CType::Int, false),

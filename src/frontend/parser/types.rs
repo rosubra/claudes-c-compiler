@@ -5,6 +5,7 @@
 // (e.g., "long unsigned int" == "unsigned long int"), so we collect flags
 // and resolve them at the end.
 
+use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::{ModeKind, Parser};
@@ -55,6 +56,15 @@ impl Parser {
                 | TokenKind::Register | TokenKind::Noreturn
                 | TokenKind::Auto => {
                     self.advance();
+                }
+                // GCC named address space qualifiers (__seg_gs / __seg_fs)
+                TokenKind::SegGs => {
+                    self.advance();
+                    self.parsing_address_space = AddressSpace::SegGs;
+                }
+                TokenKind::SegFs => {
+                    self.advance();
+                    self.parsing_address_space = AddressSpace::SegFs;
                 }
                 // __auto_type - GCC extension: type inferred from initializer
                 TokenKind::AutoType => {
@@ -260,6 +270,8 @@ impl Parser {
                     TokenKind::Char => { self.advance(); *has_char = true; }
                     TokenKind::Complex => { self.advance(); *has_complex = true; }
                     TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => { self.advance(); }
+                    TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                    TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
                     TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
@@ -281,6 +293,8 @@ impl Parser {
                 match self.peek() {
                     TokenKind::Complex => { self.advance(); *has_complex = true; }
                     TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => { self.advance(); }
+                    TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                    TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
                     TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
@@ -296,6 +310,8 @@ impl Parser {
                     TokenKind::Long => { self.advance(); *long_count += 1; }
                     TokenKind::Complex => { self.advance(); *has_complex = true; }
                     TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => { self.advance(); }
+                    TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                    TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
                     TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
@@ -471,6 +487,8 @@ impl Parser {
                 TokenKind::Extension => {
                     self.advance();
                 }
+                TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                 _ => break,
             }
         }
@@ -586,6 +604,8 @@ impl Parser {
                 TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                     self.advance();
                 }
+                TokenKind::SegGs => { self.advance(); self.parsing_address_space = AddressSpace::SegGs; }
+                TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                 TokenKind::Alignas => {
                     self.advance();
                     if let Some(align) = self.parse_alignas_argument() {
@@ -627,7 +647,7 @@ impl Parser {
         while i < derived.len() {
             match &derived[i] {
                 DerivedDeclarator::Pointer => {
-                    result = TypeSpecifier::Pointer(Box::new(result));
+                    result = TypeSpecifier::Pointer(Box::new(result), AddressSpace::Default);
                     i += 1;
                 }
                 DerivedDeclarator::Array(_) => {
@@ -677,7 +697,7 @@ impl Parser {
             let mut result_type = type_spec;
             // Parse pointer declarators
             while self.consume_if(&TokenKind::Star) {
-                result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                 self.skip_cv_qualifiers();
             }
             // Handle function pointer: type (*)(args)
@@ -692,7 +712,7 @@ impl Parser {
                     if matches!(self.peek(), TokenKind::LParen) {
                         self.skip_balanced_parens();
                     }
-                    result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                    result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                 } else {
                     self.pos = save2;
                 }
@@ -723,9 +743,15 @@ impl Parser {
     /// Input: base type already parsed.
     /// Output: type wrapped with pointer/array/function-pointer modifiers.
     pub(super) fn parse_abstract_declarator_suffix(&mut self, mut result_type: TypeSpecifier) -> TypeSpecifier {
+        // Consume address space qualifiers that appear before the first '*'
+        // e.g., typeof(var) __seg_gs * → __seg_gs sets parsing_address_space
+        self.skip_cv_qualifiers();
         // Parse leading pointer(s)
         while self.consume_if(&TokenKind::Star) {
-            result_type = TypeSpecifier::Pointer(Box::new(result_type));
+            // Capture any address space qualifier that preceded the '*'
+            // (e.g., __seg_gs in "typeof(var) __seg_gs *")
+            let addr_space = std::mem::take(&mut self.parsing_address_space);
+            result_type = TypeSpecifier::Pointer(Box::new(result_type), addr_space);
             self.skip_cv_qualifiers();
         }
         // Handle parenthesized abstract declarators: (*), (*)(params), (*)[N], (*[3][4])
@@ -736,7 +762,7 @@ impl Parser {
                     // Function pointer cast: (*)(params)
                     let (params, variadic) = self.parse_param_list();
                     for _ in 0..ptr_depth.saturating_sub(1) {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                     }
                     result_type = TypeSpecifier::FunctionPointer(Box::new(result_type), params, variadic);
                     // Wrap with inner array dims (for array of function pointers)
@@ -758,7 +784,7 @@ impl Parser {
                     }
                     // Then wrap with pointer(s)
                     for _ in 0..ptr_depth {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                     }
                     // Then wrap with inner array dims (outermost arrays)
                     for dim in inner_array_dims.into_iter().rev() {
@@ -766,7 +792,7 @@ impl Parser {
                     }
                 } else {
                     for _ in 0..ptr_depth {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
                     }
                 }
             } else {

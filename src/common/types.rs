@@ -26,6 +26,18 @@ impl StructLayoutProvider for FxHashMap<String, RcLayout> {
     }
 }
 
+/// Address space for pointer types (GCC named address space extension).
+/// Used for x86 segment-relative memory access (%gs: / %fs: prefix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AddressSpace {
+    #[default]
+    Default,
+    /// __seg_gs: x86 GS segment (used for per-CPU variables in Linux kernel)
+    SegGs,
+    /// __seg_fs: x86 FS segment (used for TLS on some platforms)
+    SegFs,
+}
+
 /// Represents C types in the compiler.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CType {
@@ -52,7 +64,7 @@ pub enum CType {
     ComplexDouble,
     /// C99 _Complex long double: two f128 values (real, imag) - uses F128 storage per component
     ComplexLongDouble,
-    Pointer(Box<CType>),
+    Pointer(Box<CType>, AddressSpace),
     Array(Box<CType>, Option<usize>),
     Function(Box<FunctionType>),
     /// Struct type, identified by key (e.g., "struct.Foo" or "__anon_struct_7").
@@ -442,7 +454,7 @@ impl StructLayout {
     /// Check if a type is or contains pointer/function types (recursive).
     fn field_type_has_pointers(ty: &CType, ctx: &dyn StructLayoutProvider) -> bool {
         match ty {
-            CType::Pointer(_) | CType::Function(_) => true,
+            CType::Pointer(_, _) | CType::Function(_) => true,
             CType::Array(inner, _) => Self::field_type_has_pointers(inner, ctx),
             CType::Struct(key) | CType::Union(key) => {
                 if let Some(layout) = ctx.get_struct_layout(key) {
@@ -618,7 +630,7 @@ impl CType {
             CType::ComplexFloat => 8,     // 2 * sizeof(float)
             CType::ComplexDouble => 16,   // 2 * sizeof(double)
             CType::ComplexLongDouble => 32, // 2 * sizeof(long double) = 2 * 16
-            CType::Pointer(_) => 8,
+            CType::Pointer(_, _) => 8,
             CType::Array(elem, Some(n)) => elem.size_ctx(ctx) * n,
             CType::Array(_, None) => 8, // incomplete array treated as pointer
             CType::Function(_) => 8, // function pointer size
@@ -645,7 +657,7 @@ impl CType {
             CType::ComplexFloat => 4,       // align of float component
             CType::ComplexDouble => 8,      // align of double component
             CType::ComplexLongDouble => 16, // align of long double (F128) component
-            CType::Pointer(_) => 8,
+            CType::Pointer(_, _) => 8,
             CType::Array(elem, _) => elem.align_ctx(ctx),
             CType::Function(_) => 8,
             CType::Struct(key) | CType::Union(key) => {
@@ -832,25 +844,25 @@ impl CType {
 
     /// Whether this is a pointer type (including arrays which decay to pointers).
     pub fn is_pointer_like(&self) -> bool {
-        matches!(self, CType::Pointer(_) | CType::Array(_, _))
+        matches!(self, CType::Pointer(_, _) | CType::Array(_, _))
     }
 
     /// Whether this is a function pointer type: Pointer(Function(_)).
     pub fn is_function_pointer(&self) -> bool {
-        matches!(self, CType::Pointer(inner) if matches!(inner.as_ref(), CType::Function(_)))
+        matches!(self, CType::Pointer(inner, _) if matches!(inner.as_ref(), CType::Function(_)))
     }
 
     /// Whether this is a pointer-to-function-pointer: Pointer(Pointer(Function(_))).
     pub fn is_ptr_to_function_pointer(&self) -> bool {
-        matches!(self, CType::Pointer(inner)
-            if matches!(inner.as_ref(), CType::Pointer(inner2)
+        matches!(self, CType::Pointer(inner, _)
+            if matches!(inner.as_ref(), CType::Pointer(inner2, _)
                 if matches!(inner2.as_ref(), CType::Function(_))))
     }
 
     /// Get the pointee type if this is a Pointer.
     pub fn pointee(&self) -> Option<&CType> {
         match self {
-            CType::Pointer(inner) => Some(inner),
+            CType::Pointer(inner, _) => Some(inner),
             _ => None,
         }
     }
@@ -884,9 +896,9 @@ impl CType {
     ///   - strict=false: returns Some(X) (used when typedef fallback is acceptable)
     pub fn func_ptr_return_type(&self, strict: bool) -> Option<CType> {
         match self {
-            CType::Pointer(inner) => match inner.as_ref() {
+            CType::Pointer(inner, _) => match inner.as_ref() {
                 CType::Function(ft) => Some(ft.return_type.clone()),
-                CType::Pointer(inner2) => match inner2.as_ref() {
+                CType::Pointer(inner2, _) => match inner2.as_ref() {
                     CType::Function(ft) => Some(ft.return_type.clone()),
                     _ => if strict { None } else { Some(inner.as_ref().clone()) },
                 },
@@ -1053,7 +1065,7 @@ impl IrType {
             CType::LongDouble => IrType::F128,
             // Complex types are handled as aggregate (pointer to stack slot)
             CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => IrType::Ptr,
-            CType::Pointer(_) | CType::Array(_, _) | CType::Function(_) => IrType::Ptr,
+            CType::Pointer(_, _) | CType::Array(_, _) | CType::Function(_) => IrType::Ptr,
             CType::Struct(_) | CType::Union(_) => IrType::Ptr,
         }
     }

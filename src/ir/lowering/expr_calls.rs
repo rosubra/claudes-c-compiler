@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -178,7 +178,7 @@ impl Lowerer {
         // Extract low 8 bytes (rax)
         let lo = self.fresh_value();
         self.emit(Instruction::Cast { dest: lo, src: Operand::Value(dest), from_ty: IrType::I128, to_ty: IrType::I64 });
-        self.emit(Instruction::Store { val: Operand::Value(lo), ptr: alloca, ty: IrType::I64 });
+        self.emit(Instruction::Store { val: Operand::Value(lo), ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         // Extract high bytes (rdx): shift right by 64
         let shifted = self.fresh_value();
         self.emit(Instruction::BinOp { dest: shifted, op: IrBinOp::LShr, lhs: Operand::Value(dest), rhs: Operand::Const(IrConst::I64(64)), ty: IrType::I128 });
@@ -186,7 +186,7 @@ impl Lowerer {
         self.emit(Instruction::Cast { dest: hi, src: Operand::Value(shifted), from_ty: IrType::I128, to_ty: IrType::I64 });
         let hi_ptr = self.fresh_value();
         self.emit(Instruction::GetElementPtr { dest: hi_ptr, base: alloca, offset: Operand::Const(IrConst::I64(8)), ty: IrType::I64 });
-        self.emit(Instruction::Store { val: Operand::Value(hi), ptr: hi_ptr, ty: IrType::I64 });
+        self.emit(Instruction::Store { val: Operand::Value(hi), ptr: hi_ptr, ty: IrType::I64 , seg_override: AddressSpace::Default });
         Operand::Value(alloca)
     }
 
@@ -200,7 +200,7 @@ impl Lowerer {
                     // Store the raw 8 bytes (two F32s) into an alloca
                     let alloca = self.fresh_value();
                     self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 });
+                    self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 , seg_override: AddressSpace::Default });
                     Some(Operand::Value(alloca))
                 } else {
                     // ARM/RISC-V: real F32 in first FP reg (dest), imag F32 in second FP reg
@@ -209,7 +209,7 @@ impl Lowerer {
                     let alloca = self.fresh_value();
                     self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0, volatile: false });
                     // Store real part (F32) at offset 0
-                    self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F32 });
+                    self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F32 , seg_override: AddressSpace::Default });
                     // Store imag part (F32) at offset 4
                     let imag_ptr = self.fresh_value();
                     self.emit(Instruction::BinOp {
@@ -217,7 +217,7 @@ impl Lowerer {
                         lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::I64(4)),
                         ty: IrType::I64,
                     });
-                    self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F32 });
+                    self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F32 , seg_override: AddressSpace::Default });
                     Some(Operand::Value(alloca))
                 }
             }
@@ -227,14 +227,14 @@ impl Lowerer {
                 self.emit(Instruction::GetReturnF64Second { dest: imag_val });
                 let alloca = self.fresh_value();
                 self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 16, align: 0, volatile: false });
-                self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 });
+                self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 , seg_override: AddressSpace::Default });
                 let imag_ptr = self.fresh_value();
                 self.emit(Instruction::BinOp {
                     dest: imag_ptr, op: IrBinOp::Add,
                     lhs: Operand::Value(alloca), rhs: Operand::Const(IrConst::I64(8)),
                     ty: IrType::I64,
                 });
-                self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F64 });
+                self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: IrType::F64 , seg_override: AddressSpace::Default });
                 Some(Operand::Value(alloca))
             }
             _ => None,
@@ -320,7 +320,7 @@ impl Lowerer {
                         let alloc_size = if struct_size > 0 { struct_size } else { 8 };
                         let alloca = self.fresh_value();
                         self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                        self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
                         val = Operand::Value(alloca);
                     }
                 }
@@ -486,7 +486,7 @@ impl Lowerer {
             addr
         };
         let ptr_val = self.fresh_value();
-        self.emit(Instruction::Load { dest: ptr_val, ptr: base_addr, ty: IrType::Ptr });
+        self.emit(Instruction::Load { dest: ptr_val, ptr: base_addr, ty: IrType::Ptr , seg_override: AddressSpace::Default });
         ptr_val
     }
 
@@ -534,10 +534,10 @@ impl Lowerer {
 
     pub(super) fn extract_return_type_from_ctype(ctype: &CType) -> IrType {
         match ctype {
-            CType::Pointer(inner) => {
+            CType::Pointer(inner, _) => {
                 match inner.as_ref() {
                     CType::Function(ft) => IrType::from_ctype(&ft.return_type),
-                    CType::Pointer(ret) => {
+                    CType::Pointer(ret, _) => {
                         match ret.as_ref() {
                             CType::Float => IrType::F32,
                             CType::Double => IrType::F64,

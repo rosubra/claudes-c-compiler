@@ -9,7 +9,7 @@
 //! (typedef names, struct/union, enum, typeof), so implementors provide just those
 //! via required trait methods. This ensures primitive type mapping can never diverge.
 
-use crate::common::types::{CType, FunctionType};
+use crate::common::types::{AddressSpace, CType, FunctionType};
 use crate::frontend::parser::ast::{
     DerivedDeclarator, EnumVariant, Expr, ParamDecl, StructFieldDecl, TypeSpecifier,
 };
@@ -82,8 +82,8 @@ pub trait TypeConvertContext {
             TypeSpecifier::ComplexLongDouble => CType::ComplexLongDouble,
 
             // === Compound types (shared logic) ===
-            TypeSpecifier::Pointer(inner) => {
-                CType::Pointer(Box::new(self.resolve_type_spec_to_ctype(inner)))
+            TypeSpecifier::Pointer(inner, addr_space) => {
+                CType::Pointer(Box::new(self.resolve_type_spec_to_ctype(inner)), *addr_space)
             }
             TypeSpecifier::Array(elem, size_expr) => {
                 let elem_ctype = self.resolve_type_spec_to_ctype(elem);
@@ -100,7 +100,7 @@ pub trait TypeConvertContext {
                     return_type: ret_ctype,
                     params: param_ctypes,
                     variadic: *variadic,
-                }))))
+                }))), AddressSpace::Default)
             }
             TypeSpecifier::TypeofType(inner) => self.resolve_type_spec_to_ctype(inner),
             TypeSpecifier::AutoType => CType::Int,
@@ -199,7 +199,7 @@ pub fn build_full_ctype(
         let mut result = base;
         for d in &derived[..fp_start] {
             if matches!(d, DerivedDeclarator::Pointer) {
-                result = CType::Pointer(Box::new(result));
+                result = CType::Pointer(Box::new(result), AddressSpace::Default);
             }
             // Array declarators in prefix are outer wrappers, handled after the core.
         }
@@ -228,10 +228,10 @@ pub fn build_full_ctype(
                             params: param_types,
                             variadic,
                         }));
-                        result = CType::Pointer(Box::new(func_type));
+                        result = CType::Pointer(Box::new(func_type), AddressSpace::Default);
                         i += 2;
                     } else {
-                        result = CType::Pointer(Box::new(result));
+                        result = CType::Pointer(Box::new(result), AddressSpace::Default);
                         i += 1;
                     }
                 }
@@ -242,7 +242,7 @@ pub fn build_full_ctype(
                         params: param_types,
                         variadic: *variadic,
                     }));
-                    result = CType::Pointer(Box::new(func_type));
+                    result = CType::Pointer(Box::new(func_type), AddressSpace::Default);
                     i += 1;
                 }
                 DerivedDeclarator::Function(params, variadic) => {
@@ -291,7 +291,7 @@ pub fn build_full_ctype(
         while i < derived.len() {
             match &derived[i] {
                 DerivedDeclarator::Pointer => {
-                    result = CType::Pointer(Box::new(result));
+                    result = CType::Pointer(Box::new(result), AddressSpace::Default);
                     i += 1;
                 }
                 DerivedDeclarator::Array(_) => {

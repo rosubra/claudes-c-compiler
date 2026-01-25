@@ -1,6 +1,6 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType, StructLayout};
+use crate::common::types::{AddressSpace, IrType, CType, StructLayout};
 use super::lowering::Lowerer;
 use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, LValue};
 use crate::frontend::sema::type_context::extract_fptr_typedef_info;
@@ -310,11 +310,11 @@ impl Lowerer {
                 let val = self.lower_expr(e);
                 let expr_ty = self.get_expr_type(e);
                 let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
+                self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty , seg_override: AddressSpace::Default });
             }
         } else {
             let zero = Self::complex_zero(comp_ty);
-            self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
+            self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty , seg_override: AddressSpace::Default });
         }
         // Store imag part
         let imag_ptr = self.emit_gep_offset(dest_addr, comp_size, IrType::I8);
@@ -323,11 +323,11 @@ impl Lowerer {
                 let val = self.lower_expr(e);
                 let expr_ty = self.get_expr_type(e);
                 let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
+                self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty , seg_override: AddressSpace::Default });
             }
         } else {
             let zero = Self::complex_zero(comp_ty);
-            self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
+            self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty , seg_override: AddressSpace::Default });
         }
     }
 
@@ -481,7 +481,7 @@ impl Lowerer {
                             } else {
                                 let val = self.lower_and_cast_init_expr(e, field_ty);
                                 let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
-                                self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                                self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty , seg_override: AddressSpace::Default });
                             }
                         } else {
                             // Non-char array field with flat expression initializer:
@@ -491,7 +491,7 @@ impl Lowerer {
                             let elem_is_bool = **elem_ty == CType::Bool;
                             let val = self.lower_init_expr_bool_aware(e, elem_ir_ty, elem_is_bool);
                             let field_addr = self.emit_gep_offset(base, field_offset, elem_ir_ty);
-                            self.emit(Instruction::Store { val, ptr: field_addr, ty: elem_ir_ty });
+                            self.emit(Instruction::Store { val, ptr: field_addr, ty: elem_ir_ty , seg_override: AddressSpace::Default });
                             // Consume additional items for remaining array elements
                             let mut arr_idx = 1usize;
                             while arr_idx < arr_size && item_idx + 1 < items.len() {
@@ -506,7 +506,7 @@ impl Lowerer {
                                     let next_val = self.lower_init_expr_bool_aware(next_e, elem_ir_ty, elem_is_bool);
                                     let offset = field_offset + arr_idx * elem_size;
                                     let elem_addr = self.emit_gep_offset(base, offset, elem_ir_ty);
-                                    self.emit(Instruction::Store { val: next_val, ptr: elem_addr, ty: elem_ir_ty });
+                                    self.emit(Instruction::Store { val: next_val, ptr: elem_addr, ty: elem_ir_ty , seg_override: AddressSpace::Default });
                                 }
                                 arr_idx += 1;
                             }
@@ -517,7 +517,7 @@ impl Lowerer {
                         if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
                             self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
                         } else {
-                            self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                            self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty , seg_override: AddressSpace::Default });
                         }
                     }
                 }
@@ -595,7 +595,7 @@ impl Lowerer {
                     if let Initializer::Expr(e) = &first.init {
                         let field_ir_ty = IrType::from_ctype(field_ctype);
                         let val = self.lower_init_expr_bool_aware(e, field_ir_ty, *field_ctype == CType::Bool);
-                        self.emit(Instruction::Store { val, ptr: base, ty: field_ir_ty });
+                        self.emit(Instruction::Store { val, ptr: base, ty: field_ir_ty , seg_override: AddressSpace::Default });
                     }
                 }
             }
@@ -983,7 +983,7 @@ impl Lowerer {
         // Store switch value in an alloca for dispatch chain reloading
         let switch_alloca = self.fresh_value();
         self.emit(Instruction::Alloca { dest: switch_alloca, ty: IrType::I64, size: 8, align: 0, volatile: false });
-        self.emit(Instruction::Store { val, ptr: switch_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Store { val, ptr: switch_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
 
         let dispatch_label = self.fresh_label();
         let end_label = self.fresh_label();
@@ -1066,7 +1066,7 @@ impl Lowerer {
         // Emit equality checks for individual cases
         for (case_val, case_label) in cases.iter() {
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 });
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
             let cmp_result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(loaded), Operand::Const(IrConst::I64(*case_val)), IrType::I64);
 
             check_idx += 1;
@@ -1088,7 +1088,7 @@ impl Lowerer {
         let le_op = if is_unsigned { IrCmpOp::Ule } else { IrCmpOp::Sle };
         for (low, high, range_label) in case_ranges.iter() {
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 });
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
             let ge_result = self.emit_cmp_val(ge_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
             let le_result = self.emit_cmp_val(le_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
             let and_result = self.fresh_value();
@@ -1202,9 +1202,11 @@ impl Lowerer {
         let mut ir_outputs = Vec::new();
         let mut ir_inputs = Vec::new();
         let mut operand_types = Vec::new();
+        let mut seg_overrides = Vec::new();
 
         // Process output operands and synthetic "+" inputs
         let mut plus_input_types = Vec::new();
+        let mut plus_input_segs = Vec::new();
         for out in outputs {
             let mut constraint = out.constraint.clone();
             let name = out.name.clone();
@@ -1219,22 +1221,29 @@ impl Lowerer {
                 }
             }
             let out_ty = IrType::from_ctype(&self.expr_ctype(&out.expr));
+            // Detect address space for memory operands (e.g., __seg_gs pointer dereferences)
+            let out_seg = self.get_asm_operand_addr_space(&out.expr);
             if let Some(lv) = self.lower_lvalue(&out.expr) {
                 let ptr = match lv {
                     LValue::Variable(v) | LValue::Address(v) => v,
                 };
                 if constraint.contains('+') {
                     let cur_val = self.fresh_value();
-                    self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty });
+                    self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
                     ir_inputs.push((constraint.replace('+', "").to_string(), Operand::Value(cur_val), name.clone()));
                     plus_input_types.push(out_ty);
+                    plus_input_segs.push(out_seg);
                 }
                 ir_outputs.push((constraint, ptr, name));
                 operand_types.push(out_ty);
+                seg_overrides.push(out_seg);
             }
         }
         for ty in plus_input_types {
             operand_types.push(ty);
+        }
+        for seg in plus_input_segs {
+            seg_overrides.push(seg);
         }
 
         // Process input operands
@@ -1253,6 +1262,7 @@ impl Lowerer {
                 }
             }
             let inp_ty = IrType::from_ctype(&self.expr_ctype(&inp.expr));
+            let inp_seg = self.get_asm_operand_addr_space(&inp.expr);
             let mut sym_name: Option<String> = None;
             let val = if constraint_has_immediate_alt(&constraint) {
                 if let Some(const_val) = self.eval_const_expr(&inp.expr) {
@@ -1276,6 +1286,7 @@ impl Lowerer {
             ir_inputs.push((constraint, val, name));
             operand_types.push(inp_ty);
             input_symbols.push(sym_name);
+            seg_overrides.push(inp_seg);
         }
 
         // Resolve goto labels
@@ -1292,6 +1303,7 @@ impl Lowerer {
             operand_types,
             goto_labels: ir_goto_labels,
             input_symbols,
+            seg_overrides,
         });
     }
 
@@ -1360,6 +1372,16 @@ impl Lowerer {
         // Check globals (for global register variables like `current_stack_pointer`)
         self.globals.get(name)
             .and_then(|info| info.asm_register.clone())
+    }
+
+    /// Detect address space for an inline asm operand expression.
+    /// For expressions like `*(typeof(var) __seg_gs *)(uintptr_t)&var`,
+    /// returns the address space from the pointer type in the deref.
+    fn get_asm_operand_addr_space(&self, expr: &Expr) -> AddressSpace {
+        match expr {
+            Expr::Deref(inner, _) => self.get_addr_space_of_ptr_expr(inner),
+            _ => AddressSpace::Default,
+        }
     }
 
     /// Compute the runtime sizeof for a VLA local variable.

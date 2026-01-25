@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use super::lowering::Lowerer;
 use super::definitions::GlobalInfo;
 
@@ -136,10 +136,11 @@ impl Lowerer {
             operand_types: vec![ty],
             goto_labels: vec![],
             input_symbols: vec![],
+            seg_overrides: vec![AddressSpace::Default],
         });
         // Load the result from the alloca
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty });
+        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty , seg_override: AddressSpace::Default });
         Operand::Value(result)
     }
 
@@ -155,7 +156,7 @@ impl Lowerer {
             }
         }
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty: ginfo.ty });
+        self.emit(Instruction::Load { dest, ptr: addr, ty: ginfo.ty , seg_override: AddressSpace::Default });
         Operand::Value(dest)
     }
 
@@ -185,7 +186,7 @@ impl Lowerer {
                     return Operand::Value(addr);
                 }
                 let dest = self.fresh_value();
-                self.emit(Instruction::Load { dest, ptr: addr, ty });
+                self.emit(Instruction::Load { dest, ptr: addr, ty , seg_override: AddressSpace::Default });
                 return Operand::Value(dest);
             }
             if is_array || is_struct {
@@ -195,7 +196,7 @@ impl Lowerer {
                 return Operand::Value(alloca);
             }
             let dest = self.fresh_value();
-            self.emit(Instruction::Load { dest, ptr: alloca, ty });
+            self.emit(Instruction::Load { dest, ptr: alloca, ty , seg_override: AddressSpace::Default });
             return Operand::Value(dest);
         }
 
@@ -606,17 +607,17 @@ impl Lowerer {
 
         self.start_block(then_label);
         let then_val = then_fn(self);
-        self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         self.terminate(Terminator::Branch(end_label));
 
         self.start_block(else_label);
         let else_val = else_fn(self);
-        self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         Operand::Value(result)
     }
 
@@ -687,7 +688,7 @@ impl Lowerer {
 
             // Store source value at offset 0 (all union members share offset 0)
             let store_ty = from_ty;
-            self.emit(Instruction::Store { val: src, ptr: alloca, ty: store_ty });
+            self.emit(Instruction::Store { val: src, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
 
             return Operand::Value(alloca);
         }
@@ -774,7 +775,7 @@ impl Lowerer {
         let is_scalar = struct_layout.is_none() && !matches!(ctype, CType::Array(_, _));
         if is_scalar {
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: alloca, ty });
+            self.emit(Instruction::Load { dest: loaded, ptr: alloca, ty , seg_override: AddressSpace::Default });
             Operand::Value(loaded)
         } else {
             Operand::Value(alloca)
@@ -826,7 +827,7 @@ impl Lowerer {
                 Initializer::Expr(expr) => {
                     let val = self.lower_expr(expr);
                     if current_idx == 0 && items.len() == 1 && elem_size == size {
-                        self.emit(Instruction::Store { val, ptr: alloca, ty });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty , seg_override: AddressSpace::Default });
                     } else {
                         let offset_val = Operand::Const(IrConst::I64(elem_offset as i64));
                         let elem_ptr = self.fresh_value();
@@ -834,7 +835,7 @@ impl Lowerer {
                             dest: elem_ptr, base: alloca, offset: offset_val, ty,
                         });
                         let store_ty = Self::ir_type_for_size(elem_size);
-                        self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty });
+                        self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty , seg_override: AddressSpace::Default });
                     }
                 }
                 Initializer::List(sub_items) => {
@@ -873,7 +874,7 @@ impl Lowerer {
                                         dest: elem_ptr, base: alloca, offset: offset_val, ty,
                                     });
                                     let store_ty = Self::ir_type_for_size(elem_size);
-                                    self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty });
+                                    self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty , seg_override: AddressSpace::Default });
                                 }
                             }
                         }
@@ -1040,11 +1041,11 @@ impl Lowerer {
                         self.emit_string_to_alloca(alloca, s, 0);
                     } else {
                         let val = self.lower_expr(expr);
-                        self.emit(Instruction::Store { val, ptr: alloca, ty });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty , seg_override: AddressSpace::Default });
                     }
                 } else {
                     let val = self.lower_expr(expr);
-                    self.emit(Instruction::Store { val, ptr: alloca, ty });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty , seg_override: AddressSpace::Default });
                 }
             }
             Initializer::List(items) => {
@@ -1203,7 +1204,7 @@ impl Lowerer {
         // direct function pointers (no-op deref) from pointer-to-function-pointers
         // (which need a real load despite having similar CType shapes).
         let pointee_is_no_load = |ct: &CType| -> bool {
-            if let CType::Pointer(ref pointee) = ct {
+            if let CType::Pointer(ref pointee, _) = ct {
                 matches!(pointee.as_ref(),
                     CType::Array(_, _) | CType::Struct(_) | CType::Union(_))
                     || pointee.is_complex()
@@ -1243,11 +1244,12 @@ impl Lowerer {
             }
         }
 
+        let addr_space = self.get_addr_space_of_ptr_expr(inner);
         let ptr = self.lower_expr(inner);
         let dest = self.fresh_value();
         let deref_ty = self.get_pointee_type_of_expr(inner).unwrap_or(IrType::I64);
         let ptr_val = self.operand_to_value(ptr);
-        self.emit(Instruction::Load { dest, ptr: ptr_val, ty: deref_ty });
+        self.emit(Instruction::Load { dest, ptr: ptr_val, ty: deref_ty, seg_override: addr_space });
         Operand::Value(dest)
     }
 
@@ -1267,10 +1269,11 @@ impl Lowerer {
                 return Operand::Value(addr);
             }
         }
+        let addr_space = self.get_addr_space_of_ptr_expr(base);
         let elem_ty = self.get_expr_type(expr);
         let addr = self.compute_array_element_addr(base, index);
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty: elem_ty });
+        self.emit(Instruction::Load { dest, ptr: addr, ty: elem_ty, seg_override: addr_space });
         Operand::Value(dest)
     }
 
@@ -1283,6 +1286,13 @@ impl Lowerer {
             self.resolve_pointer_member_access_with_ctype(base_expr, field_name)
         } else {
             self.resolve_member_access_with_ctype(base_expr, field_name)
+        };
+
+        // For p->field, extract address space from the pointer type
+        let addr_space = if is_pointer {
+            self.get_addr_space_of_ptr_expr(base_expr)
+        } else {
+            AddressSpace::Default
         };
 
         let base_addr = if is_pointer {
@@ -1316,7 +1326,7 @@ impl Lowerer {
         }
 
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
+        self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty, seg_override: addr_space });
         Operand::Value(dest)
     }
 
@@ -1391,10 +1401,8 @@ impl Lowerer {
         let lhs_val = self.lower_condition_expr(lhs);
 
         let default_val = if is_and { 0 } else { 1 };
-        self.emit(Instruction::Store {
-            val: Operand::Const(IrConst::I64(default_val)),
-            ptr: result_alloca, ty: IrType::I64,
-        });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(default_val)), ptr: result_alloca, ty: IrType::I64,
+         seg_override: AddressSpace::Default });
 
         let (true_label, false_label) = if is_and {
             (rhs_label, end_label)
@@ -1406,12 +1414,12 @@ impl Lowerer {
         self.start_block(rhs_label);
         let rhs_val = self.lower_condition_expr(rhs);
         let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(IrConst::I64(0)), IrType::I64);
-        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 });
+        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
         Operand::Value(result)
     }
 
@@ -1743,19 +1751,13 @@ impl Lowerer {
                 align: 0,
                 volatile: false,
             });
-            self.emit(Instruction::Store {
-                val: Operand::Value(packed),
-                ptr: tmp_alloca,
-                ty: read_ty,
-            });
+            self.emit(Instruction::Store { val: Operand::Value(packed), ptr: tmp_alloca, ty: read_ty,
+             seg_override: AddressSpace::Default });
 
             // Load real part (first F32 at offset 0)
             let real_dest = self.fresh_value();
-            self.emit(Instruction::Load {
-                dest: real_dest,
-                ptr: tmp_alloca,
-                ty: IrType::F32,
-            });
+            self.emit(Instruction::Load { dest: real_dest, ptr: tmp_alloca, ty: IrType::F32,
+             seg_override: AddressSpace::Default });
 
             // Load imag part (second F32 at offset +4)
             let imag_ptr = self.fresh_value();
@@ -1767,11 +1769,8 @@ impl Lowerer {
                 ty: IrType::I64,
             });
             let imag_dest = self.fresh_value();
-            self.emit(Instruction::Load {
-                dest: imag_dest,
-                ptr: imag_ptr,
-                ty: IrType::F32,
-            });
+            self.emit(Instruction::Load { dest: imag_dest, ptr: imag_ptr, ty: IrType::F32,
+             seg_override: AddressSpace::Default });
 
             // Allocate and store the complex float value
             let alloca = self.alloca_complex(ctype);

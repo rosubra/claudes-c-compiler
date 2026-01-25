@@ -5,7 +5,7 @@
 //! IR types (for correct loads/stores through pointer dereference and subscript).
 
 use crate::frontend::parser::ast::*;
-use crate::common::types::{IrType, RcLayout, CType};
+use crate::common::types::{AddressSpace, IrType, RcLayout, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -15,12 +15,12 @@ impl Lowerer {
         // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match resolved {
-            TypeSpecifier::Pointer(inner) => return self.get_struct_layout_for_type(inner),
+            TypeSpecifier::Pointer(inner, _) => return self.get_struct_layout_for_type(inner),
             _ => {}
         }
         // Fall back to CType for typedef'd pointer types
         let ctype = self.type_spec_to_ctype(type_spec);
-        if let CType::Pointer(inner) = &ctype {
+        if let CType::Pointer(inner, _) = &ctype {
             return self.struct_layout_from_ctype(inner);
         }
         None
@@ -32,14 +32,14 @@ impl Lowerer {
         // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match &resolved {
-            TypeSpecifier::Pointer(inner) => return Some(self.type_spec_to_ir(inner)),
+            TypeSpecifier::Pointer(inner, _) => return Some(self.type_spec_to_ir(inner)),
             TypeSpecifier::Array(inner, _) => return Some(self.type_spec_to_ir(inner)),
             _ => {}
         }
         // Fall back to CType for typedef'd pointer/array types
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
-            CType::Pointer(inner) => Some(IrType::from_ctype(inner)),
+            CType::Pointer(inner, _) => Some(IrType::from_ctype(inner)),
             CType::Array(inner, _) => Some(IrType::from_ctype(inner)),
             _ => None,
         }
@@ -65,7 +65,7 @@ impl Lowerer {
                 Some(IrType::Ptr)
             } else {
                 match type_spec {
-                    TypeSpecifier::Pointer(inner) => Some(self.type_spec_to_ir(inner)),
+                    TypeSpecifier::Pointer(inner, _) => Some(self.type_spec_to_ir(inner)),
                     _ => Some(self.type_spec_to_ir(type_spec)),
                 }
             }
@@ -134,7 +134,7 @@ impl Lowerer {
                 false
             }
             Expr::Cast(ref type_spec, _, _) => {
-                matches!(type_spec, TypeSpecifier::Pointer(_))
+                matches!(type_spec, TypeSpecifier::Pointer(_, _))
             }
             Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
             Expr::BinaryOp(op, lhs, rhs, _) => {
@@ -177,7 +177,7 @@ impl Lowerer {
             Expr::FunctionCall(func, _, _) => {
                 // Check CType for function call return
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return matches!(ctype, CType::Pointer(_));
+                    return matches!(ctype, CType::Pointer(_, _));
                 }
                 // Fallback: check IrType return type
                 if let Expr::Identifier(name, _) = func.as_ref() {
@@ -189,13 +189,13 @@ impl Lowerer {
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, false) {
-                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
+                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_, _));
                 }
                 false
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, true) {
-                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
+                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_, _));
                 }
                 false
             }
@@ -203,14 +203,14 @@ impl Lowerer {
                 // Dereferencing a pointer-to-array yields an array which decays to pointer.
                 // Dereferencing a pointer-to-pointer yields a pointer.
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
+                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_, _));
                 }
                 false
             }
             Expr::Assign(_, _, _) | Expr::CompoundAssign(_, _, _, _) => {
                 // Assignment result has the type of the LHS
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
+                    return matches!(ctype, CType::Array(_, _) | CType::Pointer(_, _));
                 }
                 false
             }
@@ -262,7 +262,7 @@ impl Lowerer {
         // Try CType-based resolution first for accurate type information
         if let Some(ctype) = self.get_expr_ctype(expr) {
             match &ctype {
-                CType::Pointer(pointee) => {
+                CType::Pointer(pointee, _) => {
                     // GCC extension: function pointer arithmetic uses step size 1,
                     // treating function pointers like void* for arithmetic purposes.
                     if matches!(pointee.as_ref(), CType::Function(_)) {
@@ -320,7 +320,7 @@ impl Lowerer {
             Expr::Comma(_, rhs, _) => self.get_pointer_elem_size_from_expr(rhs),
             Expr::FunctionCall(_, _, _) => {
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    if let CType::Pointer(pointee) = &ctype {
+                    if let CType::Pointer(pointee, _) = &ctype {
                         return self.resolve_ctype_size(pointee).max(1);
                     }
                 }
@@ -334,7 +334,7 @@ impl Lowerer {
                 self.sizeof_expr(inner).max(1)
             }
             Expr::Cast(ref type_spec, _, _) => {
-                if let TypeSpecifier::Pointer(ref inner) = type_spec {
+                if let TypeSpecifier::Pointer(ref inner, _) = type_spec {
                     self.sizeof_type(inner)
                 } else {
                     8
@@ -345,7 +345,7 @@ impl Lowerer {
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                     match &ctype {
                         CType::Array(elem_ty, _) => return self.resolve_ctype_size(elem_ty).max(1),
-                        CType::Pointer(pointee_ty) => return self.resolve_ctype_size(pointee_ty).max(1),
+                        CType::Pointer(pointee_ty, _) => return self.resolve_ctype_size(pointee_ty).max(1),
                         _ => {}
                     }
                 }
@@ -366,7 +366,7 @@ impl Lowerer {
         // First try CType-based resolution (handles multi-level pointers correctly)
         if let Some(ctype) = self.get_expr_ctype(expr) {
             match ctype {
-                CType::Pointer(inner) => return Some(IrType::from_ctype(&inner)),
+                CType::Pointer(inner, _) => return Some(IrType::from_ctype(&inner)),
                 CType::Array(elem, _) => return Some(IrType::from_ctype(&elem)),
                 _ => {}
             }
@@ -396,7 +396,7 @@ impl Lowerer {
                 self.get_pointee_type_of_expr(rhs)
             }
             Expr::Cast(ref type_spec, inner, _) => {
-                if let TypeSpecifier::Pointer(ref pointee_ts) = type_spec {
+                if let TypeSpecifier::Pointer(ref pointee_ts, _) = type_spec {
                     let pt = self.type_spec_to_ir(pointee_ts);
                     return Some(pt);
                 }
@@ -428,7 +428,7 @@ impl Lowerer {
                 let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
                 if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                     match ctype {
-                        CType::Pointer(inner) => return Some(IrType::from_ctype(&inner)),
+                        CType::Pointer(inner, _) => return Some(IrType::from_ctype(&inner)),
                         CType::Array(elem, _) => return Some(IrType::from_ctype(&elem)),
                         _ => {}
                     }
@@ -437,5 +437,24 @@ impl Lowerer {
             }
             _ => None,
         }
+    }
+
+    /// Get the address space of a pointer expression (e.g., `__seg_gs` from a
+    /// `typeof(x) __seg_gs *` cast). Returns `AddressSpace::Default` if unknown
+    /// or the expression is not a pointer with a named address space.
+    pub(super) fn get_addr_space_of_ptr_expr(&self, expr: &Expr) -> AddressSpace {
+        // Try CType-based resolution first
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            if let CType::Pointer(_, addr_space) = ctype {
+                return addr_space;
+            }
+        }
+        // For cast expressions, check the target type directly
+        if let Expr::Cast(ref type_spec, _, _) = expr {
+            if let TypeSpecifier::Pointer(_, addr_space) = type_spec {
+                return *addr_space;
+            }
+        }
+        AddressSpace::Default
     }
 }

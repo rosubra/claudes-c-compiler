@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -73,7 +73,7 @@ impl Lowerer {
             let rhs_val = self.lower_expr(rhs);
             if let Some(lv) = self.lower_lvalue(lhs) {
                 let dest_addr = self.lvalue_addr(&lv);
-                self.emit(Instruction::Store { val: rhs_val, ptr: dest_addr, ty: IrType::I64 });
+                self.emit(Instruction::Store { val: rhs_val, ptr: dest_addr, ty: IrType::I64 , seg_override: AddressSpace::Default });
                 return Operand::Value(dest_addr);
             }
             return rhs_val;
@@ -191,7 +191,7 @@ impl Lowerer {
     /// Handles packed bitfields that span beyond the storage type (bit_offset + bit_width > storage_bits).
     pub(super) fn store_bitfield(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32, val: Operand) {
         if bit_width >= 64 && bit_offset == 0 {
-            self.emit(Instruction::Store { val, ptr: addr, ty: storage_ty });
+            self.emit(Instruction::Store { val, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
             return;
         }
 
@@ -213,13 +213,13 @@ impl Lowerer {
         };
 
         let old_val = self.fresh_value();
-        self.emit(Instruction::Load { dest: old_val, ptr: addr, ty: storage_ty });
+        self.emit(Instruction::Load { dest: old_val, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
 
         let clear_mask = if bit_width >= 64 { 0u64 } else { !(mask << bit_offset) };
         let cleared = self.emit_binop_val(IrBinOp::And, Operand::Value(old_val), Operand::Const(IrConst::I64(clear_mask as i64)), IrType::I64);
         let new_val = self.emit_binop_val(IrBinOp::Or, Operand::Value(cleared), Operand::Value(shifted_val), IrType::I64);
 
-        self.emit(Instruction::Store { val: Operand::Value(new_val), ptr: addr, ty: storage_ty });
+        self.emit(Instruction::Store { val: Operand::Value(new_val), ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
     }
 
     /// Store a bitfield that spans across two storage units (packed bitfields).
@@ -242,11 +242,11 @@ impl Lowerer {
 
         // Read-modify-write low storage unit
         let old_low = self.fresh_value();
-        self.emit(Instruction::Load { dest: old_low, ptr: addr, ty: storage_ty });
+        self.emit(Instruction::Load { dest: old_low, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
         let low_clear = !(low_mask << bit_offset);
         let cleared_low = self.emit_binop_val(IrBinOp::And, Operand::Value(old_low), Operand::Const(IrConst::I64(low_clear as i64)), IrType::I64);
         let new_low = self.emit_binop_val(IrBinOp::Or, Operand::Value(cleared_low), Operand::Value(shifted_low), IrType::I64);
-        self.emit(Instruction::Store { val: Operand::Value(new_low), ptr: addr, ty: storage_ty });
+        self.emit(Instruction::Store { val: Operand::Value(new_low), ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
 
         // High part: take remaining bits from masked_val >> low_bits, store at bit 0 of next unit
         let high_val = self.emit_binop_val(IrBinOp::LShr, Operand::Value(masked_val), Operand::Const(IrConst::I64(low_bits as i64)), IrType::I64);
@@ -257,11 +257,11 @@ impl Lowerer {
 
         // Read-modify-write high storage unit
         let old_high = self.fresh_value();
-        self.emit(Instruction::Load { dest: old_high, ptr: high_addr, ty: storage_ty });
+        self.emit(Instruction::Load { dest: old_high, ptr: high_addr, ty: storage_ty , seg_override: AddressSpace::Default });
         let high_clear = !high_mask;
         let cleared_high = self.emit_binop_val(IrBinOp::And, Operand::Value(old_high), Operand::Const(IrConst::I64(high_clear as i64)), IrType::I64);
         let new_high = self.emit_binop_val(IrBinOp::Or, Operand::Value(cleared_high), Operand::Value(masked_high), IrType::I64);
-        self.emit(Instruction::Store { val: Operand::Value(new_high), ptr: high_addr, ty: storage_ty });
+        self.emit(Instruction::Store { val: Operand::Value(new_high), ptr: high_addr, ty: storage_ty , seg_override: AddressSpace::Default });
     }
 
     /// Extract a bitfield value from a loaded storage unit.
@@ -313,7 +313,7 @@ impl Lowerer {
 
             // Load low part, shift right by bit_offset to get low_bits at bit 0
             let low_loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: low_loaded, ptr: addr, ty: storage_ty });
+            self.emit(Instruction::Load { dest: low_loaded, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
             let low_val = if bit_offset > 0 {
                 let shifted = self.emit_binop_val(IrBinOp::LShr, Operand::Value(low_loaded), Operand::Const(IrConst::I64(bit_offset as i64)), IrType::I64);
                 shifted
@@ -326,7 +326,7 @@ impl Lowerer {
             // Load high part from next storage unit
             let high_addr = self.emit_gep_offset(addr, storage_ty.size(), IrType::I8);
             let high_loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: high_loaded, ptr: high_addr, ty: storage_ty });
+            self.emit(Instruction::Load { dest: high_loaded, ptr: high_addr, ty: storage_ty , seg_override: AddressSpace::Default });
             let high_mask = if high_bits >= 64 { u64::MAX } else { (1u64 << high_bits) - 1 };
             let masked_high = self.emit_binop_val(IrBinOp::And, Operand::Value(high_loaded), Operand::Const(IrConst::I64(high_mask as i64)), IrType::I64);
 
@@ -346,7 +346,7 @@ impl Lowerer {
         } else {
             // Normal case: load single storage unit and extract
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: storage_ty });
+            self.emit(Instruction::Load { dest: loaded, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
             self.extract_bitfield(loaded, storage_ty, bit_offset, bit_width)
         }
     }

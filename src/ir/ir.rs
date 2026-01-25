@@ -1,4 +1,4 @@
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 
 /// A basic block identifier. Uses a u32 index for zero-cost copies
 /// instead of heap-allocated String labels. The block's assembly label
@@ -161,10 +161,12 @@ pub enum Instruction {
     DynAlloca { dest: Value, size: Operand, align: usize },
 
     /// Store to memory: store val, ptr (type indicates size of store)
-    Store { val: Operand, ptr: Value, ty: IrType },
+    /// seg_override: segment register override for x86 (%gs:/%fs:) from named address spaces.
+    Store { val: Operand, ptr: Value, ty: IrType, seg_override: AddressSpace },
 
     /// Load from memory: %dest = load ptr
-    Load { dest: Value, ptr: Value, ty: IrType },
+    /// seg_override: segment register override for x86 (%gs:/%fs:) from named address spaces.
+    Load { dest: Value, ptr: Value, ty: IrType, seg_override: AddressSpace },
 
     /// Binary operation: %dest = op lhs, rhs
     BinOp { dest: Value, op: IrBinOp, lhs: Operand, rhs: Operand, ty: IrType },
@@ -312,6 +314,9 @@ pub enum Instruction {
         /// One entry per input; None if the input is not a symbol reference.
         /// Used by %P and %a modifiers to emit raw symbol names in inline asm.
         input_symbols: Vec<Option<String>>,
+        /// Per-operand address space overrides (outputs first, then inputs).
+        /// Non-Default entries cause segment prefix on memory operands (e.g., %gs:).
+        seg_overrides: Vec<AddressSpace>,
     },
 
     /// Target-independent intrinsic operation (fences, SIMD, CRC32, etc.).

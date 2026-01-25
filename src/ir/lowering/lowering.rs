@@ -15,7 +15,7 @@ use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::{FunctionInfo, ExprTypeMap, ConstMap};
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType};
 use crate::backend::Target;
 use super::definitions::*;
 use super::func_state::FunctionBuildState;
@@ -440,7 +440,7 @@ impl Lowerer {
         } else {
             let mut ct = self.type_spec_to_ctype(ret_type_spec);
             for _ in 0..ptr_count {
-                ct = CType::Pointer(Box::new(ct));
+                ct = CType::Pointer(Box::new(ct), AddressSpace::Default);
             }
             ct
         };
@@ -647,7 +647,7 @@ impl Lowerer {
             offset: Operand::Const(IrConst::I64(byte_offset as i64)),
             ty,
         });
-        self.emit(Instruction::Store { val, ptr: addr, ty });
+        self.emit(Instruction::Store { val, ptr: addr, ty , seg_override: AddressSpace::Default });
     }
 
     /// Lower an expression, cast to target type, then store at base + byte_offset.
@@ -908,7 +908,7 @@ impl Lowerer {
             let ct = self.type_spec_to_ctype(&orig_param.type_spec);
             let mut depth = 0usize;
             let mut t = &ct;
-            while let CType::Pointer(inner) = t {
+            while let CType::Pointer(inner, _) = t {
                 depth += 1;
                 t = inner.as_ref();
             }
@@ -926,7 +926,7 @@ impl Lowerer {
         // Register function pointer parameter signatures for indirect calls
         if let Some(ref fptr_params) = orig_param.fptr_params {
             let ret_ty = match &orig_param.type_spec {
-                TypeSpecifier::Pointer(inner) => self.type_spec_to_ir(inner),
+                TypeSpecifier::Pointer(inner, _) => self.type_spec_to_ir(inner),
                 _ => self.type_spec_to_ir(&orig_param.type_spec),
             };
             if let Some(ref name) = orig_param.name {
@@ -971,14 +971,14 @@ impl Lowerer {
         self.emit(Instruction::Alloca { dest: complex_alloca, ty: IrType::Ptr, size: complex_size, align: 0, volatile: false });
 
         let real_val = self.fresh_value();
-        self.emit(Instruction::Load { dest: real_val, ptr: real_alloca, ty: comp_ty });
-        self.emit(Instruction::Store { val: Operand::Value(real_val), ptr: complex_alloca, ty: comp_ty });
+        self.emit(Instruction::Load { dest: real_val, ptr: real_alloca, ty: comp_ty , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Store { val: Operand::Value(real_val), ptr: complex_alloca, ty: comp_ty , seg_override: AddressSpace::Default });
 
         let imag_val = self.fresh_value();
-        self.emit(Instruction::Load { dest: imag_val, ptr: imag_alloca, ty: comp_ty });
+        self.emit(Instruction::Load { dest: imag_val, ptr: imag_alloca, ty: comp_ty , seg_override: AddressSpace::Default });
         let imag_ptr = self.fresh_value();
         self.emit(Instruction::GetElementPtr { dest: imag_ptr, base: complex_alloca, offset: Operand::Const(IrConst::I64(comp_size as i64)), ty: IrType::I8 });
-        self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: comp_ty });
+        self.emit(Instruction::Store { val: Operand::Value(imag_val), ptr: imag_ptr, ty: comp_ty , seg_override: AddressSpace::Default });
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.func_mut().locals.insert(name, LocalInfo {
@@ -1000,11 +1000,11 @@ impl Lowerer {
                 IrType::F32 => {
                     // Received as F64, narrow to F32
                     let f64_val = self.fresh_value();
-                    self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 });
+                    self.emit(Instruction::Load { dest: f64_val, ptr: local_info.alloca, ty: IrType::F64 , seg_override: AddressSpace::Default });
                     let f32_val = self.emit_cast_val(Operand::Value(f64_val), IrType::F64, IrType::F32);
                     let f32_alloca = self.fresh_value();
                     self.emit(Instruction::Alloca { dest: f32_alloca, ty: IrType::F32, size: 4, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 });
+                    self.emit(Instruction::Store { val: Operand::Value(f32_val), ptr: f32_alloca, ty: IrType::F32 , seg_override: AddressSpace::Default });
                     if let Some(local) = self.func_mut().locals.get_mut(&name) {
                         local.alloca = f32_alloca; local.ty = IrType::F32; local.alloc_size = 4;
                     }
@@ -1012,12 +1012,12 @@ impl Lowerer {
                 IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => {
                     // Received as I32, narrow to declared type
                     let i32_val = self.fresh_value();
-                    self.emit(Instruction::Load { dest: i32_val, ptr: local_info.alloca, ty: IrType::I32 });
+                    self.emit(Instruction::Load { dest: i32_val, ptr: local_info.alloca, ty: IrType::I32 , seg_override: AddressSpace::Default });
                     let narrow_val = self.emit_cast_val(Operand::Value(i32_val), IrType::I32, declared_ty);
                     let narrow_alloca = self.fresh_value();
                     let size = declared_ty.size().max(1);
                     self.emit(Instruction::Alloca { dest: narrow_alloca, ty: declared_ty, size, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val: Operand::Value(narrow_val), ptr: narrow_alloca, ty: declared_ty });
+                    self.emit(Instruction::Store { val: Operand::Value(narrow_val), ptr: narrow_alloca, ty: declared_ty , seg_override: AddressSpace::Default });
                     if let Some(local) = self.func_mut().locals.get_mut(&name) {
                         local.alloca = narrow_alloca; local.ty = declared_ty; local.alloc_size = size;
                     }
@@ -1070,7 +1070,7 @@ impl Lowerer {
 
             // Check if this parameter is a pointer-to-array with VLA dimensions
             let ts = self.resolve_type_spec(&param.type_spec);
-            if let TypeSpecifier::Pointer(inner) = ts {
+            if let TypeSpecifier::Pointer(inner, _) = ts {
                 let dim_infos = self.collect_vla_dims(inner);
                 if dim_infos.iter().any(|d| d.is_vla) {
                     vla_params.push((param_name, dim_infos));
@@ -1078,7 +1078,7 @@ impl Lowerer {
             } else {
                 // Check CType for typedef'd pointer-to-array
                 let ctype = self.type_spec_to_ctype(&param.type_spec);
-                if let CType::Pointer(ref inner_ct) = ctype {
+                if let CType::Pointer(ref inner_ct, _) = ctype {
                     if matches!(inner_ct.as_ref(), CType::Array(_, _)) {
                         // TypeSpecifier-based VLA detection won't work for typedef'd types,
                         // but VLA dimensions in typedef'd pointers are rare
@@ -1130,11 +1130,8 @@ impl Lowerer {
     fn load_vla_dim_value(&mut self, dim_name: &str) -> Value {
         if let Some(info) = self.func_mut().locals.get(dim_name).cloned() {
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load {
-                dest: loaded,
-                ptr: info.alloca,
-                ty: info.ty,
-            });
+            self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: info.ty,
+             seg_override: AddressSpace::Default });
             loaded
         } else {
             // Fallback: use constant 1
@@ -1370,7 +1367,7 @@ impl Lowerer {
                     self.collect_enum_constants_impl(&field.type_spec, scoped);
                 }
             }
-            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner) => {
+            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner, _) => {
                 self.collect_enum_constants_impl(inner, scoped);
             }
             _ => {}
@@ -1431,7 +1428,7 @@ impl Lowerer {
             self.emit(Instruction::GetElementPtr {
                 dest: addr, base: alloca, offset, ty: IrType::I8,
             });
-            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I8 });
+            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I8 , seg_override: AddressSpace::Default });
         }
         // Null terminator
         let null_offset = Operand::Const(IrConst::I64((base_offset + str_bytes.len()) as i64));
@@ -1439,9 +1436,8 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
         });
-        self.emit(Instruction::Store {
-            val: Operand::Const(IrConst::I8(0)), ptr: null_addr, ty: IrType::I8,
-        });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I8(0)), ptr: null_addr, ty: IrType::I8,
+         seg_override: AddressSpace::Default });
     }
 
     /// Emit a wide string (L"...") to a local alloca. Each character is stored as I32 (wchar_t).
@@ -1454,7 +1450,7 @@ impl Lowerer {
             self.emit(Instruction::GetElementPtr {
                 dest: addr, base: alloca, offset, ty: IrType::I8,
             });
-            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I32 });
+            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I32 , seg_override: AddressSpace::Default });
         }
         // Null terminator
         let null_byte_offset = base_offset + s.chars().count() * 4;
@@ -1463,9 +1459,8 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
         });
-        self.emit(Instruction::Store {
-            val: Operand::Const(IrConst::I32(0)), ptr: null_addr, ty: IrType::I32,
-        });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: null_addr, ty: IrType::I32,
+         seg_override: AddressSpace::Default });
     }
 
     /// Emit a single element store at a given byte offset in an alloca.
@@ -1477,7 +1472,7 @@ impl Lowerer {
         self.emit(Instruction::GetElementPtr {
             dest: elem_addr, base: alloca, offset: offset_val, ty,
         });
-        self.emit(Instruction::Store { val, ptr: elem_addr, ty });
+        self.emit(Instruction::Store { val, ptr: elem_addr, ty , seg_override: AddressSpace::Default });
     }
 
     /// Zero-initialize a region of memory within an alloca at the given byte offset.
@@ -1492,11 +1487,8 @@ impl Lowerer {
                 offset: Operand::Const(IrConst::I64(offset as i64)),
                 ty: IrType::I64,
             });
-            self.emit(Instruction::Store {
-                val: Operand::Const(IrConst::I64(0)),
-                ptr: addr,
-                ty: IrType::I64,
-            });
+            self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(0)), ptr: addr, ty: IrType::I64,
+             seg_override: AddressSpace::Default });
             offset += 8;
         }
         while offset < end {
@@ -1507,11 +1499,8 @@ impl Lowerer {
                 offset: Operand::Const(IrConst::I64(offset as i64)),
                 ty: IrType::I8,
             });
-            self.emit(Instruction::Store {
-                val: Operand::Const(IrConst::I8(0)),
-                ptr: addr,
-                ty: IrType::I8,
-            });
+            self.emit(Instruction::Store { val: Operand::Const(IrConst::I8(0)), ptr: addr, ty: IrType::I8,
+             seg_override: AddressSpace::Default });
             offset += 1;
         }
     }
@@ -1598,7 +1587,7 @@ impl Lowerer {
             .or_else(|| {
                 let ctype = self.type_spec_to_ctype(type_spec);
                 match &ctype {
-                    CType::Pointer(inner) => self.struct_layout_from_ctype(inner),
+                    CType::Pointer(inner, _) => self.struct_layout_from_ctype(inner),
                     CType::Array(_, _) => {
                         // Unwrap all Array levels to find the innermost element type.
                         // This handles multi-dimensional typedef'd arrays like:

@@ -11,7 +11,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -323,20 +323,20 @@ impl Lowerer {
     pub(super) fn load_through_ptr(&mut self, ptr_op: Operand, ty: IrType) -> Value {
         let ptr_val = self.operand_to_value(ptr_op);
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: ptr_val, ty });
+        self.emit(Instruction::Load { dest, ptr: ptr_val, ty , seg_override: AddressSpace::Default });
         dest
     }
 
     /// Store a value through a pointer operand.
     pub(super) fn store_through_ptr(&mut self, ptr_op: Operand, val: Operand, ty: IrType) {
         let ptr_val = self.operand_to_value(ptr_op);
-        self.emit(Instruction::Store { val, ptr: ptr_val, ty });
+        self.emit(Instruction::Store { val, ptr: ptr_val, ty , seg_override: AddressSpace::Default });
     }
 
     /// Get the IR type of the pointee for a pointer expression.
     pub(super) fn get_pointee_ir_type(&self, expr: &Expr) -> Option<IrType> {
         if let Some(ctype) = self.get_expr_ctype(expr) {
-            if let crate::common::types::CType::Pointer(inner) = ctype {
+            if let crate::common::types::CType::Pointer(inner, _) = ctype {
                 return Some(IrType::from_ctype(&inner));
             }
         }

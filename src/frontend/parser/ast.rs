@@ -1,4 +1,5 @@
 use crate::common::source::Span;
+use crate::common::types::AddressSpace;
 
 /// A complete translation unit (one C source file).
 #[derive(Debug)]
@@ -172,7 +173,7 @@ pub enum TypeSpecifier {
     Union(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>, Option<usize>),
     Enum(Option<String>, Option<Vec<EnumVariant>>),
     TypedefName(String),
-    Pointer(Box<TypeSpecifier>),
+    Pointer(Box<TypeSpecifier>, AddressSpace),
     Array(Box<TypeSpecifier>, Option<Box<Expr>>),
     /// Function pointer type from cast/sizeof: return_type, params, variadic
     /// E.g., `(jv (*)(void*, jv))` produces FunctionPointer(jv, [void*, jv], false)

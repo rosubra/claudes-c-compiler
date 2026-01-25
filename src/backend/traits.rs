@@ -11,7 +11,7 @@
 //! instruction-level differences.
 
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use super::common::PtrDirective;
 use super::state::{CodegenState, SlotAddr, StackSlot};
 use super::cast::{FloatOp, classify_float_binop};
@@ -79,6 +79,19 @@ pub trait ArchCodegen {
     /// this, handle their special case, then call `emit_load_default` for the rest.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
         emit_load_default(self, dest, ptr, ty);
+    }
+
+    /// Emit a load with a segment override prefix (e.g., %gs: or %fs:).
+    /// Used for GCC named address space extensions (__seg_gs, __seg_fs) on x86.
+    /// Default: panics (only x86 supports segment overrides).
+    fn emit_seg_load(&mut self, _dest: &Value, _ptr: &Value, _ty: IrType, _seg: AddressSpace) {
+        panic!("segment override loads only supported on x86");
+    }
+
+    /// Emit a store with a segment override prefix (e.g., %gs: or %fs:).
+    /// Default: panics (only x86 supports segment overrides).
+    fn emit_seg_store(&mut self, _val: &Operand, _ptr: &Value, _ty: IrType, _seg: AddressSpace) {
+        panic!("segment override stores only supported on x86");
     }
 
     /// Emit a load with a folded GEP constant offset: load from (alloca_base + const_offset).
@@ -486,6 +499,13 @@ pub trait ArchCodegen {
 
     /// Emit inline assembly.
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>]);
+
+    /// Emit inline assembly with per-operand segment overrides.
+    /// Default: delegates to emit_inline_asm (ignoring segment overrides).
+    /// x86 backend overrides this to apply %gs:/%fs: prefixes to memory operands.
+    fn emit_inline_asm_with_segs(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>], _seg_overrides: &[AddressSpace]) {
+        self.emit_inline_asm(template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols);
+    }
 
     /// Emit a return terminator.
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {

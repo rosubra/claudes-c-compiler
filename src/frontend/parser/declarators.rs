@@ -6,6 +6,7 @@
 // pointer to a function returning int, read from the name outward. This module
 // handles the recursive parsing needed for this grammar.
 
+use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::{ModeKind, Parser};
@@ -326,7 +327,7 @@ impl Parser {
 
                 // Apply pointer levels
                 for _ in 0..pointer_depth {
-                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
                 // Pointer-to-array: int (*p)[N][M]
@@ -334,7 +335,7 @@ impl Parser {
                     for dim in ptr_to_array_dims.iter().rev() {
                         type_spec = TypeSpecifier::Array(Box::new(type_spec), dim.clone());
                     }
-                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
                 // Array params: outermost dimension decays to pointer
@@ -342,12 +343,12 @@ impl Parser {
                     for dim in array_dims.iter().skip(1).rev() {
                         type_spec = TypeSpecifier::Array(Box::new(type_spec), dim.clone());
                     }
-                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
                 // Function pointers decay to pointer
                 if is_func_ptr {
-                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
+                    type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
                 params.push(ParamDecl { type_spec, name, span, fptr_params: fptr_param_decls });

@@ -227,7 +227,7 @@ impl Lowerer {
         match expr {
             Expr::Cast(ref type_spec, inner, _) => {
                 // The type should be a Pointer to a struct
-                if let TypeSpecifier::Pointer(inner_ts) = type_spec {
+                if let TypeSpecifier::Pointer(inner_ts, _) = type_spec {
                     // Check that the inner expression is 0
                     if self.is_zero_expr(inner) {
                         return Some((*inner_ts.clone(), 0));

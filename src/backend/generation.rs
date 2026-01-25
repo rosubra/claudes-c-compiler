@@ -10,7 +10,7 @@
 //! into the backend-specific implementations.
 
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{AddressSpace, IrType};
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use super::common;
 use super::traits::ArchCodegen;
@@ -100,7 +100,7 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
                 // Store.ptr is foldable, but Store.val is an Operand that is NOT foldable.
                 // Also invalidate if the store type is i128/u128, for the same
                 // reason as Load above: the i128 store path doesn't fold GEPs.
-                Instruction::Store { val, ptr, ty } => {
+                Instruction::Store { val, ptr, ty , .. } => {
                     if let Operand::Value(v) = val { mark_non_ptr(v.0); }
                     if matches!(ty, IrType::I128 | IrType::U128) {
                         mark_non_ptr(ptr.0);
@@ -519,7 +519,13 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
         // which sets the reg cache correctly. The accumulator holds dest's
         // value after execution, so we do NOT invalidate.
 
-        Instruction::Load { dest, ptr, ty } => {
+        Instruction::Load { dest, ptr, ty, seg_override } => {
+            if *seg_override != AddressSpace::Default {
+                // Segment-overridden load: load pointer into a register, then
+                // emit a load with segment prefix (e.g., %gs:(%reg)).
+                cg.emit_seg_load(dest, ptr, *ty, *seg_override);
+                return;
+            }
             // Check if the ptr comes from a foldable GEP with constant offset.
             // Only fold when the GEP's base is an alloca (Direct/OverAligned), where
             // the slot address is always valid. For Indirect bases, the GEP was NOT
@@ -593,10 +599,12 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
         _ => {
             match inst {
                 Instruction::DynAlloca { dest, size, align } => cg.emit_dyn_alloca(dest, size, *align),
-                Instruction::Store { val, ptr, ty } => {
-                    // Check if the ptr comes from a foldable GEP with constant offset.
-                    // Only fold for alloca bases (see Load comment above).
-                    if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
+                Instruction::Store { val, ptr, ty, seg_override } => {
+                    if *seg_override != AddressSpace::Default {
+                        cg.emit_seg_store(val, ptr, *ty, *seg_override);
+                    } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
+                        // Check if the ptr comes from a foldable GEP with constant offset.
+                        // Only fold for alloca bases (see Load comment above).
                         if !is_i128_type(*ty) && cg.state_ref().is_alloca(gep_info.base.0) {
                             cg.emit_store_with_const_offset(val, &gep_info.base, gep_info.offset, *ty);
                         } else {
@@ -626,8 +634,8 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 Instruction::SetReturnF64Second { src } => cg.emit_set_return_f64_second(src),
                 Instruction::GetReturnF32Second { dest } => cg.emit_get_return_f32_second(dest),
                 Instruction::SetReturnF32Second { src } => cg.emit_set_return_f32_second(src),
-                Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols } =>
-                    cg.emit_inline_asm(template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols),
+                Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols, seg_overrides } =>
+                    cg.emit_inline_asm_with_segs(template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols, seg_overrides),
                 Instruction::Intrinsic { dest, op, dest_ptr, args } => cg.emit_intrinsic(dest, op, dest_ptr, args),
                 Instruction::StackSave { dest } => cg.emit_stack_save(dest),
                 Instruction::StackRestore { ptr } => cg.emit_stack_restore(ptr),

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use crate::common::type_builder;
 use crate::frontend::parser::ast::*;
-use crate::common::types::{IrType, StructField, StructLayout, RcLayout, CType};
+use crate::common::types::{AddressSpace, IrType, StructField, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 use super::definitions::FuncSig;
 
@@ -78,8 +78,8 @@ impl Lowerer {
 
     /// Check if a TypeSpecifier resolves to a pointer type (through typedefs).
     pub(super) fn is_type_pointer(&self, ts: &TypeSpecifier) -> bool {
-        matches!(ts, TypeSpecifier::Pointer(_))
-            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Pointer(_)))
+        matches!(ts, TypeSpecifier::Pointer(_, _))
+            || self.resolve_typedef_ctype(ts).is_some_and(|ct| matches!(ct, CType::Pointer(_, _)))
     }
 
     /// Resolve typeof(expr) to a concrete TypeSpecifier by analyzing the expression type.
@@ -136,7 +136,7 @@ impl Lowerer {
 
         match (a_norm, b_norm) {
             // Pointers: pointee types must be compatible
-            (CType::Pointer(p1), CType::Pointer(p2)) => Self::ctypes_compatible(p1, p2),
+            (CType::Pointer(p1, _), CType::Pointer(p2, _)) => Self::ctypes_compatible(p1, p2),
             // Arrays: element types must be compatible, sizes must match (or both unsized)
             (CType::Array(e1, s1), CType::Array(e2, s2)) => {
                 Self::ctypes_compatible(e1, e2) && s1 == s2
@@ -174,7 +174,7 @@ impl Lowerer {
             CType::ComplexFloat => TypeSpecifier::ComplexFloat,
             CType::ComplexDouble => TypeSpecifier::ComplexDouble,
             CType::ComplexLongDouble => TypeSpecifier::ComplexLongDouble,
-            CType::Pointer(inner) => TypeSpecifier::Pointer(Box::new(Self::ctype_to_type_spec(inner))),
+            CType::Pointer(inner, _) => TypeSpecifier::Pointer(Box::new(Self::ctype_to_type_spec(inner)), AddressSpace::Default),
             CType::Array(elem, size) => TypeSpecifier::Array(
                 Box::new(Self::ctype_to_type_spec(elem)),
                 size.map(|s| Box::new(Expr::IntLiteral(s as i64, crate::common::source::Span::dummy()))),
@@ -248,7 +248,7 @@ impl Lowerer {
             // <time.h>
             ("time_t", CType::Long),
             ("clock_t", CType::Long),
-            ("timer_t", CType::Pointer(Box::new(CType::Void))),
+            ("timer_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("clockid_t", CType::Int),
             // <sys/types.h>
             ("off_t", CType::Long),
@@ -274,24 +274,24 @@ impl Lowerer {
             ("__s32", CType::Int),
             ("__s64", CType::Long),
             // <locale.h>
-            ("locale_t", CType::Pointer(Box::new(CType::Void))),
+            ("locale_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             // <pthread.h> - opaque types, treat as unsigned long or pointer
             ("pthread_t", CType::ULong),
-            ("pthread_mutex_t", CType::Pointer(Box::new(CType::Void))),
-            ("pthread_cond_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_mutex_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_cond_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("pthread_key_t", CType::UInt),
-            ("pthread_attr_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_attr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("pthread_once_t", CType::Int),
-            ("pthread_mutexattr_t", CType::Pointer(Box::new(CType::Void))),
-            ("pthread_condattr_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_mutexattr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_condattr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             // <setjmp.h>
-            ("jmp_buf", CType::Pointer(Box::new(CType::Void))),
-            ("sigjmp_buf", CType::Pointer(Box::new(CType::Void))),
+            ("jmp_buf", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("sigjmp_buf", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             // <stdio.h>
-            ("FILE", CType::Pointer(Box::new(CType::Void))),
+            ("FILE", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
             ("fpos_t", CType::Long),
             // <dirent.h>
-            ("DIR", CType::Pointer(Box::new(CType::Void))),
+            ("DIR", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
         ];
         for (name, ct) in builtins {
             self.types.typedefs.insert(name.to_string(), ct.clone());
@@ -301,7 +301,7 @@ impl Lowerer {
         let va_list_type = match self.target {
             Target::Riscv64 => {
                 // RISC-V: va_list = void * (8 bytes, passed by value)
-                CType::Pointer(Box::new(CType::Void))
+                CType::Pointer(Box::new(CType::Void), AddressSpace::Default)
             }
             Target::Aarch64 => {
                 // AArch64: va_list is a 32-byte struct, represented as char[32]
@@ -444,7 +444,7 @@ impl Lowerer {
             TypeSpecifier::Double => IrType::F64,
             TypeSpecifier::LongDouble => IrType::F128,
             TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble => IrType::Ptr,
-            TypeSpecifier::Pointer(_) => IrType::Ptr,
+            TypeSpecifier::Pointer(_, _) => IrType::Ptr,
             TypeSpecifier::Array(_, _) => IrType::Ptr,
             TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => IrType::Ptr,
             TypeSpecifier::Enum(_, _) => IrType::I32,
@@ -489,7 +489,7 @@ impl Lowerer {
             TypeSpecifier::ComplexFloat => Some((8, 4)),
             TypeSpecifier::ComplexDouble => Some((16, 8)),
             TypeSpecifier::ComplexLongDouble => Some((32, 16)),
-            TypeSpecifier::Pointer(_) => Some((8, 8)),
+            TypeSpecifier::Pointer(_, _) => Some((8, 8)),
             TypeSpecifier::Enum(_, _) => Some((4, 4)),
             TypeSpecifier::TypedefName(_) => Some((8, 8)), // fallback for unresolved typedefs
             _ => None,
@@ -634,7 +634,7 @@ impl Lowerer {
     /// For int (*arr)[3]: strides = [3*4=12, 4]
     pub(super) fn compute_ptr_array_strides(&self, type_spec: &TypeSpecifier) -> Vec<usize> {
         let ts = self.resolve_type_spec(type_spec);
-        if let TypeSpecifier::Pointer(inner) = ts {
+        if let TypeSpecifier::Pointer(inner, _) = ts {
             // Collect dimensions from nested Array types
             let mut dims: Vec<usize> = Vec::new();
             let mut current = &*inner;
@@ -662,7 +662,7 @@ impl Lowerer {
         } else {
             // Fall back to CType for typedef'd pointer-to-array types
             let ctype = self.type_spec_to_ctype(type_spec);
-            if let CType::Pointer(ref inner_ct) = ctype {
+            if let CType::Pointer(ref inner_ct, _) = ctype {
                 let mut dims: Vec<usize> = Vec::new();
                 let mut current_ct = inner_ct.as_ref();
                 while let CType::Array(elem_ct, size) = current_ct {
@@ -693,8 +693,8 @@ impl Lowerer {
         let resolved_ctype = self.type_spec_to_ctype(ts);
         // Check for pointer declarators (from derived or from the resolved type itself)
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer))
-            || matches!(ts, TypeSpecifier::Pointer(_))
-            || matches!(resolved_ctype, CType::Pointer(_));
+            || matches!(ts, TypeSpecifier::Pointer(_, _))
+            || matches!(resolved_ctype, CType::Pointer(_, _));
 
         let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)))
             || matches!(resolved_ctype, CType::Array(_, _));
@@ -703,13 +703,13 @@ impl Lowerer {
         if has_pointer && !has_array {
             // Simple pointer: int *p, or typedef'd pointer (e.g., typedef struct Foo *FooPtr)
             let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
-            let elem_size = if let TypeSpecifier::Pointer(inner) = ts {
+            let elem_size = if let TypeSpecifier::Pointer(inner, _) = ts {
                 if ptr_count >= 1 {
                     8
                 } else {
                     self.sizeof_type(inner)
                 }
-            } else if let CType::Pointer(ref inner_ct) = resolved_ctype {
+            } else if let CType::Pointer(ref inner_ct, _) = resolved_ctype {
                 // Pointer from typedef resolution
                 if ptr_count >= 1 {
                     8
@@ -738,7 +738,7 @@ impl Lowerer {
             // If pointer is from resolved type spec (not in derived), and array is in derived,
             // this is an array of typedef'd pointers
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-            let pointer_from_type_spec = ptr_pos.is_none() && (matches!(ts, TypeSpecifier::Pointer(_)) || matches!(resolved_ctype, CType::Pointer(_)));
+            let pointer_from_type_spec = ptr_pos.is_none() && (matches!(ts, TypeSpecifier::Pointer(_, _)) || matches!(resolved_ctype, CType::Pointer(_, _)));
 
             // Check if the outermost (last) derived element is an Array
             let last_is_array = matches!(derived.last(), Some(DerivedDeclarator::Array(_)));
@@ -993,7 +993,7 @@ impl Lowerer {
             //   pointer-to-function-pointer levels that wrap the result.
             let mut actual_return = return_ctype;
             let mut extra_ptr_layers = 0usize;
-            while let CType::Pointer(inner) = actual_return {
+            while let CType::Pointer(inner, _) = actual_return {
                 actual_return = *inner;
                 extra_ptr_layers += 1;
             }
@@ -1009,9 +1009,9 @@ impl Lowerer {
                 params: param_types,
                 variadic: false,
             }));
-            let mut result = CType::Pointer(Box::new(func_type));
+            let mut result = CType::Pointer(Box::new(func_type), AddressSpace::Default);
             for _ in 0..wrap_layers {
-                result = CType::Pointer(Box::new(result));
+                result = CType::Pointer(Box::new(result), AddressSpace::Default);
             }
             return result;
         }
@@ -1064,7 +1064,7 @@ impl Lowerer {
                 params: param_types,
                 variadic: fti.variadic,
             }));
-            return Some(CType::Pointer(Box::new(func_type)));
+            return Some(CType::Pointer(Box::new(func_type), AddressSpace::Default));
         }
         None
     }

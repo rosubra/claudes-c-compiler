@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use std::rc::Rc;
-use crate::common::types::{IrType, StructLayout, RcLayout, CType};
+use crate::common::types::{AddressSpace, IrType, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -87,7 +87,7 @@ impl Lowerer {
                 // This is a union definition inside a field (named or anonymous) - register it
                 self.register_struct_type(ts);
             }
-            TypeSpecifier::Pointer(inner) => {
+            TypeSpecifier::Pointer(inner, _) => {
                 // Walk through pointer types to find nested struct defs
                 self.register_nested_in_type_spec(inner);
             }
@@ -230,7 +230,7 @@ impl Lowerer {
                     }
                     // It's a pointer to struct: load the pointer
                     let loaded = self.fresh_value();
-                    self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr });
+                    self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr , seg_override: AddressSpace::Default });
                     return loaded;
                 }
                 if self.globals.contains_key(name) {
@@ -342,7 +342,7 @@ impl Lowerer {
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
                     self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
                     alloca
                 }
             }
@@ -355,7 +355,7 @@ impl Lowerer {
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
                     self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
                     alloca
                 } else {
                     let val = self.lower_expr(expr);
@@ -500,7 +500,7 @@ impl Lowerer {
                 // Fallback: resolve struct layout from the variable's CType
                 // (handles forward-declared struct pointers where layout was None at decl time)
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    if let CType::Pointer(pointee) = &ctype {
+                    if let CType::Pointer(pointee, _) = &ctype {
                         return self.struct_layout_from_ctype(pointee);
                     }
                 }
@@ -544,8 +544,8 @@ impl Lowerer {
             Expr::Deref(inner, _) => {
                 // *pp where pp is a pointer to pointer to struct
                 if let Some(ctype) = self.get_expr_ctype(inner) {
-                    if let CType::Pointer(inner_ct) = &ctype {
-                        if let CType::Pointer(pointee) = inner_ct.as_ref() {
+                    if let CType::Pointer(inner_ct, _) = &ctype {
+                        if let CType::Pointer(pointee, _) = inner_ct.as_ref() {
                             return self.struct_layout_from_ctype(pointee);
                         }
                     }
@@ -557,8 +557,8 @@ impl Lowerer {
                 // pp[i] where pp is an array of struct pointers
                 if let Some(ctype) = self.get_expr_ctype(base) {
                     match &ctype {
-                        CType::Array(elem, _) | CType::Pointer(elem) => {
-                            if let CType::Pointer(pointee) = elem.as_ref() {
+                        CType::Array(elem, _) | CType::Pointer(elem, _) => {
+                            if let CType::Pointer(pointee, _) = elem.as_ref() {
                                 return self.struct_layout_from_ctype(pointee);
                             }
                         }
@@ -590,7 +590,7 @@ impl Lowerer {
             _ => {
                 // Generic fallback: try CType-based resolution
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    if let CType::Pointer(pointee) = &ctype {
+                    if let CType::Pointer(pointee, _) = &ctype {
                         return self.struct_layout_from_ctype(pointee);
                     }
                 }
@@ -613,7 +613,7 @@ impl Lowerer {
     /// Get struct layout from a type specifier that should be a pointer to struct
     fn get_struct_layout_for_pointer_type(&self, type_spec: &TypeSpecifier) -> Option<RcLayout> {
         let ctype = self.type_spec_to_ctype(type_spec);
-        if let CType::Pointer(pointee) = &ctype {
+        if let CType::Pointer(pointee, _) = &ctype {
             return self.struct_layout_from_ctype(pointee);
         }
         None
@@ -649,7 +649,7 @@ impl Lowerer {
                 if let Some(base_ctype) = self.get_expr_ctype(base) {
                     let inner = match &base_ctype {
                         CType::Array(elem, _) => Some(elem.as_ref()),
-                        CType::Pointer(pointee) => Some(pointee.as_ref()),
+                        CType::Pointer(pointee, _) => Some(pointee.as_ref()),
                         _ => None,
                     };
                     if let Some(inner_ct) = inner {
@@ -733,7 +733,7 @@ impl Lowerer {
         if let Expr::Identifier(name, _) = func {
             if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                 if want_pointer_deref {
-                    if let CType::Pointer(pointee) = ctype {
+                    if let CType::Pointer(pointee, _) = ctype {
                         return self.struct_layout_from_ctype(pointee);
                     }
                 } else {
@@ -746,7 +746,7 @@ impl Lowerer {
         // For indirect calls through function pointers, resolve from CType
         if let Some(ctype) = self.get_expr_ctype(call_expr) {
             if want_pointer_deref {
-                if let CType::Pointer(pointee) = &ctype {
+                if let CType::Pointer(pointee, _) = &ctype {
                     return self.struct_layout_from_ctype(pointee);
                 }
             } else {
@@ -800,7 +800,7 @@ impl Lowerer {
     /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
     /// Handles self-referential structs by looking up the cache when fields are empty.
     fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<RcLayout> {
-        if let CType::Pointer(inner) = ctype {
+        if let CType::Pointer(inner, _) = ctype {
             return self.struct_layout_from_ctype(inner);
         }
         None

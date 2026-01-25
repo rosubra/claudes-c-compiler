@@ -16,7 +16,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, CType, StructLayout, StructFieldLayout, InitFieldResolution};
+use crate::common::types::{AddressSpace, IrType, CType, StructLayout, StructFieldLayout, InitFieldResolution};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -759,7 +759,7 @@ impl Lowerer {
         if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
             self.store_bitfield(addr, field_ty, bit_offset, bit_width, val);
         } else {
-            self.emit(Instruction::Store { val, ptr: addr, ty: field_ty });
+            self.emit(Instruction::Store { val, ptr: addr, ty: field_ty , seg_override: AddressSpace::Default });
         }
     }
 }

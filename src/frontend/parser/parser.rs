@@ -11,6 +11,7 @@
 // Methods are pub(super) so they can be called across modules within the parser.
 
 use crate::common::source::Span;
+use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::{Token, TokenKind};
 use super::ast::*;
 
@@ -89,6 +90,9 @@ pub struct Parser {
     pub(super) pragma_pack_align: Option<usize>,
     /// Count of parse errors encountered (invalid tokens at top level, etc.)
     pub error_count: usize,
+    /// Set to the address space when __seg_gs or __seg_fs qualifier is encountered.
+    /// Reset after being consumed by pointer type construction.
+    pub(super) parsing_address_space: AddressSpace,
 }
 
 impl Parser {
@@ -116,6 +120,7 @@ impl Parser {
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
             error_count: 0,
+            parsing_address_space: AddressSpace::Default,
         }
     }
 
@@ -257,7 +262,7 @@ impl Parser {
             TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
             TokenKind::Atomic | TokenKind::Auto | TokenKind::AutoType | TokenKind::Alignas |
             TokenKind::Builtin | TokenKind::Int128 | TokenKind::UInt128 |
-            TokenKind::ThreadLocal => true,
+            TokenKind::ThreadLocal | TokenKind::SegGs | TokenKind::SegFs => true,
             TokenKind::Identifier(name) => self.typedefs.contains(name) && !self.shadowed_typedefs.contains(name),
             _ => false,
         }
@@ -268,6 +273,14 @@ impl Parser {
             match self.peek() {
                 TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                     self.advance();
+                }
+                TokenKind::SegGs => {
+                    self.advance();
+                    self.parsing_address_space = AddressSpace::SegGs;
+                }
+                TokenKind::SegFs => {
+                    self.advance();
+                    self.parsing_address_space = AddressSpace::SegFs;
                 }
                 _ => break,
             }
@@ -712,7 +725,7 @@ impl Parser {
             TypeSpecifier::Long | TypeSpecifier::UnsignedLong
             | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
             | TypeSpecifier::Double
-            | TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            | TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
             | TypeSpecifier::LongDouble => 16,
             TypeSpecifier::ComplexFloat => 8,
@@ -742,7 +755,7 @@ impl Parser {
             TypeSpecifier::Long | TypeSpecifier::UnsignedLong
             | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
             | TypeSpecifier::Double
-            | TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            | TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
             | TypeSpecifier::LongDouble => 16,
             TypeSpecifier::ComplexFloat => 4,
