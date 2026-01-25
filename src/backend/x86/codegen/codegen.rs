@@ -665,21 +665,39 @@ impl ArchCodegen for X86Codegen {
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // Track variadic function info
         self.is_variadic = func.is_variadic;
-        // Count named params by classification.
+        // Count named params by classification, matching classify_params() logic.
         // On x86-64 System V ABI:
+        //   - large structs (>16 bytes) are ALWAYS passed on stack
+        //   - small structs (<=16 bytes) consume 1-2 GP register slots
         //   - long double (F128/x87) is ALWAYS passed on stack (16 bytes each)
         //   - float/double passed in XMM registers (up to 8)
         //   - integer/pointer passed in GP registers (up to 6)
-        self.num_named_int_params = func.params.iter()
-            .filter(|p| !p.ty.is_float())
-            .count();
-        self.num_named_fp_params = func.params.iter()
-            .filter(|p| p.ty.is_float() && !p.ty.is_long_double())
-            .count();
-        // Count stack bytes for always-stack-passed named params (long double = 16 bytes)
-        self.num_named_stack_bytes = func.params.iter()
-            .filter(|p| p.ty.is_long_double())
-            .count() * 16;
+        {
+            let mut gp_count = 0usize;
+            let mut fp_count = 0usize;
+            let mut stack_bytes = 0usize;
+            for p in &func.params {
+                if let Some(size) = p.struct_size {
+                    if size <= 16 {
+                        // Small struct uses 1 or 2 GP register slots
+                        let regs_needed = if size <= 8 { 1 } else { 2 };
+                        gp_count += regs_needed;
+                    } else {
+                        // Large struct always goes on stack
+                        stack_bytes += (size + 7) & !7;
+                    }
+                } else if p.ty.is_long_double() {
+                    stack_bytes += 16;
+                } else if p.ty.is_float() {
+                    fp_count += 1;
+                } else {
+                    gp_count += 1;
+                }
+            }
+            self.num_named_int_params = gp_count;
+            self.num_named_fp_params = fp_count;
+            self.num_named_stack_bytes = stack_bytes;
+        }
 
         let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size, align| {
             // x86 uses negative offsets from rbp
