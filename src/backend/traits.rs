@@ -231,10 +231,16 @@ pub trait ArchCodegen {
         // Phase 1: Pre-convert F128 values that need helper calls (before stack args clobber regs).
         let f128_temp_space = self.emit_call_f128_pre_convert(args, &arg_classes, arg_types, stack_arg_space);
 
+        // Each phase may clobber the accumulator register (t0 on RISC-V, rax on x86) via
+        // helper calls or loading different values, so invalidate the cache at boundaries.
+        self.state().reg_cache.invalidate_acc();
+
         // Phase 2: Emit stack overflow args.
         let total_sp_adjust = self.emit_call_stack_args(args, &arg_classes, arg_types, stack_arg_space,
                                                         if indirect { self.emit_call_fptr_spill_size() } else { 0 },
                                                         f128_temp_space);
+
+        self.state().reg_cache.invalidate_acc();
 
         // Phase 3: Load register args (GP, FP, i128, struct-by-val, F128).
         self.emit_call_reg_args(args, &arg_classes, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space);
