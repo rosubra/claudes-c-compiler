@@ -10,15 +10,19 @@ impl Lowerer {
     pub(super) fn lower_lvalue(&mut self, expr: &Expr) -> Option<LValue> {
         match expr {
             Expr::Identifier(name, _) => {
-                // Check locals first so inner-scope locals shadow outer static locals
-                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name).cloned()) {
+                // Check locals first so inner-scope locals shadow outer static locals.
+                // Extract only cheap scalar fields to avoid cloning the full LocalInfo
+                // (which includes StructLayout, CType, and Vecs).
+                if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
+                    let alloca = info.alloca;
+                    let static_global_name = info.static_global_name.clone();
                     // Static locals: emit fresh GlobalAddr at point of use
-                    if let Some(ref global_name) = info.static_global_name {
+                    if let Some(global_name) = static_global_name {
                         let addr = self.fresh_value();
-                        self.emit(Instruction::GlobalAddr { dest: addr, name: global_name.clone() });
+                        self.emit(Instruction::GlobalAddr { dest: addr, name: global_name });
                         return Some(LValue::Address(addr));
                     }
-                    return Some(LValue::Variable(info.alloca));
+                    return Some(LValue::Variable(alloca));
                 }
                 // Static local variables: resolve through mangled name
                 if let Some(mangled) = self.func_state.as_ref().and_then(|fs| fs.static_local_names.get(name).cloned()) {

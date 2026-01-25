@@ -297,6 +297,10 @@ fn replace_line(line: &mut String, info: &mut LineInfo, new_text: String) {
 /// Returns the optimized assembly string.
 pub fn peephole_optimize(asm: String) -> String {
     let mut lines: Vec<String> = asm.lines().map(|s| s.to_string()).collect();
+    // Drop the original string early to free memory before we allocate the result.
+    // The lines Vec now owns all the line data.
+    drop(asm);
+
     let mut infos: Vec<LineInfo> = lines.iter().map(|l| classify_line(l)).collect();
 
     let mut changed = true;
@@ -317,8 +321,10 @@ pub fn peephole_optimize(asm: String) -> String {
         pass_count += 1;
     }
 
-    // Remove NOP markers and rebuild
-    let mut result = String::with_capacity(asm.len());
+    // Remove NOP markers and rebuild. Use total line bytes as capacity upper bound
+    // (cheaper than computing exact surviving size).
+    let total_bytes: usize = lines.iter().map(|l| l.len() + 1).sum();
+    let mut result = String::with_capacity(total_bytes);
     for (line, info) in lines.iter().zip(infos.iter()) {
         if !info.is_nop() {
             result.push_str(line);
@@ -817,6 +823,10 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     let len = lines.len();
     const WINDOW: usize = 16;
 
+    // Reusable buffer for the "OFFSET(%rbp)" pattern string, avoiding
+    // heap allocation on every inner-loop iteration.
+    let mut pattern_buf = String::with_capacity(20);
+
     for i in 0..len {
         let store_offset = match infos[i].kind {
             LineKind::StoreRbp { offset, .. } => offset,
@@ -826,6 +836,8 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
         let end = std::cmp::min(i + WINDOW, len);
         let mut slot_read = false;
         let mut slot_overwritten = false;
+        // Build the "OFFSET(%rbp)" pattern lazily (only when an Other line appears)
+        let mut pattern_built = false;
 
         for j in (i + 1)..end {
             if infos[j].is_nop() {
@@ -856,14 +868,16 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
 
             // Catch-all: check if line references the offset via string search
             // (handles leaq, movslq, etc. that aren't classified as store/load)
-            // Build the pattern string lazily only for "Other" instructions
             if infos[j].kind == LineKind::Other {
-                // Check for rbp references with this offset
+                // Build pattern once per outer iteration, reuse for all Other lines
+                if !pattern_built {
+                    pattern_buf.clear();
+                    use std::fmt::Write;
+                    write!(pattern_buf, "{}(%rbp)", store_offset).unwrap();
+                    pattern_built = true;
+                }
                 let line = trim_asm(&lines[j]);
-                // Build offset string on the fly
-                let mut buf = itoa_buf(store_offset);
-                buf.push_str("(%rbp)");
-                if line.contains(buf.as_str()) {
+                if line.contains(pattern_buf.as_str()) {
                     slot_read = true;
                     break;
                 }
@@ -877,15 +891,6 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     }
 
     changed
-}
-
-/// Convert i32 to string without allocation (stack buffer).
-fn itoa_buf(v: i32) -> String {
-    // Small buffer is fine; stack offsets are typically < 6 digits
-    let mut s = String::with_capacity(12);
-    use std::fmt::Write;
-    write!(s, "{}", v).unwrap();
-    s
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────────

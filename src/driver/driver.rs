@@ -383,9 +383,14 @@ impl Driver {
     }
 
     /// Core pipeline: preprocess, lex, parse, sema, lower, optimize, codegen.
+    ///
+    /// Set `CCC_TIME_PHASES=1` in the environment to print per-phase timing to stderr.
     fn compile_to_assembly(&self, input_file: &str) -> Result<String, String> {
         let source = std::fs::read_to_string(input_file)
             .map_err(|e| format!("Cannot read {}: {}", input_file, e))?;
+
+        let time_phases = std::env::var("CCC_TIME_PHASES").is_ok();
+        let t0 = std::time::Instant::now();
 
         // Preprocess
         let mut preprocessor = Preprocessor::new();
@@ -393,20 +398,25 @@ impl Driver {
         preprocessor.set_filename(input_file);
         self.process_force_includes(&mut preprocessor)?;
         let preprocessed = preprocessor.preprocess(&source);
+        if time_phases { eprintln!("[TIME] preprocess: {:.3}s", t0.elapsed().as_secs_f64()); }
 
         // Lex
+        let t1 = std::time::Instant::now();
         let mut source_manager = SourceManager::new();
         let file_id = source_manager.add_file(input_file.to_string(), preprocessed.clone());
         let mut lexer = Lexer::new(&preprocessed, file_id);
         let tokens = lexer.tokenize();
+        if time_phases { eprintln!("[TIME] lex: {:.3}s ({} tokens)", t1.elapsed().as_secs_f64(), tokens.len()); }
 
         if self.verbose {
             eprintln!("Lexed {} tokens from {}", tokens.len(), input_file);
         }
 
         // Parse
+        let t2 = std::time::Instant::now();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse();
+        if time_phases { eprintln!("[TIME] parse: {:.3}s", t2.elapsed().as_secs_f64()); }
 
         if parser.error_count > 0 {
             return Err(format!("{}: {} parse error(s)", input_file, parser.error_count));
@@ -422,6 +432,7 @@ impl Driver {
         }
 
         // Semantic analysis
+        let t3 = std::time::Instant::now();
         let mut sema = SemanticAnalyzer::new();
         if let Err(errors) = sema.analyze(&ast) {
             for err in &errors {
@@ -430,10 +441,12 @@ impl Driver {
             return Err(format!("{} error(s) during semantic analysis", errors.len()));
         }
         let sema_result = sema.into_result();
+        if time_phases { eprintln!("[TIME] sema: {:.3}s", t3.elapsed().as_secs_f64()); }
 
         // Lower to IR (target-aware for ABI-specific lowering decisions)
         // Pass sema's TypeContext, function signatures, and expression type annotations
         // to the lowerer so it has pre-populated type info upfront.
+        let t4 = std::time::Instant::now();
         let lowerer = Lowerer::with_type_context(
             self.target,
             sema_result.type_context,
@@ -442,22 +455,34 @@ impl Driver {
             sema_result.const_values,
         );
         let mut module = lowerer.lower(&ast);
+        if time_phases { eprintln!("[TIME] lowering: {:.3}s ({} functions)", t4.elapsed().as_secs_f64(), module.functions.len()); }
 
         if self.verbose {
             eprintln!("Lowered to {} IR functions", module.functions.len());
         }
 
         // Run optimization passes
+        let t5 = std::time::Instant::now();
         promote_allocas(&mut module);
+        if time_phases { eprintln!("[TIME] mem2reg: {:.3}s", t5.elapsed().as_secs_f64()); }
+
+        let t6 = std::time::Instant::now();
         run_passes(&mut module, self.opt_level);
+        if time_phases { eprintln!("[TIME] opt passes: {:.3}s", t6.elapsed().as_secs_f64()); }
 
         // Lower SSA phi nodes to copies before codegen
+        let t7 = std::time::Instant::now();
         eliminate_phis(&mut module);
+        if time_phases { eprintln!("[TIME] phi elimination: {:.3}s", t7.elapsed().as_secs_f64()); }
 
         // Generate assembly using target-specific codegen
         // PIC mode: enabled by -fPIC/-fpic flag or implicitly when building shared libraries
+        let t8 = std::time::Instant::now();
         let pic = self.pic || self.shared_lib;
         let asm = self.target.generate_assembly_with_options(&module, pic);
+        if time_phases { eprintln!("[TIME] codegen: {:.3}s ({} bytes asm)", t8.elapsed().as_secs_f64(), asm.len()); }
+
+        if time_phases { eprintln!("[TIME] total compile {}: {:.3}s", input_file, t0.elapsed().as_secs_f64()); }
 
         if self.verbose {
             eprintln!("Generated {:?} assembly ({} bytes)", self.target, asm.len());

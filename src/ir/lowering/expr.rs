@@ -147,28 +147,35 @@ impl Lowerer {
             return Operand::Const(IrConst::I64(0));
         }
 
-        // Check locals first (shadows enum constants)
-        if let Some(info) = self.func_mut().locals.get(name).cloned() {
-            if let Some(ref global_name) = info.static_global_name {
+        // Check locals first (shadows enum constants).
+        // Extract only the cheap scalar fields we need, avoiding a full LocalInfo clone
+        // (which includes StructLayout, CType, Vecs, and Strings on the heap).
+        if let Some(info) = self.func_mut().locals.get(name) {
+            let alloca = info.alloca;
+            let ty = info.ty;
+            let is_array = info.is_array;
+            let is_struct = info.is_struct;
+            let is_complex = info.c_type.as_ref().map_or(false, |ct| ct.is_complex());
+            let static_global_name = info.static_global_name.clone();
+
+            if let Some(global_name) = static_global_name {
                 let addr = self.fresh_value();
-                self.emit(Instruction::GlobalAddr { dest: addr, name: global_name.clone() });
-                if info.is_array || info.is_struct {
+                self.emit(Instruction::GlobalAddr { dest: addr, name: global_name });
+                if is_array || is_struct {
                     return Operand::Value(addr);
                 }
                 let dest = self.fresh_value();
-                self.emit(Instruction::Load { dest, ptr: addr, ty: info.ty });
+                self.emit(Instruction::Load { dest, ptr: addr, ty });
                 return Operand::Value(dest);
             }
-            if info.is_array || info.is_struct {
-                return Operand::Value(info.alloca);
+            if is_array || is_struct {
+                return Operand::Value(alloca);
             }
-            if let Some(ref ct) = info.c_type {
-                if ct.is_complex() {
-                    return Operand::Value(info.alloca);
-                }
+            if is_complex {
+                return Operand::Value(alloca);
             }
             let dest = self.fresh_value();
-            self.emit(Instruction::Load { dest, ptr: info.alloca, ty: info.ty });
+            self.emit(Instruction::Load { dest, ptr: alloca, ty });
             return Operand::Value(dest);
         }
 

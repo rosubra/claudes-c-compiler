@@ -131,11 +131,11 @@ pub struct AsmOutput {
 impl AsmOutput {
     pub fn new() -> Self {
         // Pre-allocate 256KB to avoid repeated reallocations during codegen.
-        // A typical large C file (sqlite3.c) produces ~2MB of assembly.
         Self { buf: String::with_capacity(256 * 1024) }
     }
 
     /// Emit a line of assembly.
+    #[inline]
     pub fn emit(&mut self, s: &str) {
         self.buf.push_str(s);
         self.buf.push('\n');
@@ -469,13 +469,42 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
 /// Each char in the string is treated as a raw byte value (0-255),
 /// not as a UTF-8 encoded character. This is correct for C narrow
 /// string literals where \xNN escapes produce single bytes.
+///
+/// Writes directly into the output buffer without any intermediate
+/// heap allocations (no per-byte String, no Vec, no join). Uses
+/// a pre-computed lookup table to convert bytes to decimal strings
+/// without fmt::Write overhead.
 pub fn emit_string_bytes(out: &mut AsmOutput, s: &str) {
-    let bytes: Vec<String> = s.chars()
-        .map(|c| c as u8)
-        .chain(std::iter::once(0u8))
-        .map(|b| format!("{}", b))
-        .collect();
-    out.emit_fmt(format_args!("    .byte {}", bytes.join(", ")));
+    out.buf.push_str("    .byte ");
+    let mut first = true;
+    for c in s.chars() {
+        if !first {
+            out.buf.push_str(", ");
+        }
+        first = false;
+        push_u8_decimal(&mut out.buf, c as u8);
+    }
+    // Null terminator
+    if !first {
+        out.buf.push_str(", ");
+    }
+    out.buf.push_str("0\n");
+}
+
+/// Append a u8 value as a decimal string directly into the buffer.
+/// Avoids fmt::Write overhead by using direct digit extraction.
+#[inline]
+fn push_u8_decimal(buf: &mut String, v: u8) {
+    if v >= 100 {
+        buf.push((b'0' + v / 100) as char);
+        buf.push((b'0' + (v / 10) % 10) as char);
+        buf.push((b'0' + v % 10) as char);
+    } else if v >= 10 {
+        buf.push((b'0' + v / 10) as char);
+        buf.push((b'0' + v % 10) as char);
+    } else {
+        buf.push((b'0' + v) as char);
+    }
 }
 
 /// Escape a string for use in assembly .asciz directives.

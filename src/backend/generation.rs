@@ -17,6 +17,20 @@ use super::state::StackSlot;
 
 /// Generate assembly for a module using the given architecture's codegen.
 pub fn generate_module(cg: &mut dyn ArchCodegen, module: &IrModule) -> String {
+    // Pre-size the output buffer based on total IR instruction count to avoid
+    // repeated reallocations. Each IR instruction typically generates ~40 bytes
+    // of assembly text.
+    {
+        let total_insts: usize = module.functions.iter()
+            .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+            .sum();
+        let estimated_bytes = (total_insts * 40).max(256 * 1024).min(64 * 1024 * 1024);
+        let state = cg.state();
+        if state.out.buf.capacity() < estimated_bytes {
+            state.out.buf.reserve(estimated_bytes - state.out.buf.capacity());
+        }
+    }
+
     // Build the set of locally-defined symbols for PIC mode.
     {
         let state = cg.state();
