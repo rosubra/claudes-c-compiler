@@ -142,8 +142,14 @@ struct DiamondInfo {
     phi_selects: Vec<(Value, IrType, Operand, Operand)>,
 }
 
-/// Check if a block contains only simple, side-effect-free instructions.
-/// Returns true if all instructions are pure (no stores, calls, atomics, etc.).
+/// Check if a block contains only simple, side-effect-free instructions
+/// that are safe to speculatively execute.
+///
+/// IMPORTANT: Load is NOT included here because loads can trap (segfault)
+/// on invalid pointers. Hoisting a load past a null-pointer guard would
+/// cause a crash. For example, `if (!p || !p[0])` has a diamond where
+/// one arm loads `*p` — if-converting this would execute the load
+/// unconditionally, crashing when `p` is NULL.
 fn is_side_effect_free(block: &BasicBlock) -> bool {
     for inst in &block.instructions {
         match inst {
@@ -152,11 +158,11 @@ fn is_side_effect_free(block: &BasicBlock) -> bool {
             | Instruction::Cmp { .. }
             | Instruction::Cast { .. }
             | Instruction::Copy { .. }
-            | Instruction::Load { .. }
             | Instruction::GetElementPtr { .. }
             | Instruction::GlobalAddr { .. }
             | Instruction::Select { .. } => {}
-            // Everything else has side effects or is too complex
+            // Load can trap on invalid pointers — not safe to speculate.
+            // Store, Call, atomics, etc. have write side effects.
             _ => return false,
         }
     }
