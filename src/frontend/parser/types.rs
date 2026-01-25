@@ -41,7 +41,7 @@ impl Parser {
 
         // Collect qualifiers, storage classes, and type specifiers
         loop {
-            match self.peek().clone() {
+            match self.peek() {
                 // Qualifiers
                 TokenKind::Const => {
                     self.advance();
@@ -352,7 +352,8 @@ impl Parser {
     /// Parse a struct or union definition/reference.
     fn parse_struct_or_union(&mut self, is_struct: bool) -> TypeSpecifier {
         let (mut is_packed, mut struct_aligned, _, _) = self.parse_gcc_attributes();
-        let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+        let name = if let TokenKind::Identifier(n) = self.peek() {
+            let n = n.clone();
             self.advance();
             Some(n)
         } else {
@@ -381,7 +382,8 @@ impl Parser {
     /// Parse an enum definition/reference.
     fn parse_enum_specifier(&mut self) -> TypeSpecifier {
         self.skip_gcc_extensions();
-        let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+        let name = if let TokenKind::Identifier(n) = self.peek() {
+            let n = n.clone();
             self.advance();
             Some(n)
         } else {
@@ -641,7 +643,8 @@ impl Parser {
         let mut variants = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
-            if let TokenKind::Identifier(name) = self.peek().clone() {
+            if let TokenKind::Identifier(name) = self.peek() {
+                let name = name.clone();
                 self.advance();
                 let value = if self.consume_if(&TokenKind::Assign) {
                     Some(Box::new(self.parse_assignment_expr()))

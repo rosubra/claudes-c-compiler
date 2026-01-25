@@ -47,7 +47,7 @@ impl Parser {
     }
 
     pub(super) fn parse_stmt(&mut self) -> Stmt {
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::Return => {
                 let span = self.peek_span();
                 self.advance();
@@ -154,7 +154,8 @@ impl Parser {
                     self.expect(&TokenKind::Semicolon);
                     Stmt::GotoIndirect(Box::new(expr), span)
                 } else {
-                    let label = if let TokenKind::Identifier(name) = self.peek().clone() {
+                    let label = if let TokenKind::Identifier(name) = self.peek() {
+                        let name = name.clone();
                         self.advance();
                         name
                     } else {
@@ -164,7 +165,7 @@ impl Parser {
                     Stmt::Goto(label, span)
                 }
             }
-            TokenKind::Identifier(ref name) => {
+            TokenKind::Identifier(name) => {
                 // Check for label (identifier followed by colon)
                 let name_clone = name.clone();
                 let span = self.peek_span();

@@ -121,10 +121,9 @@ impl Parser {
                 decls.push(decl);
             } else {
                 // Report error for unrecognized token at top level
-                let tok = self.peek().clone();
-                if !matches!(tok, TokenKind::Semicolon | TokenKind::Eof) {
+                if !matches!(self.peek(), TokenKind::Semicolon | TokenKind::Eof) {
                     self.error_count += 1;
-                    eprintln!("error: expected declaration, got {:?}", tok);
+                    eprintln!("error: expected declaration, got {:?}", self.peek());
                 }
                 self.advance();
             }
@@ -492,13 +491,15 @@ impl Parser {
     /// Check if current token is a pragma pack directive and handle it.
     /// Returns true if a pragma pack token was consumed.
     pub(super) fn handle_pragma_pack_token(&mut self) -> bool {
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::PragmaPackSet(n) => {
+                let n = *n;
                 self.advance();
                 self.pragma_pack_align = if n == 0 { None } else { Some(n) };
                 true
             }
             TokenKind::PragmaPackPush(n) => {
+                let n = *n;
                 self.advance();
                 // Push current alignment onto stack
                 self.pragma_pack_stack.push(self.pragma_pack_align);

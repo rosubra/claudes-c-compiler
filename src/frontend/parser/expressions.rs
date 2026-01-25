@@ -119,8 +119,7 @@ impl Parser {
     fn parse_binary_expr(&mut self, level: PrecedenceLevel) -> Expr {
         let mut lhs = self.parse_next_tighter(level);
         loop {
-            let tok = self.peek().clone();
-            let op = match self.token_to_binop(&tok, level) {
+            let op = match self.token_to_binop(self.peek(), level) {
                 Some(op) => op,
                 None => break,
             };
@@ -179,7 +178,7 @@ impl Parser {
     }
 
     fn parse_unary_expr(&mut self) -> Expr {
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::AmpAmp => {
                 // GCC extension: &&label (address of label, for computed goto)
                 let span = self.peek_span();
@@ -334,7 +333,8 @@ impl Parser {
                 TokenKind::Dot => {
                     let span = self.peek_span();
                     self.advance();
-                    let field = if let TokenKind::Identifier(name) = self.peek().clone() {
+                    let field = if let TokenKind::Identifier(name) = self.peek() {
+                        let name = name.clone();
                         self.advance();
                         name
                     } else {
@@ -345,7 +345,8 @@ impl Parser {
                 TokenKind::Arrow => {
                     let span = self.peek_span();
                     self.advance();
-                    let field = if let TokenKind::Identifier(name) = self.peek().clone() {
+                    let field = if let TokenKind::Identifier(name) = self.peek() {
+                        let name = name.clone();
                         self.advance();
                         name
                     } else {
@@ -371,58 +372,68 @@ impl Parser {
     }
 
     fn parse_primary_expr(&mut self) -> Expr {
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::IntLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::IntLiteral(val, span)
             }
             TokenKind::UIntLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::UIntLiteral(val, span)
             }
             TokenKind::LongLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::LongLiteral(val, span)
             }
             TokenKind::ULongLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::ULongLiteral(val, span)
             }
             TokenKind::FloatLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::FloatLiteral(val, span)
             }
             TokenKind::FloatLiteralF32(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::FloatLiteralF32(val, span)
             }
             TokenKind::FloatLiteralLongDouble(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::FloatLiteralLongDouble(val, span)
             }
             TokenKind::ImaginaryLiteral(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::ImaginaryLiteral(val, span)
             }
             TokenKind::ImaginaryLiteralF32(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::ImaginaryLiteralF32(val, span)
             }
             TokenKind::ImaginaryLiteralLongDouble(val) => {
+                let val = *val;
                 let span = self.peek_span();
                 self.advance();
                 Expr::ImaginaryLiteralLongDouble(val, span)
             }
-            TokenKind::StringLiteral(ref s) => {
+            TokenKind::StringLiteral(s) => {
                 let mut result = s.clone();
                 let span = self.peek_span();
                 self.advance();
@@ -430,11 +441,11 @@ impl Parser {
                 let mut is_wide = false;
                 loop {
                     match self.peek() {
-                        TokenKind::StringLiteral(ref s2) => {
+                        TokenKind::StringLiteral(s2) => {
                             result.push_str(s2);
                             self.advance();
                         }
-                        TokenKind::WideStringLiteral(ref s2) => {
+                        TokenKind::WideStringLiteral(s2) => {
                             result.push_str(s2);
                             is_wide = true;
                             self.advance();
@@ -448,14 +459,14 @@ impl Parser {
                     Expr::StringLiteral(result, span)
                 }
             }
-            TokenKind::WideStringLiteral(ref s) => {
+            TokenKind::WideStringLiteral(s) => {
                 let mut result = s.clone();
                 let span = self.peek_span();
                 self.advance();
                 // Concatenate adjacent string literals (wide + narrow = wide)
                 loop {
                     match self.peek() {
-                        TokenKind::StringLiteral(ref s2) | TokenKind::WideStringLiteral(ref s2) => {
+                        TokenKind::StringLiteral(s2) | TokenKind::WideStringLiteral(s2) => {
                             result.push_str(s2);
                             self.advance();
                         }
@@ -465,11 +476,12 @@ impl Parser {
                 Expr::WideStringLiteral(result, span)
             }
             TokenKind::CharLiteral(c) => {
+                let c = *c;
                 let span = self.peek_span();
                 self.advance();
                 Expr::CharLiteral(c, span)
             }
-            TokenKind::Identifier(ref name) => {
+            TokenKind::Identifier(name) => {
                 let name = name.clone();
                 let span = self.peek_span();
                 self.advance();

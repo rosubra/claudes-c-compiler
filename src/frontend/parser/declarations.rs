@@ -493,7 +493,8 @@ impl Parser {
                             designators.push(Designator::Index(lo));
                         }
                     } else if self.consume_if(&TokenKind::Dot) {
-                        if let TokenKind::Identifier(name) = self.peek().clone() {
+                        if let TokenKind::Identifier(name) = self.peek() {
+                            let name = name.clone();
                             self.advance();
                             designators.push(Designator::Field(name));
                         }
@@ -503,7 +504,8 @@ impl Parser {
                 }
                 // GNU old-style designator: field: value
                 if designators.is_empty() {
-                    if let TokenKind::Identifier(name) = self.peek().clone() {
+                    if let TokenKind::Identifier(name) = self.peek() {
+                        let name = name.clone();
                         if self.pos + 1 < self.tokens.len() && matches!(self.tokens[self.pos + 1].kind, TokenKind::Colon) {
                             self.advance(); // consume identifier
                             self.advance(); // consume colon

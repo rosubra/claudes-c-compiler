@@ -35,7 +35,8 @@ impl Parser {
         }
 
         // Parse the direct-declarator part
-        let (name, inner_derived) = if let TokenKind::Identifier(n) = self.peek().clone() {
+        let (name, inner_derived) = if let TokenKind::Identifier(ref n) = self.peek() {
+            let n = n.clone();
             self.advance();
             (Some(n), Vec::new())
         } else if matches!(self.peek(), TokenKind::LParen) && self.is_paren_declarator() {
@@ -361,7 +362,8 @@ impl Parser {
     fn parse_kr_identifier_list(&mut self) -> (Vec<ParamDecl>, bool) {
         let mut params = Vec::new();
         loop {
-            if let TokenKind::Identifier(n) = self.peek().clone() {
+            if let TokenKind::Identifier(ref n) = self.peek() {
+                let n = n.clone();
                 let span = self.peek_span();
                 self.advance();
                 params.push(ParamDecl {
@@ -396,7 +398,8 @@ impl Parser {
 
         let name = if matches!(self.peek(), TokenKind::LParen) {
             self.parse_paren_param_declarator(&mut pointer_depth, &mut is_func_ptr, &mut ptr_to_array_dims, &mut fptr_params)
-        } else if let TokenKind::Identifier(n) = self.peek().clone() {
+        } else if let TokenKind::Identifier(ref n) = self.peek() {
+            let n = n.clone();
             self.advance();
             Some(n)
         } else {
@@ -444,7 +447,8 @@ impl Parser {
                 inner_ptr_depth += 1;
                 self.skip_cv_qualifiers();
             }
-            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+            let name = if let TokenKind::Identifier(ref n) = self.peek() {
+                let n = n.clone();
                 self.advance();
                 Some(n)
             } else if matches!(self.peek(), TokenKind::LParen) {
@@ -480,7 +484,8 @@ impl Parser {
             name
         } else if self.consume_if(&TokenKind::Caret) {
             // Block pointer (Apple extension)
-            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+            let name = if let TokenKind::Identifier(ref n) = self.peek() {
+                let n = n.clone();
                 self.advance();
                 Some(n)
             } else {
@@ -493,7 +498,8 @@ impl Parser {
             name
         } else if let TokenKind::Identifier(_) = self.peek() {
             // Parenthesized name: (name)
-            let name = if let TokenKind::Identifier(n) = self.peek().clone() {
+            let name = if let TokenKind::Identifier(ref n) = self.peek() {
+                let n = n.clone();
                 self.advance();
                 Some(n)
             } else {
@@ -523,7 +529,8 @@ impl Parser {
     /// Extract a name from nested parentheses: (name), ((name)), (*(name)), etc.
     pub(super) fn extract_paren_name(&mut self) -> Option<String> {
         if !matches!(self.peek(), TokenKind::LParen) {
-            if let TokenKind::Identifier(n) = self.peek().clone() {
+            if let TokenKind::Identifier(ref n) = self.peek() {
+                let n = n.clone();
                 self.advance();
                 return Some(n);
             }
@@ -536,7 +543,8 @@ impl Parser {
         }
         let name = if matches!(self.peek(), TokenKind::LParen) {
             self.extract_paren_name()
-        } else if let TokenKind::Identifier(n) = self.peek().clone() {
+        } else if let TokenKind::Identifier(ref n) = self.peek() {
+            let n = n.clone();
             self.advance();
             Some(n)
         } else {
