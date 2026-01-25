@@ -114,6 +114,22 @@ impl Lowerer {
             _ => {}
         }
 
+        // __builtin_expect(exp, c) - branch prediction hint.
+        // Returns exp unchanged, but must evaluate c for side effects.
+        // __builtin_expect_with_probability(exp, c, prob) - same with probability.
+        if name == "__builtin_expect" || name == "__builtin_expect_with_probability" {
+            let result = if let Some(first) = args.first() {
+                self.lower_expr(first)
+            } else {
+                Operand::Const(IrConst::I64(0))
+            };
+            // Evaluate remaining arguments for their side effects
+            for arg in args.iter().skip(1) {
+                self.lower_expr(arg);
+            }
+            return Some(result);
+        }
+
         // __builtin_prefetch(addr, [rw], [locality]) - no-op performance hint
         if name == "__builtin_prefetch" {
             for arg in args {

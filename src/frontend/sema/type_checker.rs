@@ -578,10 +578,12 @@ impl<'a> ExprTypeChecker<'a> {
             | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
             | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
             | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll"
-            | "__builtin_expect" | "__builtin_expect_with_probability"
             | "__builtin_types_compatible_p" | "__builtin_classify_type"
             | "__builtin_constant_p" | "__builtin_object_size"
             | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => Some(CType::Int),
+
+            // __builtin_expect returns long (evaluates both args, returns first)
+            "__builtin_expect" | "__builtin_expect_with_probability" => Some(CType::Long),
 
             // Complex component extraction
             "creal" | "__builtin_creal" | "cimag" | "__builtin_cimag" => Some(CType::Double),

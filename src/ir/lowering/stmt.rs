@@ -995,9 +995,10 @@ impl Lowerer {
         let case_ranges = switch_frame.as_ref().map(|f| f.case_ranges.clone()).unwrap_or_default();
         let default_label = switch_frame.as_ref().and_then(|f| f.default_label);
 
+        let expr_type = switch_frame.as_ref().map(|f| f.expr_type).unwrap_or(IrType::I32);
         let fallback = default_label.unwrap_or(end_label);
         self.start_block(dispatch_label);
-        self.emit_switch_dispatch(&val, switch_alloca, &cases, &case_ranges, fallback);
+        self.emit_switch_dispatch(&val, switch_alloca, &cases, &case_ranges, fallback, expr_type);
         self.start_block(end_label);
     }
 
@@ -1011,6 +1012,7 @@ impl Lowerer {
         cases: &[(i64, BlockId)],
         case_ranges: &[(i64, i64, BlockId)],
         fallback: BlockId,
+        switch_ty: IrType,
     ) {
         let total_checks = cases.len() + case_ranges.len();
 
@@ -1019,11 +1021,18 @@ impl Lowerer {
         // with type-mismatched inline asm).
         if let Operand::Const(c) = val {
             if let Some(switch_int) = self.const_to_i64(c) {
+                let is_unsigned = switch_ty.is_unsigned();
                 let target = cases.iter()
                     .find(|(cv, _)| *cv == switch_int)
                     .map(|(_, label)| *label)
                     .or_else(|| case_ranges.iter()
-                        .find(|(low, high, _)| switch_int >= *low && switch_int <= *high)
+                        .find(|(low, high, _)| {
+                            if is_unsigned {
+                                (switch_int as u64) >= (*low as u64) && (switch_int as u64) <= (*high as u64)
+                            } else {
+                                switch_int >= *low && switch_int <= *high
+                            }
+                        })
                         .map(|(_, _, label)| *label))
                     .unwrap_or(fallback);
                 self.terminate(Terminator::Branch(target));
@@ -1056,11 +1065,15 @@ impl Lowerer {
         }
 
         // Emit range checks: val >= low && val <= high
+        // Use unsigned comparisons when the switch expression type is unsigned
+        let is_unsigned = switch_ty.is_unsigned();
+        let ge_op = if is_unsigned { IrCmpOp::Uge } else { IrCmpOp::Sge };
+        let le_op = if is_unsigned { IrCmpOp::Ule } else { IrCmpOp::Sle };
         for (low, high, range_label) in case_ranges.iter() {
             let loaded = self.fresh_value();
             self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 });
-            let ge_result = self.emit_cmp_val(IrCmpOp::Sge, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
-            let le_result = self.emit_cmp_val(IrCmpOp::Sle, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
+            let ge_result = self.emit_cmp_val(ge_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
+            let le_result = self.emit_cmp_val(le_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*high)), IrType::I64);
             let and_result = self.fresh_value();
             self.emit(Instruction::BinOp {
                 dest: and_result,
