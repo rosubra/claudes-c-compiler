@@ -1,0 +1,19 @@
+Task: Fix if-conversion pass speculating loads past null-pointer guards
+
+Problem:
+The if-conversion pass (passes/if_convert.rs) treats Load instructions as side-effect-free
+in is_side_effect_free(). While loads don't have write side effects, they CAN TRAP
+(segfault) on invalid pointers. When the pass hoists loads from conditional arms into
+unconditional code, it speculatively executes loads that were originally guarded by
+null-pointer checks.
+
+This causes postgres initdb to segfault in validate_zone() at:
+  if (!tzname || !tzname[0])
+      return false;
+The short-circuit OR gets lowered to a diamond where one arm loads tzname[0].
+If-conversion hoists this load unconditionally, so when tzname is NULL, it crashes.
+
+Fix:
+1. Remove Instruction::Load from is_side_effect_free()
+2. Add regression test with null-pointer guard + short-circuit OR pattern
+3. Verify postgres initdb no longer segfaults
