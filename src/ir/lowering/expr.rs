@@ -120,6 +120,29 @@ impl Lowerer {
         Operand::Value(dest)
     }
 
+    /// Emit an inline asm to read a global register variable (e.g., `register long x asm("rsp")`).
+    /// Creates a temporary alloca, uses the inline asm output constraint `={regname}` to
+    /// store the register value into the alloca, then loads the result.
+    fn read_global_register(&mut self, reg_name: &str, ty: IrType) -> Operand {
+        // Create a temporary alloca for the inline asm output
+        let tmp_alloca = self.fresh_value();
+        self.emit(Instruction::Alloca { dest: tmp_alloca, ty, size: ty.size(), align: ty.align(), volatile: false });
+        let output_constraint = format!("={{{}}}", reg_name);
+        self.emit(Instruction::InlineAsm {
+            template: String::new(),
+            outputs: vec![(output_constraint, tmp_alloca, None)],
+            inputs: vec![],
+            clobbers: vec![],
+            operand_types: vec![ty],
+            goto_labels: vec![],
+            input_symbols: vec![],
+        });
+        // Load the result from the alloca
+        let result = self.fresh_value();
+        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty });
+        Operand::Value(result)
+    }
+
     fn load_global_var(&mut self, global_name: String, ginfo: &GlobalInfo) -> Operand {
         let addr = self.fresh_value();
         self.emit(Instruction::GlobalAddr { dest: addr, name: global_name });
@@ -187,6 +210,10 @@ impl Lowerer {
         }
 
         if let Some(ginfo) = self.globals.get(name).cloned() {
+            // Global register variable: read the register directly via inline asm
+            if let Some(ref reg_name) = ginfo.asm_register {
+                return self.read_global_register(reg_name, ginfo.ty);
+            }
             return self.load_global_var(name.to_string(), &ginfo);
         }
 

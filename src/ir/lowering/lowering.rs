@@ -1219,6 +1219,16 @@ impl Lowerer {
                 }
             }
 
+            // Global register variable: `register <type> <name> __asm__("reg")`
+            // No storage is emitted; reads/writes map directly to the named register.
+            if let Some(ref reg_name) = declarator.asm_register {
+                let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                let mut ginfo = GlobalInfo::from_analysis(&da);
+                ginfo.asm_register = Some(reg_name.clone());
+                self.globals.insert(declarator.name.clone(), ginfo);
+                continue;
+            }
+
             // extern without initializer: track the type but don't emit a .bss entry
             if decl.is_extern && declarator.init.is_none() {
                 if !self.globals.contains_key(&declarator.name) {

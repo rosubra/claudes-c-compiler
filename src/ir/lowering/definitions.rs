@@ -88,6 +88,9 @@ impl std::ops::DerefMut for LocalInfo {
 pub(super) struct GlobalInfo {
     /// Shared type metadata (ty, elem_size, is_array, pointee_type, etc.)
     pub var: VarInfo,
+    /// For global register variables declared with `register <type> <name> __asm__("reg")`.
+    /// When set, no storage is emitted; reads/writes map directly to the named register.
+    pub asm_register: Option<String>,
 }
 
 impl std::ops::Deref for GlobalInfo {
@@ -297,7 +300,7 @@ impl VarInfo {
 impl GlobalInfo {
     /// Construct a GlobalInfo from a DeclAnalysis, avoiding repeated field construction.
     pub(super) fn from_analysis(da: &DeclAnalysis) -> Self {
-        GlobalInfo { var: VarInfo::from_analysis(da) }
+        GlobalInfo { var: VarInfo::from_analysis(da), asm_register: None }
     }
 }
 

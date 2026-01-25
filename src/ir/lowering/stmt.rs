@@ -1151,7 +1151,7 @@ impl Lowerer {
             let name = out.name.clone();
             // Rewrite output constraint for register variables with __asm__("regname")
             if let Expr::Identifier(ref var_name, _) = out.expr {
-                if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                if let Some(asm_reg) = self.get_asm_register(var_name) {
                     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
                     if stripped.contains('r') || stripped == "g" {
                         let prefix: String = constraint.chars().take_while(|c| *c == '=' || *c == '+' || *c == '&').collect();
@@ -1186,7 +1186,7 @@ impl Lowerer {
             // Rewrite constraint for register variables with __asm__("regname"):
             // when the constraint allows "r", pin to the exact requested register.
             if let Expr::Identifier(ref var_name, _) = inp.expr {
-                if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                if let Some(asm_reg) = self.get_asm_register(var_name) {
                     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
                     if stripped.contains('r') || stripped == "g" {
                         constraint = format!("{{{}}}", asm_reg);
@@ -1287,11 +1287,19 @@ impl Lowerer {
             || self.types.enum_constants.contains_key(name)
     }
 
-    /// Look up the asm register name for a local variable, if it was declared with
+    /// Look up the asm register name for a variable declared with
     /// `register <type> <name> __asm__("regname")`.
-    fn get_local_asm_register(&self, name: &str) -> Option<String> {
-        self.func_state.as_ref()
+    /// Checks local variables first, then global register variables.
+    fn get_asm_register(&self, name: &str) -> Option<String> {
+        // Check locals first
+        if let Some(reg) = self.func_state.as_ref()
             .and_then(|fs| fs.locals.get(name))
+            .and_then(|info| info.asm_register.clone())
+        {
+            return Some(reg);
+        }
+        // Check globals (for global register variables like `current_stack_pointer`)
+        self.globals.get(name)
             .and_then(|info| info.asm_register.clone())
     }
 

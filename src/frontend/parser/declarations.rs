@@ -109,7 +109,7 @@ impl Parser {
         self.consume_post_type_qualifiers();
 
         let (name, derived, decl_mode, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
-        let (post_ctor, post_dtor, post_mode, post_common, post_aligned, _asm_reg) = self.parse_asm_and_attributes();
+        let (post_ctor, post_dtor, post_mode, post_common, post_aligned, first_asm_reg) = self.parse_asm_and_attributes();
         let mode_kind = decl_mode.or(post_mode);
         let is_common = decl_common || post_common;
         // Merge alignment from _Alignas (type specifier), declarator attrs, and post-declarator attrs.
@@ -142,7 +142,7 @@ impl Parser {
         if is_funcdef {
             self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, is_weak, alias_target, visibility, section)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, is_weak, alias_target, visibility, section, first_asm_reg)
         }
     }
 
@@ -387,6 +387,7 @@ impl Parser {
         alias_target: Option<String>,
         visibility: Option<String>,
         section: Option<String>,
+        first_asm_register: Option<String>,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
         let init = if self.consume_if(&TokenKind::Assign) {
@@ -404,11 +405,16 @@ impl Parser {
             alias_target,
             visibility,
             section: section.clone(),
-            asm_register: None,
+            asm_register: first_asm_register,
             span: start,
         });
 
-        let (extra_ctor, extra_dtor, _, extra_common, extra_aligned, _extra_asm_reg) = self.parse_asm_and_attributes();
+        let (extra_ctor, extra_dtor, _, extra_common, extra_aligned, extra_asm_reg) = self.parse_asm_and_attributes();
+        // If the asm register was parsed after the declarator (post-declarator position),
+        // apply it to the first declarator
+        if let Some(reg) = extra_asm_reg {
+            declarators.last_mut().unwrap().asm_register = Some(reg);
+        }
         if extra_ctor {
             declarators.last_mut().unwrap().is_constructor = true;
         }
@@ -440,7 +446,7 @@ impl Parser {
         // Parse additional declarators separated by commas
         while self.consume_if(&TokenKind::Comma) {
             let (dname, dderived) = self.parse_declarator();
-            let (d_ctor, d_dtor, _, d_common, _, _d_asm_reg) = self.parse_asm_and_attributes();
+            let (d_ctor, d_dtor, _, d_common, _, d_asm_reg) = self.parse_asm_and_attributes();
             is_common = is_common || d_common;
             let d_weak = self.parsing_weak;
             let d_alias = self.parsing_alias_target.take();
@@ -462,10 +468,13 @@ impl Parser {
                 alias_target: d_alias,
                 visibility: d_vis,
                 section: d_section,
-                asm_register: None,
+                asm_register: d_asm_reg,
                 span: start,
             });
-            let (_, skip_aligned, _skip_asm_reg) = self.skip_asm_and_attributes();
+            let (_, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
+            if let Some(reg) = skip_asm_reg {
+                declarators.last_mut().unwrap().asm_register = Some(reg);
+            }
             if let Some(a) = skip_aligned {
                 alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
             }

@@ -30,7 +30,14 @@ impl Lowerer {
                     self.emit(Instruction::GlobalAddr { dest: addr, name: mangled });
                     return Some(LValue::Address(addr));
                 }
-                if self.globals.contains_key(name) {
+                if let Some(ginfo) = self.globals.get(name) {
+                    // Global register variables have no storage, so they are not
+                    // addressable. Writes are silently dropped (read-only in practice).
+                    // TODO: support writes to global register variables via inline asm
+                    // with an input constraint (e.g., `asm("" : : "{rsp}"(val))`)
+                    if ginfo.asm_register.is_some() {
+                        return None;
+                    }
                     // Global variable: emit GlobalAddr to get its address
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
