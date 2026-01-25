@@ -859,13 +859,8 @@ impl ArchCodegen for RiscvCodegen {
         // parameters. A struct that occupies 2 GP regs counts as 2, not 1.
         // This is critical for va_start to correctly point to the first variadic arg.
         if func.is_variadic {
-            let va_config = CallAbiConfig {
-                max_int_regs: 8, max_float_regs: 8,
-                align_i128_pairs: true,
-                f128_in_fp_regs: false, f128_in_gp_pairs: true,
-                variadic_floats_in_gp: true,
-            };
-            let param_classes = classify_params(func, &va_config);
+            // For variadic callee, call_abi_config() already has variadic_floats_in_gp: true.
+            let param_classes = classify_params(func, &self.call_abi_config());
             self.va_named_gp_count = param_classes.iter()
                 .map(|c| c.gp_reg_count())
                 .sum::<usize>()
@@ -930,13 +925,10 @@ impl ArchCodegen for RiscvCodegen {
             }
         }
 
-        // Use shared parameter classification (same ABI config as emit_call).
-        let config = CallAbiConfig {
-            max_int_regs: 8, max_float_regs: 8,
-            align_i128_pairs: true,
-            f128_in_fp_regs: false, f128_in_gp_pairs: true,
-            variadic_floats_in_gp: func.is_variadic,
-        };
+        // Use shared parameter classification. On RISC-V, variadic functions
+        // route float params through GP regs; non-variadic use FP regs.
+        let mut config = self.call_abi_config();
+        config.variadic_floats_in_gp = func.is_variadic;
         let param_classes = classify_params(func, &config);
 
         // Stack-passed params are at positive s0 offsets.

@@ -67,82 +67,18 @@ pub trait ArchCodegen {
     /// Emit a store instruction: store val to the address in ptr.
     /// Default implementation uses `SlotAddr` to dispatch the 3-way
     /// alloca/over-aligned/indirect pattern once for both i128 and typed stores.
+    /// Backends needing to intercept specific types (e.g., x86 F128) can override
+    /// this, handle their special case, then call `emit_store_default` for the rest.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
-        let addr = self.state_ref().resolve_slot_addr(ptr.0);
-        if is_i128_type(ty) {
-            self.emit_load_acc_pair(val);
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_save_acc_pair();
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_store_pair_indirect();
-                    }
-                    SlotAddr::Direct(slot) => self.emit_store_pair_to_slot(slot),
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_save_acc_pair();
-                        self.emit_load_ptr_from_slot(slot, ptr.0);
-                        self.emit_store_pair_indirect();
-                    }
-                }
-            }
-            return;
-        }
-        self.emit_load_operand(val);
-        if let Some(addr) = addr {
-            let store_instr = self.store_instr_for_type(ty);
-            match addr {
-                SlotAddr::OverAligned(slot, id) => {
-                    self.emit_save_acc();
-                    self.emit_alloca_aligned_addr(slot, id);
-                    self.emit_typed_store_indirect(store_instr, ty);
-                }
-                SlotAddr::Direct(slot) => self.emit_typed_store_to_slot(store_instr, ty, slot),
-                SlotAddr::Indirect(slot) => {
-                    self.emit_save_acc();
-                    self.emit_load_ptr_from_slot(slot, ptr.0);
-                    self.emit_typed_store_indirect(store_instr, ty);
-                }
-            }
-        }
+        emit_store_default(self, val, ptr, ty);
     }
 
     /// Emit a load instruction: load from the address in ptr to dest.
     /// Default implementation uses `SlotAddr` to dispatch the 3-way pattern.
+    /// Backends needing to intercept specific types (e.g., x86 F128) can override
+    /// this, handle their special case, then call `emit_load_default` for the rest.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
-        let addr = self.state_ref().resolve_slot_addr(ptr.0);
-        if is_i128_type(ty) {
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_load_pair_indirect();
-                    }
-                    SlotAddr::Direct(slot) => self.emit_load_pair_from_slot(slot),
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_load_ptr_from_slot(slot, ptr.0);
-                        self.emit_load_pair_indirect();
-                    }
-                }
-                self.emit_store_acc_pair(dest);
-            }
-            return;
-        }
-        if let Some(addr) = addr {
-            let load_instr = self.load_instr_for_type(ty);
-            match addr {
-                SlotAddr::OverAligned(slot, id) => {
-                    self.emit_alloca_aligned_addr(slot, id);
-                    self.emit_typed_load_indirect(load_instr);
-                }
-                SlotAddr::Direct(slot) => self.emit_typed_load_from_slot(load_instr, slot),
-                SlotAddr::Indirect(slot) => {
-                    self.emit_load_ptr_from_slot(slot, ptr.0);
-                    self.emit_typed_load_indirect(load_instr);
-                }
-            }
-            self.emit_store_result(dest);
-        }
+        emit_load_default(self, dest, ptr, ty);
     }
 
     /// Emit a load with a folded GEP constant offset: load from (alloca_base + const_offset).
@@ -908,4 +844,91 @@ pub trait ArchCodegen {
     /// Emit a target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
     /// Each backend must implement this to emit the appropriate native instructions.
     fn emit_intrinsic(&mut self, _dest: &Option<Value>, _op: &IntrinsicOp, _dest_ptr: &Option<Value>, _args: &[Operand]) {}
+}
+
+// ── Default store/load implementations as free functions ──────────────────────
+//
+// These are extracted as free functions so that backends that override
+// emit_store/emit_load (e.g., x86 for F128 handling) can delegate to the
+// default logic for non-special-cased types without duplicating the 3-way
+// SlotAddr dispatch code.
+
+/// Default store implementation: 3-way SlotAddr dispatch for i128 and typed stores.
+/// Backends that override `emit_store` should call this for types they don't handle specially.
+pub fn emit_store_default(cg: &mut (impl ArchCodegen + ?Sized), val: &Operand, ptr: &Value, ty: IrType) {
+    let addr = cg.state_ref().resolve_slot_addr(ptr.0);
+    if is_i128_type(ty) {
+        cg.emit_load_acc_pair(val);
+        if let Some(addr) = addr {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    cg.emit_save_acc_pair();
+                    cg.emit_alloca_aligned_addr(slot, id);
+                    cg.emit_store_pair_indirect();
+                }
+                SlotAddr::Direct(slot) => cg.emit_store_pair_to_slot(slot),
+                SlotAddr::Indirect(slot) => {
+                    cg.emit_save_acc_pair();
+                    cg.emit_load_ptr_from_slot(slot, ptr.0);
+                    cg.emit_store_pair_indirect();
+                }
+            }
+        }
+        return;
+    }
+    cg.emit_load_operand(val);
+    if let Some(addr) = addr {
+        let store_instr = cg.store_instr_for_type(ty);
+        match addr {
+            SlotAddr::OverAligned(slot, id) => {
+                cg.emit_save_acc();
+                cg.emit_alloca_aligned_addr(slot, id);
+                cg.emit_typed_store_indirect(store_instr, ty);
+            }
+            SlotAddr::Direct(slot) => cg.emit_typed_store_to_slot(store_instr, ty, slot),
+            SlotAddr::Indirect(slot) => {
+                cg.emit_save_acc();
+                cg.emit_load_ptr_from_slot(slot, ptr.0);
+                cg.emit_typed_store_indirect(store_instr, ty);
+            }
+        }
+    }
+}
+
+/// Default load implementation: 3-way SlotAddr dispatch for i128 and typed loads.
+/// Backends that override `emit_load` should call this for types they don't handle specially.
+pub fn emit_load_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, ptr: &Value, ty: IrType) {
+    let addr = cg.state_ref().resolve_slot_addr(ptr.0);
+    if is_i128_type(ty) {
+        if let Some(addr) = addr {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    cg.emit_alloca_aligned_addr(slot, id);
+                    cg.emit_load_pair_indirect();
+                }
+                SlotAddr::Direct(slot) => cg.emit_load_pair_from_slot(slot),
+                SlotAddr::Indirect(slot) => {
+                    cg.emit_load_ptr_from_slot(slot, ptr.0);
+                    cg.emit_load_pair_indirect();
+                }
+            }
+            cg.emit_store_acc_pair(dest);
+        }
+        return;
+    }
+    if let Some(addr) = addr {
+        let load_instr = cg.load_instr_for_type(ty);
+        match addr {
+            SlotAddr::OverAligned(slot, id) => {
+                cg.emit_alloca_aligned_addr(slot, id);
+                cg.emit_typed_load_indirect(load_instr);
+            }
+            SlotAddr::Direct(slot) => cg.emit_typed_load_from_slot(load_instr, slot),
+            SlotAddr::Indirect(slot) => {
+                cg.emit_load_ptr_from_slot(slot, ptr.0);
+                cg.emit_typed_load_indirect(load_instr);
+            }
+        }
+        cg.emit_store_result(dest);
+    }
 }

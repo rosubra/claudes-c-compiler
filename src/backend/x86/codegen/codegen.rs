@@ -1026,12 +1026,7 @@ impl ArchCodegen for X86Codegen {
     fn emit_store_params(&mut self, func: &IrFunction) {
         let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
         // Use shared parameter classification (same ABI config as emit_call).
-        let config = CallAbiConfig {
-            max_int_regs: 6, max_float_regs: 8,
-            align_i128_pairs: false,
-            f128_in_fp_regs: false, f128_in_gp_pairs: false,
-            variadic_floats_in_gp: false,
-        };
+        let config = self.call_abi_config();
         let param_classes = classify_params(func, &config);
         // Stack-passed parameters start at 16(%rbp) (after saved rbp + return addr).
         let stack_base: i64 = 16;
@@ -1214,6 +1209,7 @@ impl ArchCodegen for X86Codegen {
     /// Override emit_store to handle F128 (long double) with x87 80-bit memory format.
     /// On x86-64, long double must be stored as 80-bit extended precision in memory
     /// so that code reading through unions or integer overlays sees correct x87 bytes.
+    /// Non-F128 types delegate to the shared default implementation.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
         use crate::backend::state::SlotAddr;
         if ty == IrType::F128 {
@@ -1227,7 +1223,6 @@ impl ArchCodegen for X86Codegen {
             if let Some(addr) = addr {
                 match addr {
                     SlotAddr::Direct(slot) => {
-                        // Convert rax (f64 bits) to x87 and store to slot
                         self.state.emit("    pushq %rax");
                         self.state.emit("    fldl (%rsp)");
                         self.state.emit("    addq $8, %rsp");
@@ -1236,7 +1231,6 @@ impl ArchCodegen for X86Codegen {
                     SlotAddr::OverAligned(slot, id) => {
                         self.state.emit("    movq %rax, %rdx");
                         self.emit_alloca_aligned_addr(slot, id);
-                        // rcx has the aligned address
                         self.state.emit("    pushq %rdx");
                         self.state.emit("    fldl (%rsp)");
                         self.state.emit("    addq $8, %rsp");
@@ -1245,7 +1239,6 @@ impl ArchCodegen for X86Codegen {
                     SlotAddr::Indirect(slot) => {
                         self.state.emit("    movq %rax, %rdx");
                         self.emit_load_ptr_from_slot(slot, ptr.0);
-                        // rcx has the pointer
                         self.state.emit("    pushq %rdx");
                         self.state.emit("    fldl (%rsp)");
                         self.state.emit("    addq $8, %rsp");
@@ -1255,48 +1248,13 @@ impl ArchCodegen for X86Codegen {
             }
             return;
         }
-        // Non-F128: use default implementation from ArchCodegen trait
-        let addr = self.state.resolve_slot_addr(ptr.0);
-        if crate::backend::generation::is_i128_type(ty) {
-            self.emit_load_acc_pair(val);
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_save_acc_pair();
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_store_pair_indirect();
-                    }
-                    SlotAddr::Direct(slot) => self.emit_store_pair_to_slot(slot),
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_save_acc_pair();
-                        self.emit_load_ptr_from_slot(slot, ptr.0);
-                        self.emit_store_pair_indirect();
-                    }
-                }
-            }
-            return;
-        }
-        self.emit_load_operand(val);
-        if let Some(addr) = addr {
-            let store_instr = self.store_instr_for_type(ty);
-            match addr {
-                SlotAddr::OverAligned(slot, id) => {
-                    self.emit_save_acc();
-                    self.emit_alloca_aligned_addr(slot, id);
-                    self.emit_typed_store_indirect(store_instr, ty);
-                }
-                SlotAddr::Direct(slot) => self.emit_typed_store_to_slot(store_instr, ty, slot),
-                SlotAddr::Indirect(slot) => {
-                    self.emit_save_acc();
-                    self.emit_load_ptr_from_slot(slot, ptr.0);
-                    self.emit_typed_store_indirect(store_instr, ty);
-                }
-            }
-        }
+        // Non-F128: delegate to shared default implementation.
+        crate::backend::traits::emit_store_default(self, val, ptr, ty);
     }
 
     /// Override emit_load to handle F128 (long double) with x87 80-bit memory format.
     /// Loads 80-bit extended precision from memory and converts to f64 in %rax.
+    /// Non-F128 types delegate to the shared default implementation.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
         use crate::backend::state::SlotAddr;
         if ty == IrType::F128 {
@@ -1319,7 +1277,6 @@ impl ArchCodegen for X86Codegen {
                         self.state.emit("    fldt (%rcx)");
                     }
                 }
-                // Convert x87 ST0 to f64 in rax
                 self.state.emit("    subq $8, %rsp");
                 self.state.emit("    fstpl (%rsp)");
                 self.state.emit("    popq %rax");
@@ -1327,40 +1284,8 @@ impl ArchCodegen for X86Codegen {
             }
             return;
         }
-        // Non-F128: use default implementation from ArchCodegen trait
-        let addr = self.state.resolve_slot_addr(ptr.0);
-        if crate::backend::generation::is_i128_type(ty) {
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_load_pair_indirect();
-                    }
-                    SlotAddr::Direct(slot) => self.emit_load_pair_from_slot(slot),
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_load_ptr_from_slot(slot, ptr.0);
-                        self.emit_load_pair_indirect();
-                    }
-                }
-                self.emit_store_acc_pair(dest);
-            }
-            return;
-        }
-        if let Some(addr) = addr {
-            let load_instr = self.load_instr_for_type(ty);
-            match addr {
-                SlotAddr::OverAligned(slot, id) => {
-                    self.emit_alloca_aligned_addr(slot, id);
-                    self.emit_typed_load_indirect(load_instr);
-                }
-                SlotAddr::Direct(slot) => self.emit_typed_load_from_slot(load_instr, slot),
-                SlotAddr::Indirect(slot) => {
-                    self.emit_load_ptr_from_slot(slot, ptr.0);
-                    self.emit_typed_load_indirect(load_instr);
-                }
-            }
-            self.emit_store_result(dest);
-        }
+        // Non-F128: delegate to shared default implementation.
+        crate::backend::traits::emit_load_default(self, dest, ptr, ty);
     }
 
     fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) {

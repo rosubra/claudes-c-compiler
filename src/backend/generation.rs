@@ -15,6 +15,7 @@ use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use super::common;
 use super::traits::ArchCodegen;
 use super::state::StackSlot;
+use super::liveness::{for_each_operand_in_instruction, for_each_value_use_in_instruction, for_each_operand_in_terminator};
 
 /// Information about a GEP with a constant offset that can be folded into
 /// Load/Store addressing modes. Instead of computing `base + offset` as a
@@ -70,128 +71,41 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
     // Phase 2: Verify that each candidate GEP dest is ONLY used as Load/Store ptr.
     // If it's used anywhere else (as a value operand, in a call, in a terminator,
     // or as a base of another GEP), we cannot fold it.
+    //
+    // Strategy: Load.ptr and Store.ptr are the ONLY foldable use positions.
+    // - Load: ptr is a Value (visited by for_each_value_use), no Operand uses → skip entirely.
+    // - Store: ptr (Value) is foldable, but val (Operand) is NOT → check only Operand uses.
+    // - All other instructions: ANY reference to a GEP dest invalidates folding.
     let mut non_ptr_uses: FxHashSet<u32> = FxHashSet::default();
+
+    // Helper: mark a GEP dest as non-foldable if used outside Load/Store ptr position.
+    let mut mark_non_ptr = |id: u32| {
+        if gep_map.contains_key(&id) {
+            non_ptr_uses.insert(id);
+        }
+    };
 
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
-                // Load/Store: ptr usage is foldable, but val usage is not.
-                Instruction::Load { ptr, .. } => {
-                    // ptr usage is OK — this is exactly what we want to fold.
-                    let _ = ptr;
+                // Load.ptr is foldable — skip entirely (no Operand uses).
+                Instruction::Load { .. } => {}
+                // Store.ptr is foldable, but Store.val is an Operand that is NOT foldable.
+                Instruction::Store { val, .. } => {
+                    if let Operand::Value(v) = val { mark_non_ptr(v.0); }
                 }
-                Instruction::Store { val, ptr, .. } => {
-                    // ptr usage is OK, but val usage is not foldable.
-                    let _ = ptr;
-                    if let Operand::Value(v) = val {
-                        if gep_map.contains_key(&v.0) {
-                            non_ptr_uses.insert(v.0);
-                        }
-                    }
-                }
-                // Any other instruction that references a GEP dest as a value
-                // operand means we can't fold it.
+                // All other instructions: any reference invalidates folding.
                 _ => {
-                    // Check all operand positions for references to GEP dests.
-                    let check_op = |op: &Operand, set: &mut FxHashSet<u32>| {
-                        if let Operand::Value(v) = op {
-                            if gep_map.contains_key(&v.0) {
-                                set.insert(v.0);
-                            }
-                        }
-                    };
-                    let check_val = |v: &Value, set: &mut FxHashSet<u32>| {
-                        if gep_map.contains_key(&v.0) {
-                            set.insert(v.0);
-                        }
-                    };
-                    match inst {
-                        Instruction::BinOp { lhs, rhs, .. } | Instruction::Cmp { lhs, rhs, .. } => {
-                            check_op(lhs, &mut non_ptr_uses);
-                            check_op(rhs, &mut non_ptr_uses);
-                        }
-                        Instruction::UnaryOp { src, .. } | Instruction::Cast { src, .. }
-                        | Instruction::Copy { src, .. } => {
-                            check_op(src, &mut non_ptr_uses);
-                        }
-                        Instruction::GetElementPtr { base, offset, .. } => {
-                            // GEP base: if it points to another foldable GEP, can't fold.
-                            check_val(base, &mut non_ptr_uses);
-                            check_op(offset, &mut non_ptr_uses);
-                        }
-                        Instruction::Call { args, .. } => {
-                            for a in args { check_op(a, &mut non_ptr_uses); }
-                        }
-                        Instruction::CallIndirect { func_ptr, args, .. } => {
-                            check_op(func_ptr, &mut non_ptr_uses);
-                            for a in args { check_op(a, &mut non_ptr_uses); }
-                        }
-                        Instruction::Memcpy { dest, src, .. } => {
-                            check_val(dest, &mut non_ptr_uses);
-                            check_val(src, &mut non_ptr_uses);
-                        }
-                        Instruction::Phi { incoming, .. } => {
-                            for (op, _) in incoming { check_op(op, &mut non_ptr_uses); }
-                        }
-                        Instruction::AtomicRmw { ptr, val, .. } => {
-                            check_op(ptr, &mut non_ptr_uses);
-                            check_op(val, &mut non_ptr_uses);
-                        }
-                        Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
-                            check_op(ptr, &mut non_ptr_uses);
-                            check_op(expected, &mut non_ptr_uses);
-                            check_op(desired, &mut non_ptr_uses);
-                        }
-                        Instruction::AtomicLoad { ptr, .. } => check_op(ptr, &mut non_ptr_uses),
-                        Instruction::AtomicStore { ptr, val, .. } => {
-                            check_op(ptr, &mut non_ptr_uses);
-                            check_op(val, &mut non_ptr_uses);
-                        }
-                        Instruction::DynAlloca { size, .. } => check_op(size, &mut non_ptr_uses),
-                        Instruction::VaArg { va_list_ptr, .. } | Instruction::VaStart { va_list_ptr }
-                        | Instruction::VaEnd { va_list_ptr } => check_val(va_list_ptr, &mut non_ptr_uses),
-                        Instruction::VaCopy { dest_ptr, src_ptr } => {
-                            check_val(dest_ptr, &mut non_ptr_uses);
-                            check_val(src_ptr, &mut non_ptr_uses);
-                        }
-                        Instruction::SetReturnF64Second { src } | Instruction::SetReturnF32Second { src } =>
-                            check_op(src, &mut non_ptr_uses),
-                        Instruction::InlineAsm { inputs, .. } => {
-                            for (_, op, _) in inputs { check_op(op, &mut non_ptr_uses); }
-                        }
-                        Instruction::Intrinsic { args, .. } => {
-                            for a in args { check_op(a, &mut non_ptr_uses); }
-                        }
-                        _ => {}
-                    }
+                    for_each_operand_in_instruction(inst, |op| {
+                        if let Operand::Value(v) = op { mark_non_ptr(v.0); }
+                    });
+                    for_each_value_use_in_instruction(inst, |v| mark_non_ptr(v.0));
                 }
             }
         }
-        // Also check terminators.
-        match &block.terminator {
-            Terminator::CondBranch { cond, .. } => {
-                if let Operand::Value(v) = cond {
-                    if gep_map.contains_key(&v.0) {
-                        non_ptr_uses.insert(v.0);
-                    }
-                }
-            }
-            Terminator::Return(Some(op)) => {
-                if let Operand::Value(v) = op {
-                    if gep_map.contains_key(&v.0) {
-                        non_ptr_uses.insert(v.0);
-                    }
-                }
-            }
-            Terminator::IndirectBranch { target, .. } => {
-                if let Operand::Value(v) = target {
-                    if gep_map.contains_key(&v.0) {
-                        non_ptr_uses.insert(v.0);
-                    }
-                }
-            }
-            _ => {}
-        }
+        for_each_operand_in_terminator(&block.terminator, |op| {
+            if let Operand::Value(v) = op { mark_non_ptr(v.0); }
+        });
     }
 
     // Remove GEPs that have non-ptr uses.
@@ -211,7 +125,7 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
 /// instructions or terminators. Indexed by Value ID; used to identify
 /// single-use values eligible for compare-branch fusion.
 fn count_value_uses(func: &IrFunction) -> Vec<u32> {
-    // Find the max value ID to size the vector
+    // Find the max value ID to size the vector.
     let mut max_id: u32 = 0;
     for block in &func.blocks {
         for inst in &block.instructions {
@@ -222,79 +136,23 @@ fn count_value_uses(func: &IrFunction) -> Vec<u32> {
     }
     let mut counts = vec![0u32; max_id as usize + 1];
 
-    let count_op = |op: &Operand, counts: &mut Vec<u32>| {
-        if let Operand::Value(v) = op {
-            if (v.0 as usize) < counts.len() {
-                counts[v.0 as usize] += 1;
-            }
-        }
-    };
-
-    let count_val = |v: &Value, counts: &mut Vec<u32>| {
-        if (v.0 as usize) < counts.len() {
-            counts[v.0 as usize] += 1;
+    // Helper: increment use count for a value ID, bounds-checked.
+    let mut count_id = |id: u32| {
+        if (id as usize) < counts.len() {
+            counts[id as usize] += 1;
         }
     };
 
     for block in &func.blocks {
         for inst in &block.instructions {
-            match inst {
-                Instruction::BinOp { lhs, rhs, .. } | Instruction::Cmp { lhs, rhs, .. } => {
-                    count_op(lhs, &mut counts); count_op(rhs, &mut counts);
-                }
-                Instruction::UnaryOp { src, .. } | Instruction::Cast { src, .. }
-                | Instruction::Copy { src, .. } => count_op(src, &mut counts),
-                Instruction::Load { ptr, .. } => count_val(ptr, &mut counts),
-                Instruction::Store { val, ptr, .. } => {
-                    count_op(val, &mut counts); count_val(ptr, &mut counts);
-                }
-                Instruction::GetElementPtr { base, offset, .. } => {
-                    count_val(base, &mut counts); count_op(offset, &mut counts);
-                }
-                Instruction::Call { args, .. } => { for a in args { count_op(a, &mut counts); } }
-                Instruction::CallIndirect { func_ptr, args, .. } => {
-                    count_op(func_ptr, &mut counts);
-                    for a in args { count_op(a, &mut counts); }
-                }
-                Instruction::Memcpy { dest, src, .. } => {
-                    count_val(dest, &mut counts); count_val(src, &mut counts);
-                }
-                Instruction::Phi { incoming, .. } => {
-                    for (op, _) in incoming { count_op(op, &mut counts); }
-                }
-                Instruction::AtomicRmw { ptr, val, .. } => {
-                    count_op(ptr, &mut counts); count_op(val, &mut counts);
-                }
-                Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
-                    count_op(ptr, &mut counts); count_op(expected, &mut counts);
-                    count_op(desired, &mut counts);
-                }
-                Instruction::AtomicLoad { ptr, .. } => count_op(ptr, &mut counts),
-                Instruction::AtomicStore { ptr, val, .. } => {
-                    count_op(ptr, &mut counts); count_op(val, &mut counts);
-                }
-                Instruction::DynAlloca { size, .. } => count_op(size, &mut counts),
-                Instruction::VaArg { va_list_ptr, .. } | Instruction::VaStart { va_list_ptr }
-                | Instruction::VaEnd { va_list_ptr } => count_val(va_list_ptr, &mut counts),
-                Instruction::VaCopy { dest_ptr, src_ptr } => {
-                    count_val(dest_ptr, &mut counts); count_val(src_ptr, &mut counts);
-                }
-                Instruction::SetReturnF64Second { src } | Instruction::SetReturnF32Second { src } =>
-                    count_op(src, &mut counts),
-                Instruction::InlineAsm { inputs, .. } => {
-                    for (_, op, _) in inputs { count_op(op, &mut counts); }
-                }
-                Instruction::Intrinsic { args, .. } => { for a in args { count_op(a, &mut counts); } }
-                _ => {} // Alloca, GlobalAddr, LabelAddr, GetReturn*, Fence have no Value operands
-            }
+            for_each_operand_in_instruction(inst, |op| {
+                if let Operand::Value(v) = op { count_id(v.0); }
+            });
+            for_each_value_use_in_instruction(inst, |v| count_id(v.0));
         }
-        // Count uses in terminators
-        match &block.terminator {
-            Terminator::CondBranch { cond, .. } => count_op(cond, &mut counts),
-            Terminator::Return(Some(op)) => count_op(op, &mut counts),
-            Terminator::IndirectBranch { target, .. } => count_op(target, &mut counts),
-            _ => {}
-        }
+        for_each_operand_in_terminator(&block.terminator, |op| {
+            if let Operand::Value(v) = op { count_id(v.0); }
+        });
     }
     counts
 }

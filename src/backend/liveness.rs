@@ -244,39 +244,16 @@ fn record_terminator_uses(
     alloca_set: &FxHashSet<u32>,
     last_use: &mut FxHashMap<u32, u32>,
 ) {
-    match term {
-        Terminator::Return(Some(op)) => {
-            if let Operand::Value(v) = op {
-                if !alloca_set.contains(&v.0) {
-                    let entry = last_use.entry(v.0).or_insert(point);
-                    if point > *entry {
-                        *entry = point;
-                    }
+    for_each_operand_in_terminator(term, |op| {
+        if let Operand::Value(v) = op {
+            if !alloca_set.contains(&v.0) {
+                let entry = last_use.entry(v.0).or_insert(point);
+                if point > *entry {
+                    *entry = point;
                 }
             }
         }
-        Terminator::CondBranch { cond, .. } => {
-            if let Operand::Value(v) = cond {
-                if !alloca_set.contains(&v.0) {
-                    let entry = last_use.entry(v.0).or_insert(point);
-                    if point > *entry {
-                        *entry = point;
-                    }
-                }
-            }
-        }
-        Terminator::IndirectBranch { target, .. } => {
-            if let Operand::Value(v) = target {
-                if !alloca_set.contains(&v.0) {
-                    let entry = last_use.entry(v.0).or_insert(point);
-                    if point > *entry {
-                        *entry = point;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
+    });
 }
 
 /// Collect gen set (used-before-defined) for a block's instruction.
@@ -310,18 +287,13 @@ fn collect_terminator_gen(
     kill: &FxHashSet<u32>,
     gen: &mut FxHashSet<u32>,
 ) {
-    let mut add_use = |v: u32| {
-        if !alloca_set.contains(&v) && !kill.contains(&v) {
-            gen.insert(v);
+    for_each_operand_in_terminator(term, |op| {
+        if let Operand::Value(v) = op {
+            if !alloca_set.contains(&v.0) && !kill.contains(&v.0) {
+                gen.insert(v.0);
+            }
         }
-    };
-
-    match term {
-        Terminator::Return(Some(Operand::Value(v))) => add_use(v.0),
-        Terminator::CondBranch { cond: Operand::Value(v), .. } => add_use(v.0),
-        Terminator::IndirectBranch { target: Operand::Value(v), .. } => add_use(v.0),
-        _ => {}
-    }
+    });
 }
 
 /// Get successor block IDs from a terminator.
@@ -339,7 +311,10 @@ fn terminator_targets(term: &Terminator) -> Vec<u32> {
 }
 
 /// Iterate over all Operand references in an instruction.
-fn for_each_operand_in_instruction(inst: &Instruction, mut f: impl FnMut(&Operand)) {
+/// This is the single canonical source of truth for instruction operand traversal.
+/// All code that needs to enumerate operands (liveness, use-counting, GEP fold
+/// verification) should call this rather than hand-rolling its own match.
+pub(super) fn for_each_operand_in_instruction(inst: &Instruction, mut f: impl FnMut(&Operand)) {
     match inst {
         Instruction::Alloca { .. } => {}
         Instruction::DynAlloca { size, .. } => f(size),
@@ -378,8 +353,10 @@ fn for_each_operand_in_instruction(inst: &Instruction, mut f: impl FnMut(&Operan
 }
 
 /// Iterate over Value references (non-Operand) used in an instruction.
-/// These are pointer/base values that are used directly, not as Operand.
-fn for_each_value_use_in_instruction(inst: &Instruction, mut f: impl FnMut(&Value)) {
+/// These are pointer/base values used directly (not wrapped in Operand),
+/// e.g., the `ptr` in Store/Load, `base` in GEP, `dest`/`src` in Memcpy.
+/// Canonical traversal — shared by liveness, use-counting, and GEP fold analysis.
+pub(super) fn for_each_value_use_in_instruction(inst: &Instruction, mut f: impl FnMut(&Value)) {
     match inst {
         Instruction::Store { ptr, .. } => f(ptr),
         Instruction::Load { ptr, .. } => f(ptr),
@@ -395,6 +372,17 @@ fn for_each_value_use_in_instruction(inst: &Instruction, mut f: impl FnMut(&Valu
         Instruction::Intrinsic { dest_ptr, .. } => {
             if let Some(dp) = dest_ptr { f(dp); }
         }
+        _ => {}
+    }
+}
+
+/// Iterate over all Operand references in a terminator.
+/// Canonical traversal — shared by liveness, use-counting, and GEP fold analysis.
+pub(super) fn for_each_operand_in_terminator(term: &Terminator, mut f: impl FnMut(&Operand)) {
+    match term {
+        Terminator::Return(Some(op)) => f(op),
+        Terminator::CondBranch { cond, .. } => f(cond),
+        Terminator::IndirectBranch { target, .. } => f(target),
         _ => {}
     }
 }

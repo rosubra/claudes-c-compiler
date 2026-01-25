@@ -720,12 +720,7 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Use shared parameter classification (same ABI config as emit_call).
-        let config = CallAbiConfig {
-            max_int_regs: 8, max_float_regs: 8,
-            align_i128_pairs: true,
-            f128_in_fp_regs: true, f128_in_gp_pairs: false,
-            variadic_floats_in_gp: false,
-        };
+        let config = self.call_abi_config();
         let param_classes = classify_params(func, &config);
 
         // Phase 1: Store all GP register params first (before x0 gets clobbered by float moves).
