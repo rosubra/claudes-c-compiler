@@ -865,7 +865,8 @@ fn stringify_arg(arg: &str) -> String {
             continue;
         }
 
-        // Handle char literals - escape \ inside them
+        // Handle char literals - escape \ and " inside them
+        // Per C11 6.10.3.2, " and \ in the token sequence must be escaped
         if chars[i] == '\'' {
             result.push('\'');
             i += 1;
@@ -876,11 +877,16 @@ fn stringify_arg(arg: &str) -> String {
                     if i < len {
                         if chars[i] == '\\' {
                             result.push_str("\\\\");
+                        } else if chars[i] == '"' {
+                            result.push_str("\\\"");
                         } else {
                             result.push(chars[i]);
                         }
                         i += 1;
                     }
+                } else if chars[i] == '"' {
+                    result.push_str("\\\"");
+                    i += 1;
                 } else {
                     result.push(chars[i]);
                     i += 1;

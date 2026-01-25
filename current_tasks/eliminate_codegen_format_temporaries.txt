@@ -1,0 +1,10 @@
+Task: Eliminate temporary String allocations in codegen assembly emission
+
+Every assembly instruction is emitted via emit(&format!(...)) which creates
+a temporary String, pushes it into the output buffer, then drops the temp.
+Replace with write!() directly into the buffer to eliminate ~722 temporary
+allocations per compilation unit across all three backends.
+
+Also add String::with_capacity() pre-allocation for the output buffer.
+
+Status: in progress
