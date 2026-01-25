@@ -162,7 +162,11 @@ impl Lowerer {
             (base, index)
         };
 
+        let index_ty = self.get_expr_type(actual_index);
         let index_val = self.lower_expr(actual_index);
+        // Widen the index to I64 (sign-extend for signed, zero-extend for unsigned)
+        // before use in pointer arithmetic.
+        let index_val = self.emit_implicit_cast(index_val, index_ty, IrType::I64);
 
         // Check for VLA runtime stride first
         let vla_stride = self.get_vla_stride_for_subscript(actual_base);

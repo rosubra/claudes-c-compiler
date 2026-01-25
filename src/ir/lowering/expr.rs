@@ -268,8 +268,8 @@ impl Lowerer {
 
         if lhs_is_ptr && !rhs_is_ptr {
             let elem_size = self.get_pointer_elem_size_from_expr(lhs);
-            let lhs_val = self.lower_expr(lhs);
             let rhs_ty = self.get_expr_type(rhs);
+            let lhs_val = self.lower_expr(lhs);
             let rhs_val = self.lower_expr(rhs);
             // Widen the integer index to I64 (sign-extend for signed types,
             // zero-extend for unsigned) before scaling and adding to the pointer.
