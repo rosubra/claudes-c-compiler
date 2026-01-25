@@ -29,6 +29,7 @@ impl Parser {
         self.parsing_visibility = None;
         self.parsing_section = None;
         self.parsing_gnu_inline = false;
+        self.parsing_always_inline = false;
         self.parsing_address_space = AddressSpace::Default;
 
         self.skip_gcc_extensions();
@@ -179,6 +180,7 @@ impl Parser {
         let is_inline = self.parsing_inline;
         let is_extern = self.parsing_extern;
         let is_gnu_inline = self.parsing_gnu_inline;
+        let is_always_inline = self.parsing_always_inline;
 
         // Build return type from derived declarators
         let return_type = self.build_return_type(type_spec, &derived);
@@ -205,6 +207,7 @@ impl Parser {
             is_inline,
             is_extern,
             is_gnu_inline,
+            is_always_inline,
             is_kr: is_kr_style,
             is_constructor,
             is_destructor,

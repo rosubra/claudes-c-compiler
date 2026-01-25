@@ -30,6 +30,9 @@ pub struct FunctionDef {
     pub is_extern: bool,
     /// True when __attribute__((gnu_inline)) forces GNU89 inline semantics.
     pub is_gnu_inline: bool,
+    /// True when __attribute__((always_inline)) is present.
+    /// These functions must always be inlined and should not be emitted as standalone.
+    pub is_always_inline: bool,
     pub is_kr: bool,
     pub is_constructor: bool,
     pub is_destructor: bool,

@@ -80,6 +80,10 @@ pub struct Parser {
     /// Set to true when __attribute__((gnu_inline)) is encountered.
     /// Forces GNU89 inline semantics: extern inline = no external definition emitted.
     pub(super) parsing_gnu_inline: bool,
+    /// Set to true when __attribute__((always_inline)) is encountered.
+    /// Functions with this attribute must always be inlined and should not be
+    /// emitted as standalone functions.
+    pub(super) parsing_always_inline: bool,
     /// Set when parse_type_specifier or consume_post_type_qualifiers encounters _Alignas(N).
     /// Consumed and reset by callers that need it (e.g., struct field parsing).
     pub(super) parsed_alignas: Option<usize>,
@@ -116,6 +120,7 @@ impl Parser {
             parsing_visibility: None,
             parsing_section: None,
             parsing_gnu_inline: false,
+            parsing_always_inline: false,
             parsed_alignas: None,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
@@ -450,6 +455,10 @@ impl Parser {
                                     }
                                     TokenKind::Identifier(name) if name == "gnu_inline" || name == "__gnu_inline__" => {
                                         self.parsing_gnu_inline = true;
+                                        self.advance();
+                                    }
+                                    TokenKind::Identifier(name) if name == "always_inline" || name == "__always_inline__" => {
+                                        self.parsing_always_inline = true;
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "mode" || name == "__mode__" => {

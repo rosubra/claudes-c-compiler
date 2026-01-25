@@ -321,6 +321,7 @@ pub fn emit_inline_asm_common_impl(
     // For Immediate operands that have neither an imm_value nor an imm_symbol,
     // the value is a runtime expression (e.g., &struct.member) that couldn't be
     // resolved to a constant or symbol.
+    let mut has_unsatisfiable_imm = false;
     for op in operands.iter_mut() {
         if matches!(op.kind, AsmOperandKind::Immediate) && op.imm_value.is_none() && op.imm_symbol.is_none() {
             if constraint_is_immediate_only(&op.constraint) {
@@ -336,6 +337,7 @@ pub fn emit_inline_asm_common_impl(
                 // constraint evaluable. Once inlining is implemented, this placeholder
                 // path should be replaced with a proper diagnostic/error.
                 op.imm_value = Some(0);
+                has_unsatisfiable_imm = true;
             } else {
                 // Multi-alternative constraint (e.g., "Ir" classified as Immediate but
                 // value is runtime). Fall back to GpReg so the value gets loaded into
@@ -343,6 +345,20 @@ pub fn emit_inline_asm_common_impl(
                 op.kind = AsmOperandKind::GpReg;
             }
         }
+    }
+
+    // If we have unsatisfiable immediate constraints AND the template creates
+    // section data (via .pushsection), skip the entire inline asm block.
+    // This prevents emitting corrupt metadata (e.g., __jump_table entries with
+    // null key pointers) that would crash the kernel during boot.
+    // The function will still be emitted but won't execute the inline asm,
+    // falling through to the default code path (e.g., `return false` for
+    // arch_static_branch).
+    // TODO: Replace this heuristic with proper function inlining support.
+    // Once always_inline functions are inlined at call sites, the "i" constraints
+    // will be evaluable and this skip path will no longer be needed.
+    if has_unsatisfiable_imm && template.contains(".pushsection") {
+        return;
     }
 
     // Collect registers claimed by specific-register constraints (e.g., "c" -> rcx)
