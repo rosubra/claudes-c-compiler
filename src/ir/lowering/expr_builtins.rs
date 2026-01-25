@@ -329,53 +329,53 @@ impl Lowerer {
             }
             // X86 SSE fence/barrier operations (no dest, no meaningful return)
             BuiltinIntrinsic::X86Lfence => {
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Lfence, dest_ptr: None, args: vec![] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Lfence, dest_ptr: None, args: vec![] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             BuiltinIntrinsic::X86Mfence => {
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Mfence, dest_ptr: None, args: vec![] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Mfence, dest_ptr: None, args: vec![] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             BuiltinIntrinsic::X86Sfence => {
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Sfence, dest_ptr: None, args: vec![] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Sfence, dest_ptr: None, args: vec![] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             BuiltinIntrinsic::X86Pause => {
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Pause, dest_ptr: None, args: vec![] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Pause, dest_ptr: None, args: vec![] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // clflush(ptr)
             BuiltinIntrinsic::X86Clflush => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Clflush, dest_ptr: None, args: arg_ops });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Clflush, dest_ptr: None, args: arg_ops });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // Non-temporal store: movnti(ptr, val) - 32-bit
             BuiltinIntrinsic::X86Movnti => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ptr_val = self.operand_to_value(arg_ops[0].clone());
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movnti, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Movnti, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // Non-temporal store: movnti64(ptr, val) - 64-bit
             BuiltinIntrinsic::X86Movnti64 => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ptr_val = self.operand_to_value(arg_ops[0].clone());
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movnti64, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Movnti64, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // Non-temporal store 128-bit: movntdq(ptr, src_ptr)
             BuiltinIntrinsic::X86Movntdq => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ptr_val = self.operand_to_value(arg_ops[0].clone());
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movntdq, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Movntdq, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // Non-temporal store 128-bit double: movntpd(ptr, src_ptr)
             BuiltinIntrinsic::X86Movntpd => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ptr_val = self.operand_to_value(arg_ops[0].clone());
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Movntpd, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Movntpd, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // 128-bit operations that return __m128i (16-byte struct via pointer)
@@ -390,15 +390,15 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Set1Epi8
             | BuiltinIntrinsic::X86Set1Epi32 => {
                 let sse_op = match intrinsic {
-                    BuiltinIntrinsic::X86Loaddqu => X86SseOpKind::Loaddqu,
-                    BuiltinIntrinsic::X86Pcmpeqb128 => X86SseOpKind::Pcmpeqb128,
-                    BuiltinIntrinsic::X86Pcmpeqd128 => X86SseOpKind::Pcmpeqd128,
-                    BuiltinIntrinsic::X86Psubusb128 => X86SseOpKind::Psubusb128,
-                    BuiltinIntrinsic::X86Por128 => X86SseOpKind::Por128,
-                    BuiltinIntrinsic::X86Pand128 => X86SseOpKind::Pand128,
-                    BuiltinIntrinsic::X86Pxor128 => X86SseOpKind::Pxor128,
-                    BuiltinIntrinsic::X86Set1Epi8 => X86SseOpKind::SetEpi8,
-                    BuiltinIntrinsic::X86Set1Epi32 => X86SseOpKind::SetEpi32,
+                    BuiltinIntrinsic::X86Loaddqu => IntrinsicOp::Loaddqu,
+                    BuiltinIntrinsic::X86Pcmpeqb128 => IntrinsicOp::Pcmpeqb128,
+                    BuiltinIntrinsic::X86Pcmpeqd128 => IntrinsicOp::Pcmpeqd128,
+                    BuiltinIntrinsic::X86Psubusb128 => IntrinsicOp::Psubusb128,
+                    BuiltinIntrinsic::X86Por128 => IntrinsicOp::Por128,
+                    BuiltinIntrinsic::X86Pand128 => IntrinsicOp::Pand128,
+                    BuiltinIntrinsic::X86Pxor128 => IntrinsicOp::Pxor128,
+                    BuiltinIntrinsic::X86Set1Epi8 => IntrinsicOp::SetEpi8,
+                    BuiltinIntrinsic::X86Set1Epi32 => IntrinsicOp::SetEpi32,
                     _ => unreachable!(),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
@@ -406,7 +406,7 @@ impl Lowerer {
                 let result_alloca = self.fresh_value();
                 self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::Ptr, size: 16, align: 0 });
                 let dest_val = self.fresh_value();
-                self.emit(Instruction::X86SseOp {
+                self.emit(Instruction::Intrinsic {
                     dest: Some(dest_val),
                     op: sse_op,
                     dest_ptr: Some(result_alloca),
@@ -419,16 +419,16 @@ impl Lowerer {
             BuiltinIntrinsic::X86Storedqu => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ptr_val = self.operand_to_value(arg_ops[0].clone());
-                self.emit(Instruction::X86SseOp { dest: None, op: X86SseOpKind::Storedqu, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
+                self.emit(Instruction::Intrinsic { dest: None, op: IntrinsicOp::Storedqu, dest_ptr: Some(ptr_val), args: vec![arg_ops[1].clone()] });
                 Some(Operand::Const(IrConst::I64(0)))
             }
             // pmovmskb returns i32 scalar
             BuiltinIntrinsic::X86Pmovmskb128 => {
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let dest_val = self.fresh_value();
-                self.emit(Instruction::X86SseOp {
+                self.emit(Instruction::Intrinsic {
                     dest: Some(dest_val),
-                    op: X86SseOpKind::Pmovmskb128,
+                    op: IntrinsicOp::Pmovmskb128,
                     dest_ptr: None,
                     args: arg_ops,
                 });
@@ -438,15 +438,15 @@ impl Lowerer {
             BuiltinIntrinsic::X86Crc32_8 | BuiltinIntrinsic::X86Crc32_16
             | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64 => {
                 let sse_op = match intrinsic {
-                    BuiltinIntrinsic::X86Crc32_8 => X86SseOpKind::Crc32_8,
-                    BuiltinIntrinsic::X86Crc32_16 => X86SseOpKind::Crc32_16,
-                    BuiltinIntrinsic::X86Crc32_32 => X86SseOpKind::Crc32_32,
-                    BuiltinIntrinsic::X86Crc32_64 => X86SseOpKind::Crc32_64,
+                    BuiltinIntrinsic::X86Crc32_8 => IntrinsicOp::Crc32_8,
+                    BuiltinIntrinsic::X86Crc32_16 => IntrinsicOp::Crc32_16,
+                    BuiltinIntrinsic::X86Crc32_32 => IntrinsicOp::Crc32_32,
+                    BuiltinIntrinsic::X86Crc32_64 => IntrinsicOp::Crc32_64,
                     _ => unreachable!(),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let dest_val = self.fresh_value();
-                self.emit(Instruction::X86SseOp {
+                self.emit(Instruction::Intrinsic {
                     dest: Some(dest_val),
                     op: sse_op,
                     dest_ptr: None,

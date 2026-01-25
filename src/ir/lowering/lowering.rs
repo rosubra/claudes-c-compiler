@@ -191,6 +191,31 @@ impl Lowerer {
         self.seed_builtin_typedefs();
         self.seed_libc_math_functions();
 
+        // Mark transparent_union on union StructLayouts before the first pass,
+        // so that register_function_meta can exclude them from param_struct_sizes.
+        for decl in &tu.decls {
+            if let ExternalDecl::Declaration(decl) = decl {
+                if decl.is_transparent_union {
+                    let mut found_key = self.union_layout_key(&decl.type_spec);
+                    if found_key.is_none() {
+                        for declarator in &decl.declarators {
+                            if !declarator.name.is_empty() {
+                                if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
+                                    found_key = Some(key.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(key) = found_key {
+                        if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
+                            layout.is_transparent_union = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // First pass: collect all function signatures (return types, param types,
         // variadic status, sret) so we can distinguish functions from globals and
         // insert proper casts/ABI handling during lowering.
@@ -407,9 +432,10 @@ impl Lowerer {
         // Collect per-parameter struct sizes for by-value struct passing ABI.
         // ComplexLongDouble is included as a struct on platforms that don't decompose it
         // (x86-64, RISC-V) since it's passed like a struct (on stack / by reference).
+        // Transparent unions are excluded — they are passed as their first member.
         let decomposes_cld = self.decomposes_complex_long_double();
         let param_struct_sizes: Vec<Option<usize>> = params.iter().map(|p| {
-            if self.is_type_struct_or_union(&p.type_spec) {
+            if self.is_type_struct_or_union(&p.type_spec) && !self.is_transparent_union(&p.type_spec) {
                 Some(self.sizeof_type(&p.type_spec))
             } else if !decomposes_cld && matches!(self.type_spec_to_ctype(&p.type_spec), CType::ComplexLongDouble) {
                 Some(self.sizeof_type(&p.type_spec))
@@ -677,13 +703,19 @@ impl Lowerer {
             }
 
             // Struct/union parameter (pass by value), including ComplexLongDouble
-            // on x86-64/RISC-V where it's not decomposed
+            // on x86-64/RISC-V where it's not decomposed.
+            // Transparent unions are passed as their first member (a pointer),
+            // not as a by-value aggregate, so struct_size is None for them.
             if self.is_type_struct_or_union(&param.type_spec)
                 || matches!(param_ctype, CType::ComplexLongDouble)
             {
                 let ir_idx = params.len();
-                let struct_size = self.sizeof_type(&param.type_spec);
-                params.push(IrParam { name: param_name, ty: IrType::Ptr, struct_size: Some(struct_size) });
+                let struct_size = if self.is_transparent_union(&param.type_spec) {
+                    None
+                } else {
+                    Some(self.sizeof_type(&param.type_spec))
+                };
+                params.push(IrParam { name: param_name, ty: IrType::Ptr, struct_size });
                 param_kinds.push(ParamKind::Struct(ir_idx));
                 continue;
             }
@@ -1058,6 +1090,25 @@ impl Lowerer {
                 if !declarator.name.is_empty() {
                     let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                     self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
+                }
+            }
+            // Mark transparent_union on the union's StructLayout
+            if decl.is_transparent_union {
+                let mut found_key = self.union_layout_key(&decl.type_spec);
+                if found_key.is_none() {
+                    for declarator in &decl.declarators {
+                        if !declarator.name.is_empty() {
+                            if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
+                                found_key = Some(key.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(key) = found_key {
+                    if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
+                        layout.is_transparent_union = true;
+                    }
                 }
             }
             return;

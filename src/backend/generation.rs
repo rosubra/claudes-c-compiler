@@ -218,8 +218,8 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         Instruction::InlineAsm { template, outputs, inputs, clobbers, operand_types } => {
             cg.emit_inline_asm(template, outputs, inputs, clobbers, operand_types);
         }
-        Instruction::X86SseOp { dest, op, dest_ptr, args } => {
-            cg.emit_x86_sse_op(dest, op, dest_ptr, args);
+        Instruction::Intrinsic { dest, op, dest_ptr, args } => {
+            cg.emit_intrinsic(dest, op, dest_ptr, args);
         }
     }
 }

@@ -72,6 +72,7 @@ impl Parser {
                 is_typedef: self.parsing_typedef,
                 is_const: self.parsing_const,
                 is_common: false,
+                is_transparent_union: false,
                 alignment: None,
                 span: start,
             }));
@@ -360,6 +361,8 @@ impl Parser {
 
         // Register typedef names
         let is_typedef = self.parsing_typedef;
+        let is_transparent_union = self.parsing_transparent_union;
+        self.parsing_transparent_union = false;
         self.register_typedefs(&declarators);
 
         self.expect(&TokenKind::Semicolon);
@@ -371,6 +374,7 @@ impl Parser {
             is_typedef,
             is_const: self.parsing_const,
             is_common,
+            is_transparent_union,
             alignment,
             span: start,
         }))
@@ -395,7 +399,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, alignment: None, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, is_transparent_union: false, alignment: None, span: start });
         }
 
         let mut mode_ti = false;
@@ -463,7 +467,9 @@ impl Parser {
         if let Some(a) = self.parsed_alignas.take() {
             alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
         }
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, alignment, span: start })
+        let is_transparent_union = self.parsing_transparent_union;
+        self.parsing_transparent_union = false;
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, is_transparent_union, alignment, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.

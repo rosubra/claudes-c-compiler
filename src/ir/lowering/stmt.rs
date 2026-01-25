@@ -49,6 +49,7 @@ impl Lowerer {
                 is_extern: decl.is_extern,
                 is_const: decl.is_const,
                 is_common: decl.is_common,
+                is_transparent_union: decl.is_transparent_union,
                 alignment: decl.alignment,
                 span: decl.span,
             };

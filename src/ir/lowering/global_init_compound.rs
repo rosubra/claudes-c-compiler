@@ -154,7 +154,7 @@ impl Lowerer {
                         let sub_layout = match &layout.fields[fi].ty {
                             CType::Struct(key) | CType::Union(key) => {
                                 self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false })
+                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
                             }
                             _ => unreachable!(),
                         };
@@ -211,7 +211,7 @@ impl Lowerer {
                         let sub_layout = match &layout.fields[fi].ty {
                             CType::Struct(key) | CType::Union(key) => {
                                 self.types.struct_layouts.get(key).cloned()
-                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false })
+                                    .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
                             }
                             _ => unreachable!(),
                         };
@@ -346,7 +346,7 @@ impl Lowerer {
                 let sub_layout = match anon_field_ty {
                     CType::Struct(key) | CType::Union(key) => {
                         self.types.struct_layouts.get(key).cloned()
-                            .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false })
+                            .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
                     }
                     _ => { push_zero_bytes(&mut elements, field_size); current_offset += field_size; fi += 1; continue; }
                 };
@@ -390,7 +390,7 @@ impl Lowerer {
                     let sub_layout = match &layout.fields[fi].ty {
                         CType::Struct(key) | CType::Union(key) => {
                             self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false })
+                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
                         }
                         _ => unreachable!(),
                     };
@@ -468,7 +468,7 @@ impl Lowerer {
                     let sub_layout = match &layout.fields[fi].ty {
                         CType::Struct(key) | CType::Union(key) => {
                             self.types.struct_layouts.get(key).cloned()
-                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false })
+                                .unwrap_or(StructLayout { fields: Vec::new(), size: 0, align: 1, is_union: false, is_transparent_union: false })
                         }
                         _ => unreachable!(),
                     };

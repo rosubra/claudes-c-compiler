@@ -247,10 +247,11 @@ pub enum Instruction {
         operand_types: Vec<IrType>,
     },
 
-    /// X86 SSE operation (target-specific instruction that passes through optimization).
-    X86SseOp {
+    /// Target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
+    /// Each backend emits the appropriate native instructions for these operations.
+    Intrinsic {
         dest: Option<Value>,
-        op: X86SseOpKind,
+        op: IntrinsicOp,
         /// For store ops: destination pointer
         dest_ptr: Option<Value>,
         /// Operand arguments (varies by op)
@@ -782,9 +783,10 @@ pub enum IrCmpOp {
     Uge,
 }
 
-/// X86 SSE operation kinds.
+/// Target-independent intrinsic operation kinds.
+/// Named after their semantic operation rather than any specific architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum X86SseOpKind {
+pub enum IntrinsicOp {
     /// Memory fence operations (no dest, no args beyond optional ptr)
     Lfence,
     Mfence,
@@ -875,7 +877,7 @@ impl Instruction {
             | Instruction::GetReturnF32Second { dest } => Some(*dest),
             Instruction::Call { dest, .. }
             | Instruction::CallIndirect { dest, .. } => *dest,
-            Instruction::X86SseOp { dest, .. } => *dest,
+            Instruction::Intrinsic { dest, .. } => *dest,
             Instruction::Store { .. }
             | Instruction::Memcpy { .. }
             | Instruction::VaStart { .. }

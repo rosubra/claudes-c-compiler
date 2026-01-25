@@ -375,7 +375,7 @@ impl ArmCodegen {
         }
     }
 
-    // --- SSE-to-NEON helpers ---
+    // --- Intrinsic helpers (NEON) ---
 
     /// Load the address represented by a pointer Value into the given register.
     /// For alloca values, computes the address; for others, loads the stored pointer.
@@ -419,23 +419,23 @@ impl ArmCodegen {
         self.state.emit("    str q0, [x0]");
     }
 
-    fn emit_x86_sse_op_arm(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+    fn emit_intrinsic_arm(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
         match op {
-            X86SseOpKind::Lfence | X86SseOpKind::Mfence => {
+            IntrinsicOp::Lfence | IntrinsicOp::Mfence => {
                 self.state.emit("    dmb ish");
             }
-            X86SseOpKind::Sfence => {
+            IntrinsicOp::Sfence => {
                 self.state.emit("    dmb ishst");
             }
-            X86SseOpKind::Pause => {
+            IntrinsicOp::Pause => {
                 self.state.emit("    yield");
             }
-            X86SseOpKind::Clflush => {
+            IntrinsicOp::Clflush => {
                 // ARM has no direct clflush; use dc civac (clean+invalidate to PoC)
                 self.operand_to_x0(&args[0]);
                 self.state.emit("    dc civac, x0");
             }
-            X86SseOpKind::Movnti => {
+            IntrinsicOp::Movnti => {
                 // Non-temporal 32-bit store: dest_ptr = target address, args[0] = value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -444,7 +444,7 @@ impl ArmCodegen {
                     self.state.emit("    str w9, [x0]");
                 }
             }
-            X86SseOpKind::Movnti64 => {
+            IntrinsicOp::Movnti64 => {
                 // Non-temporal 64-bit store
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -453,7 +453,7 @@ impl ArmCodegen {
                     self.state.emit("    str x9, [x0]");
                 }
             }
-            X86SseOpKind::Movntdq | X86SseOpKind::Movntpd => {
+            IntrinsicOp::Movntdq | IntrinsicOp::Movntpd => {
                 // Non-temporal 128-bit store: dest_ptr = target, args[0] = source ptr
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -462,7 +462,7 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::Loaddqu => {
+            IntrinsicOp::Loaddqu => {
                 // Load 128-bit unaligned: args[0] = source ptr, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -471,7 +471,7 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::Storedqu => {
+            IntrinsicOp::Storedqu => {
                 // Store 128-bit unaligned: dest_ptr = target ptr, args[0] = source data ptr
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -480,13 +480,13 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::Pcmpeqb128 => {
+            IntrinsicOp::Pcmpeqb128 => {
                 if let Some(dptr) = dest_ptr {
                     // cmeq compares and sets all bits in each lane on equality
                     self.emit_neon_binary_128(dptr, args, "cmeq");
                 }
             }
-            X86SseOpKind::Pcmpeqd128 => {
+            IntrinsicOp::Pcmpeqd128 => {
                 if let Some(dptr) = dest_ptr {
                     // For 32-bit lane equality, load q regs, use cmeq with .4s arrangement
                     self.operand_to_x0(&args[0]);
@@ -512,27 +512,27 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::Psubusb128 => {
+            IntrinsicOp::Psubusb128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_neon_binary_128(dptr, args, "uqsub");
                 }
             }
-            X86SseOpKind::Por128 => {
+            IntrinsicOp::Por128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_neon_binary_128(dptr, args, "orr");
                 }
             }
-            X86SseOpKind::Pand128 => {
+            IntrinsicOp::Pand128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_neon_binary_128(dptr, args, "and");
                 }
             }
-            X86SseOpKind::Pxor128 => {
+            IntrinsicOp::Pxor128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_neon_binary_128(dptr, args, "eor");
                 }
             }
-            X86SseOpKind::Pmovmskb128 => {
+            IntrinsicOp::Pmovmskb128 => {
                 // Extract the high bit of each byte in a 128-bit vector into a 16-bit mask.
                 // NEON has no pmovmskb equivalent, so we use a multi-step sequence:
                 //   1. Load 128-bit data into v0
@@ -573,7 +573,7 @@ impl ArmCodegen {
                     }
                 }
             }
-            X86SseOpKind::SetEpi8 => {
+            IntrinsicOp::SetEpi8 => {
                 // Splat a byte value to all 16 bytes: args[0] = byte value
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -582,7 +582,7 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::SetEpi32 => {
+            IntrinsicOp::SetEpi32 => {
                 // Splat a 32-bit value to all 4 lanes: args[0] = 32-bit value
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_x0(&args[0]);
@@ -591,11 +591,12 @@ impl ArmCodegen {
                     self.state.emit("    str q0, [x0]");
                 }
             }
-            X86SseOpKind::Crc32_8 => {
+            IntrinsicOp::Crc32_8 => {
+                // Use crc32cb for CRC-32C (Castagnoli) to match x86 semantics
                 self.operand_to_x0(&args[0]);
                 self.state.emit("    mov w9, w0");
                 self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32b w9, w9, w0");
+                self.state.emit("    crc32cb w9, w9, w0");
                 self.state.emit("    mov x0, x9");
                 if let Some(d) = dest {
                     if let Some(slot) = self.state.get_slot(d.0) {
@@ -603,11 +604,11 @@ impl ArmCodegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_16 => {
+            IntrinsicOp::Crc32_16 => {
                 self.operand_to_x0(&args[0]);
                 self.state.emit("    mov w9, w0");
                 self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32h w9, w9, w0");
+                self.state.emit("    crc32ch w9, w9, w0");
                 self.state.emit("    mov x0, x9");
                 if let Some(d) = dest {
                     if let Some(slot) = self.state.get_slot(d.0) {
@@ -615,11 +616,11 @@ impl ArmCodegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_32 => {
+            IntrinsicOp::Crc32_32 => {
                 self.operand_to_x0(&args[0]);
                 self.state.emit("    mov w9, w0");
                 self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32w w9, w9, w0");
+                self.state.emit("    crc32cw w9, w9, w0");
                 self.state.emit("    mov x0, x9");
                 if let Some(d) = dest {
                     if let Some(slot) = self.state.get_slot(d.0) {
@@ -627,11 +628,11 @@ impl ArmCodegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_64 => {
+            IntrinsicOp::Crc32_64 => {
                 self.operand_to_x0(&args[0]);
                 self.state.emit("    mov x9, x0");
                 self.operand_to_x0(&args[1]);
-                self.state.emit("    crc32x w9, w9, x0");
+                self.state.emit("    crc32cx w9, w9, x0");
                 self.state.emit("    mov x0, x9");
                 if let Some(d) = dest {
                     if let Some(slot) = self.state.get_slot(d.0) {
@@ -2361,8 +2362,8 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_x1_to(dest);
     }
 
-    fn emit_x86_sse_op(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
-        self.emit_x86_sse_op_arm(dest, op, dest_ptr, args);
+    fn emit_intrinsic(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
+        self.emit_intrinsic_arm(dest, op, dest_ptr, args);
     }
 
     // ---- Float binop primitives ----

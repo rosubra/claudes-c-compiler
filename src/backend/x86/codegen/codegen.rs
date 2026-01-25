@@ -513,18 +513,18 @@ impl X86Codegen {
         }
     }
 
-    fn emit_x86_sse_op_impl(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+    fn emit_intrinsic_impl(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
         match op {
-            X86SseOpKind::Lfence => { self.state.emit("    lfence"); }
-            X86SseOpKind::Mfence => { self.state.emit("    mfence"); }
-            X86SseOpKind::Sfence => { self.state.emit("    sfence"); }
-            X86SseOpKind::Pause => { self.state.emit("    pause"); }
-            X86SseOpKind::Clflush => {
+            IntrinsicOp::Lfence => { self.state.emit("    lfence"); }
+            IntrinsicOp::Mfence => { self.state.emit("    mfence"); }
+            IntrinsicOp::Sfence => { self.state.emit("    sfence"); }
+            IntrinsicOp::Pause => { self.state.emit("    pause"); }
+            IntrinsicOp::Clflush => {
                 // args[0] = pointer to flush
                 self.operand_to_reg(&args[0], "rax");
                 self.state.emit("    clflush (%rax)");
             }
-            X86SseOpKind::Movnti => {
+            IntrinsicOp::Movnti => {
                 // dest_ptr = target address, args[0] = 32-bit value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
@@ -538,7 +538,7 @@ impl X86Codegen {
                     self.state.emit("    movnti %ecx, (%rax)");
                 }
             }
-            X86SseOpKind::Movnti64 => {
+            IntrinsicOp::Movnti64 => {
                 // dest_ptr = target address, args[0] = 64-bit value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
@@ -552,7 +552,7 @@ impl X86Codegen {
                     self.state.emit("    movnti %rcx, (%rax)");
                 }
             }
-            X86SseOpKind::Movntdq => {
+            IntrinsicOp::Movntdq => {
                 // dest_ptr = target address, args[0] = ptr to 128-bit source
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
@@ -567,7 +567,7 @@ impl X86Codegen {
                     self.state.emit("    movntdq %xmm0, (%rax)");
                 }
             }
-            X86SseOpKind::Movntpd => {
+            IntrinsicOp::Movntpd => {
                 // dest_ptr = target address, args[0] = ptr to 128-bit double source
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
@@ -582,7 +582,7 @@ impl X86Codegen {
                     self.state.emit("    movntpd %xmm0, (%rax)");
                 }
             }
-            X86SseOpKind::Loaddqu => {
+            IntrinsicOp::Loaddqu => {
                 // args[0] = source pointer, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
@@ -597,7 +597,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::Storedqu => {
+            IntrinsicOp::Storedqu => {
                 // dest_ptr = target pointer, args[0] = source pointer to 128-bit data
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rcx");
@@ -612,37 +612,37 @@ impl X86Codegen {
                     self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
-            X86SseOpKind::Pcmpeqb128 => {
+            IntrinsicOp::Pcmpeqb128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "pcmpeqb");
                 }
             }
-            X86SseOpKind::Pcmpeqd128 => {
+            IntrinsicOp::Pcmpeqd128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "pcmpeqd");
                 }
             }
-            X86SseOpKind::Psubusb128 => {
+            IntrinsicOp::Psubusb128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "psubusb");
                 }
             }
-            X86SseOpKind::Por128 => {
+            IntrinsicOp::Por128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "por");
                 }
             }
-            X86SseOpKind::Pand128 => {
+            IntrinsicOp::Pand128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "pand");
                 }
             }
-            X86SseOpKind::Pxor128 => {
+            IntrinsicOp::Pxor128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_sse_binary_128(dptr, args, "pxor");
                 }
             }
-            X86SseOpKind::Pmovmskb128 => {
+            IntrinsicOp::Pmovmskb128 => {
                 // args[0] = pointer to 128-bit data, result is i32 in rax
                 self.operand_to_reg(&args[0], "rax");
                 self.state.emit("    movdqu (%rax), %xmm0");
@@ -653,7 +653,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::SetEpi8 => {
+            IntrinsicOp::SetEpi8 => {
                 // args[0] = byte value to splat, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
@@ -674,7 +674,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::SetEpi32 => {
+            IntrinsicOp::SetEpi32 => {
                 // args[0] = 32-bit value to splat, dest_ptr = result storage
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_reg(&args[0], "rax");
@@ -690,7 +690,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_8 => {
+            IntrinsicOp::Crc32_8 => {
                 // args: [crc_val, data_val]
                 self.operand_to_reg(&args[0], "rax");
                 self.operand_to_reg(&args[1], "rcx");
@@ -701,7 +701,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_16 => {
+            IntrinsicOp::Crc32_16 => {
                 self.operand_to_reg(&args[0], "rax");
                 self.operand_to_reg(&args[1], "rcx");
                 self.state.emit("    crc32w %cx, %eax");
@@ -711,7 +711,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_32 => {
+            IntrinsicOp::Crc32_32 => {
                 self.operand_to_reg(&args[0], "rax");
                 self.operand_to_reg(&args[1], "rcx");
                 self.state.emit("    crc32l %ecx, %eax");
@@ -721,7 +721,7 @@ impl X86Codegen {
                     }
                 }
             }
-            X86SseOpKind::Crc32_64 => {
+            IntrinsicOp::Crc32_64 => {
                 self.operand_to_reg(&args[0], "rax");
                 self.operand_to_reg(&args[1], "rcx");
                 self.state.emit("    crc32q %rcx, %rax");
@@ -1955,8 +1955,8 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_rdx_to(dest);
     }
 
-    fn emit_x86_sse_op(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
-        self.emit_x86_sse_op_impl(dest, op, dest_ptr, args);
+    fn emit_intrinsic(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
+        self.emit_intrinsic_impl(dest, op, dest_ptr, args);
     }
 
     // ---- Float binop primitives ----

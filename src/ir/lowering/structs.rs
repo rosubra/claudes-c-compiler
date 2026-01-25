@@ -109,6 +109,31 @@ impl Lowerer {
         }
     }
 
+    /// Get the StructLayout key for a union TypeSpecifier.
+    /// Returns the layout map key if the type is a union (directly or via typedef).
+    pub(super) fn union_layout_key(&self, ts: &TypeSpecifier) -> Option<String> {
+        match ts {
+            TypeSpecifier::Union(tag, _, _, _, _) => {
+                let prefix = "union.";
+                if let Some(name) = tag {
+                    Some(format!("{}{}", prefix, name))
+                } else {
+                    // Anonymous union — find by scanning existing layouts
+                    None
+                }
+            }
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    if let CType::Union(key) = ctype {
+                        return Some(key.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
     /// Prefers cached layout from struct_layouts when a tag name is available.
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {

@@ -636,6 +636,7 @@ impl SemanticAnalyzer {
                         size: 0,
                         align: 1,
                         is_union: false,
+                        is_transparent_union: false,
                     };
                     self.result.type_context.insert_struct_layout_from_ref(&key, layout);
                 }
@@ -676,6 +677,7 @@ impl SemanticAnalyzer {
                         size: 0,
                         align: 1,
                         is_union: true,
+                        is_transparent_union: false,
                     };
                     self.result.type_context.insert_struct_layout_from_ref(&key, layout);
                 }

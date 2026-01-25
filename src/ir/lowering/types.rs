@@ -56,6 +56,28 @@ impl Lowerer {
         }
     }
 
+    /// Check if a TypeSpecifier is a transparent union (passed as first member for ABI).
+    pub(super) fn is_transparent_union(&self, ts: &TypeSpecifier) -> bool {
+        let key = match ts {
+            TypeSpecifier::Union(tag, _, _, _, _) => {
+                tag.as_ref().map(|t| format!("union.{}", t))
+            }
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(CType::Union(key)) = self.types.typedefs.get(name) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.types.struct_layouts.get(&key).map_or(false, |l| l.is_transparent_union)
+        } else {
+            false
+        }
+    }
+
     /// Check if a TypeSpecifier resolves to a complex type (through typedefs).
     pub(super) fn is_type_complex(&self, ts: &TypeSpecifier) -> bool {
         match ts {
@@ -1271,6 +1293,7 @@ impl Lowerer {
                     size: 0,
                     align: 1,
                     is_union,
+                    is_transparent_union: false,
                 };
                 self.types.insert_struct_layout_from_ref(&key, empty_layout);
             }
@@ -1286,6 +1309,7 @@ impl Lowerer {
                 size: 0,
                 align: 1,
                 is_union,
+                is_transparent_union: false,
             };
             self.types.insert_struct_layout_from_ref(&key, empty_layout);
             wrap(key)

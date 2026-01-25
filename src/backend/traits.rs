@@ -726,6 +726,7 @@ pub trait ArchCodegen {
         self.emit_i128_cmp_store_result(dest);
     }
 
-    /// Emit an X86 SSE operation. Default is no-op.
-    fn emit_x86_sse_op(&mut self, _dest: &Option<Value>, _op: &X86SseOpKind, _dest_ptr: &Option<Value>, _args: &[Operand]) {}
+    /// Emit a target-independent intrinsic operation (fences, SIMD, CRC32, etc.).
+    /// Each backend must implement this to emit the appropriate native instructions.
+    fn emit_intrinsic(&mut self, _dest: &Option<Value>, _op: &IntrinsicOp, _dest_ptr: &Option<Value>, _args: &[Operand]) {}
 }

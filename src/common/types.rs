@@ -90,6 +90,9 @@ pub struct StructLayout {
     pub align: usize,
     /// Whether this is a union (all fields at offset 0).
     pub is_union: bool,
+    /// Whether this union has `__attribute__((transparent_union))`.
+    /// A transparent union parameter is passed using the ABI of its first member.
+    pub is_transparent_union: bool,
 }
 
 /// Result of resolving a designated initializer field name.
@@ -323,6 +326,7 @@ impl StructLayout {
             size,
             align: max_align,
             is_union: false,
+            is_transparent_union: false,
         }
     }
 
@@ -377,6 +381,7 @@ impl StructLayout {
             size,
             align: max_align,
             is_union: true,
+            is_transparent_union: false,
         }
     }
 

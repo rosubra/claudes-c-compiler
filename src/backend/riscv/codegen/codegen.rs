@@ -312,7 +312,7 @@ impl RiscvCodegen {
         }
     }
 
-    // --- SSE-to-RISC-V helpers ---
+    // --- Intrinsic helpers (scalar emulation) ---
 
     /// Load the address of a pointer Value into the given register.
     fn load_ptr_to_reg_rv(&mut self, ptr: &Value, reg: &str) {
@@ -325,23 +325,23 @@ impl RiscvCodegen {
         }
     }
 
-    fn emit_x86_sse_op_rv(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
+    fn emit_intrinsic_rv(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
         match op {
-            X86SseOpKind::Lfence | X86SseOpKind::Mfence => {
+            IntrinsicOp::Lfence | IntrinsicOp::Mfence => {
                 self.state.emit("    fence iorw, iorw");
             }
-            X86SseOpKind::Sfence => {
+            IntrinsicOp::Sfence => {
                 self.state.emit("    fence ow, ow");
             }
-            X86SseOpKind::Pause => {
+            IntrinsicOp::Pause => {
                 // RISC-V pause hint (encoded as fence with specific args)
                 self.state.emit("    fence.tso");
             }
-            X86SseOpKind::Clflush => {
+            IntrinsicOp::Clflush => {
                 // No RISC-V equivalent; emit fence as best approximation
                 self.state.emit("    fence iorw, iorw");
             }
-            X86SseOpKind::Movnti => {
+            IntrinsicOp::Movnti => {
                 // Non-temporal 32-bit store: dest_ptr = target address, args[0] = value
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -350,7 +350,7 @@ impl RiscvCodegen {
                     self.state.emit("    sw t1, 0(t0)");
                 }
             }
-            X86SseOpKind::Movnti64 => {
+            IntrinsicOp::Movnti64 => {
                 // Non-temporal 64-bit store
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -359,7 +359,7 @@ impl RiscvCodegen {
                     self.state.emit("    sd t1, 0(t0)");
                 }
             }
-            X86SseOpKind::Movntdq | X86SseOpKind::Movntpd => {
+            IntrinsicOp::Movntdq | IntrinsicOp::Movntpd => {
                 // Non-temporal 128-bit store: dest_ptr = target, args[0] = source ptr
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -371,7 +371,7 @@ impl RiscvCodegen {
                     self.state.emit("    sd t2, 8(t0)");
                 }
             }
-            X86SseOpKind::Loaddqu => {
+            IntrinsicOp::Loaddqu => {
                 // Load 128-bit unaligned
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -382,7 +382,7 @@ impl RiscvCodegen {
                     self.state.emit("    sd t2, 8(t0)");
                 }
             }
-            X86SseOpKind::Storedqu => {
+            IntrinsicOp::Storedqu => {
                 // Store 128-bit unaligned
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -393,44 +393,44 @@ impl RiscvCodegen {
                     self.state.emit("    sd t2, 8(t0)");
                 }
             }
-            X86SseOpKind::Pcmpeqb128 => {
+            IntrinsicOp::Pcmpeqb128 => {
                 // Byte-wise compare equal: result[i] = (a[i] == b[i]) ? 0xFF : 0x00
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_cmpeq_bytes(dptr, args);
                 }
             }
-            X86SseOpKind::Pcmpeqd128 => {
+            IntrinsicOp::Pcmpeqd128 => {
                 // 32-bit lane compare equal
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_cmpeq_dwords(dptr, args);
                 }
             }
-            X86SseOpKind::Psubusb128 => {
+            IntrinsicOp::Psubusb128 => {
                 // Unsigned saturating byte subtract
                 if let Some(dptr) = dest_ptr {
-                    self.emit_rv_binary_128_bytewise(dptr, args, "sub_sat");
+                    self.emit_rv_binary_128_bytewise(dptr, args);
                 }
             }
-            X86SseOpKind::Por128 => {
+            IntrinsicOp::Por128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_binary_128(dptr, args, "or");
                 }
             }
-            X86SseOpKind::Pand128 => {
+            IntrinsicOp::Pand128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_binary_128(dptr, args, "and");
                 }
             }
-            X86SseOpKind::Pxor128 => {
+            IntrinsicOp::Pxor128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_binary_128(dptr, args, "xor");
                 }
             }
-            X86SseOpKind::Pmovmskb128 => {
+            IntrinsicOp::Pmovmskb128 => {
                 // Extract high bit of each byte into a 16-bit mask
                 self.emit_rv_pmovmskb(dest, args);
             }
-            X86SseOpKind::SetEpi8 => {
+            IntrinsicOp::SetEpi8 => {
                 // Splat byte to all 16 positions
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -446,7 +446,7 @@ impl RiscvCodegen {
                     self.state.emit("    sd t0, 8(t1)");
                 }
             }
-            X86SseOpKind::SetEpi32 => {
+            IntrinsicOp::SetEpi32 => {
                 // Splat 32-bit to all 4 positions
                 if let Some(dptr) = dest_ptr {
                     self.operand_to_t0(&args[0]);
@@ -461,12 +461,49 @@ impl RiscvCodegen {
                     self.state.emit("    sd t0, 8(t1)");
                 }
             }
-            X86SseOpKind::Crc32_8 | X86SseOpKind::Crc32_16 |
-            X86SseOpKind::Crc32_32 | X86SseOpKind::Crc32_64 => {
-                // RISC-V doesn't have CRC32 instructions in base ISA.
-                // Store 0 as fallback (these ops shouldn't be reached on RISC-V in practice).
+            IntrinsicOp::Crc32_8 | IntrinsicOp::Crc32_16 |
+            IntrinsicOp::Crc32_32 | IntrinsicOp::Crc32_64 => {
+                // Software CRC32C (Castagnoli) using bit-by-bit computation.
+                // args[0] = current CRC accumulator, args[1] = data value
+                let num_bytes = match op {
+                    IntrinsicOp::Crc32_8 => 1,
+                    IntrinsicOp::Crc32_16 => 2,
+                    IntrinsicOp::Crc32_32 => 4,
+                    IntrinsicOp::Crc32_64 => 8,
+                    _ => unreachable!(),
+                };
+                self.operand_to_t0(&args[0]); // t0 = crc
+                self.state.emit("    mv t3, t0");
+                self.operand_to_t0(&args[1]); // t0 = data
+                self.state.emit("    mv t4, t0");
+                // XOR data into low bytes of CRC
+                self.state.emit("    xor t3, t3, t4");
+                // CRC32C polynomial: 0x82F63B78
+                self.state.emit("    li t5, 0x82F63B78");
+                // Process num_bytes * 8 bits
+                let num_bits = num_bytes * 8;
+                let loop_label = self.state.fresh_label("crc_loop");
+                let done_label = self.state.fresh_label("crc_done");
+                let skip_label = self.state.fresh_label("crc_skip");
+                self.state.emit(&format!("    li t6, {}", num_bits));
+                self.state.emit(&format!("{}:", loop_label));
+                self.state.emit(&format!("    beqz t6, {}", done_label));
+                // Check LSB of crc
+                self.state.emit("    andi t0, t3, 1");
+                // Shift CRC right by 1
+                self.state.emit("    srli t3, t3, 1");
+                // If LSB was set, XOR with polynomial
+                self.state.emit(&format!("    beqz t0, {}", skip_label));
+                self.state.emit("    xor t3, t3, t5");
+                self.state.emit(&format!("{}:", skip_label));
+                self.state.emit("    addi t6, t6, -1");
+                self.state.emit(&format!("    j {}", loop_label));
+                self.state.emit(&format!("{}:", done_label));
+                // Zero-extend result to 32 bits (CRC32 is always 32-bit)
+                self.state.emit("    slli t3, t3, 32");
+                self.state.emit("    srli t3, t3, 32");
                 if let Some(d) = dest {
-                    self.state.emit("    li t0, 0");
+                    self.state.emit("    mv t0, t3");
                     self.store_t0_to(d);
                 }
             }
@@ -651,11 +688,81 @@ impl RiscvCodegen {
         self.state.emit("    sd t3, 8(a5)");
     }
 
-    /// Unsigned saturating byte subtract (stub: loads src, subtracts, clamps to 0)
-    fn emit_rv_binary_128_bytewise(&mut self, _dest_ptr: &Value, _args: &[Operand], _op: &str) {
-        // TODO: implement byte-wise saturating subtract
-        // For now, zero the destination as a safe fallback
-        // This is only used by psubusb which is needed for postgres string scanning
+    /// Unsigned saturating byte subtract: result[i] = saturate(a[i] - b[i])
+    /// Uses SWAR (SIMD Within A Register) technique to process 8 bytes at a time.
+    /// Algorithm: For unsigned bytes, saturating subtract is:
+    ///   result = (a | 0x80) - (b & 0x7F)  -- subtract with borrow protection
+    ///   but actually: result = ((a | H) - (b & ~H)) ^ ((a ^ ~b) & H)
+    ///   where H = 0x8080808080808080 (MSB of each byte lane)
+    /// Simpler approach: result = a - min(a, b) where min uses standard SWAR trick.
+    fn emit_rv_binary_128_bytewise(&mut self, dest_ptr: &Value, args: &[Operand]) {
+        // Load args[0] pointer (a)
+        self.operand_to_t0(&args[0]);
+        self.state.emit("    mv a6, t0");
+        // Load args[1] pointer (b)
+        match &args[1] {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.emit_addi_s0("t0", slot.0);
+                    } else {
+                        self.emit_load_from_s0("t0", slot.0, "ld");
+                    }
+                }
+            }
+            Operand::Const(_) => {
+                self.operand_to_t0(&args[1]);
+            }
+        }
+        self.state.emit("    mv a7, t0");
+        // Get dest address
+        self.load_ptr_to_reg_rv(dest_ptr, "a5");
+        // Process low 8 bytes
+        self.state.emit("    ld t1, 0(a6)");  // a_lo
+        self.state.emit("    ld t2, 0(a7)");  // b_lo
+        self.emit_rv_psubusb_8bytes("t1", "t2", "t3"); // t3 = saturate(a_lo - b_lo)
+        // Process high 8 bytes
+        self.state.emit("    ld t1, 8(a6)");  // a_hi
+        self.state.emit("    ld t2, 8(a7)");  // b_hi
+        self.emit_rv_psubusb_8bytes("t1", "t2", "t4"); // t4 = saturate(a_hi - b_hi)
+        // Store results
+        self.state.emit("    sd t3, 0(a5)");
+        self.state.emit("    sd t4, 8(a5)");
+    }
+
+    /// Emit unsigned saturating byte subtract for 8 bytes packed in registers.
+    /// dst = saturate(a - b) for each byte lane.
+    /// Processes each byte individually to guarantee correctness.
+    fn emit_rv_psubusb_8bytes(&mut self, a_reg: &str, b_reg: &str, dst_reg: &str) {
+        // Process 8 bytes one at a time using shift-and-mask
+        // Result accumulates in dst_reg
+        self.state.emit(&format!("    li {dst}, 0", dst=dst_reg));
+        for i in 0..8 {
+            let shift = i * 8;
+            // Extract byte i from a into t5
+            if shift == 0 {
+                self.state.emit(&format!("    andi t5, {a}, 0xff", a=a_reg));
+            } else {
+                self.state.emit(&format!("    srli t5, {a}, {shift}", a=a_reg));
+                self.state.emit("    andi t5, t5, 0xff");
+            }
+            // Extract byte i from b into t6
+            if shift == 0 {
+                self.state.emit(&format!("    andi t6, {b}, 0xff", b=b_reg));
+            } else {
+                self.state.emit(&format!("    srli t6, {b}, {shift}", b=b_reg));
+                self.state.emit("    andi t6, t6, 0xff");
+            }
+            // Saturating subtract: max(a_byte - b_byte, 0)
+            let skip_label = self.state.fresh_label("psub_skip");
+            self.state.emit(&format!("    bltu t5, t6, {skip}", skip=skip_label));
+            self.state.emit("    sub t5, t5, t6");
+            if shift > 0 {
+                self.state.emit(&format!("    slli t5, t5, {shift}"));
+            }
+            self.state.emit(&format!("    or {dst}, {dst}, t5", dst=dst_reg));
+            self.state.emit(&format!("{skip}:", skip=skip_label));
+        }
     }
 
     /// Extract high bit of each of 16 bytes into a 16-bit mask (pmovmskb equivalent)
@@ -2103,8 +2210,8 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_t1_to(dest);
     }
 
-    fn emit_x86_sse_op(&mut self, dest: &Option<Value>, op: &X86SseOpKind, dest_ptr: &Option<Value>, args: &[Operand]) {
-        self.emit_x86_sse_op_rv(dest, op, dest_ptr, args);
+    fn emit_intrinsic(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
+        self.emit_intrinsic_rv(dest, op, dest_ptr, args);
     }
 
     // ---- Float binop primitives ----

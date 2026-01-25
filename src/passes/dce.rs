@@ -174,7 +174,7 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
                 collect_operand_uses(op, used);
             }
         }
-        Instruction::X86SseOp { dest_ptr, args, .. } => {
+        Instruction::Intrinsic { dest_ptr, args, .. } => {
             if let Some(ptr) = dest_ptr {
                 used.insert(ptr.0);
             }
@@ -237,7 +237,7 @@ fn has_side_effects(inst: &Instruction) -> bool {
         Instruction::SetReturnF64Second { .. } |
         Instruction::SetReturnF32Second { .. } |
         Instruction::InlineAsm { .. } |
-        Instruction::X86SseOp { .. }
+        Instruction::Intrinsic { .. }
     )
 }
 

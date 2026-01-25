@@ -50,6 +50,8 @@ pub struct Declaration {
     pub is_typedef: bool,
     pub is_const: bool,
     pub is_common: bool,
+    /// Whether __attribute__((transparent_union)) was applied to this typedef.
+    pub is_transparent_union: bool,
     /// Alignment override from _Alignas(N) or __attribute__((aligned(N))).
     pub alignment: Option<usize>,
     pub span: Span,
@@ -66,6 +68,7 @@ impl Declaration {
             is_typedef: false,
             is_const: false,
             is_common: false,
+            is_transparent_union: false,
             alignment: None,
             span: Span::dummy(),
         }
