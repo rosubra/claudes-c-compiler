@@ -37,10 +37,27 @@ impl Lowerer {
     }
 
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
-        // Resolve typeof(expr) to concrete type before processing
+        // Resolve typeof(expr) or __auto_type to concrete type before processing
         let resolved_decl;
-        let decl = if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_)) {
-            let resolved_type_spec = self.resolve_typeof(&decl.type_spec);
+        let decl = if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_) | TypeSpecifier::AutoType) {
+            let resolved_type_spec = if matches!(&decl.type_spec, TypeSpecifier::AutoType) {
+                // __auto_type: infer type from the first declarator's initializer
+                if let Some(first) = decl.declarators.first() {
+                    if let Some(Initializer::Expr(ref init_expr)) = first.init {
+                        if let Some(ctype) = self.get_expr_ctype(init_expr) {
+                            Self::ctype_to_type_spec(&ctype)
+                        } else {
+                            TypeSpecifier::Int // fallback
+                        }
+                    } else {
+                        TypeSpecifier::Int // fallback: no initializer
+                    }
+                } else {
+                    TypeSpecifier::Int
+                }
+            } else {
+                self.resolve_typeof(&decl.type_spec)
+            };
             resolved_decl = Declaration {
                 type_spec: resolved_type_spec,
                 declarators: decl.declarators.clone(),

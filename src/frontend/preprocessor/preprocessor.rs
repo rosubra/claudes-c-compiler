@@ -198,6 +198,8 @@ impl Preprocessor {
         self.define_simple_macro("__PTRDIFF_TYPE__", "long int");
         self.define_simple_macro("__WCHAR_TYPE__", "int");
         self.define_simple_macro("__WINT_TYPE__", "unsigned int");
+        self.define_simple_macro("__CHAR16_TYPE__", "short unsigned int");
+        self.define_simple_macro("__CHAR32_TYPE__", "unsigned int");
         self.define_simple_macro("__INTMAX_TYPE__", "long int");
         self.define_simple_macro("__UINTMAX_TYPE__", "long unsigned int");
         self.define_simple_macro("__INT8_TYPE__", "signed char");

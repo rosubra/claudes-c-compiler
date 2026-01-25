@@ -56,6 +56,14 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **`__auto_type` GCC extension support**: Implemented `__auto_type`, a GCC extension
+  for type inference from initializer expressions. The type of the declared variable is
+  deduced from the initializer's type at lowering time, similar to `typeof(init_expr)`.
+  This is used extensively in GCC's `<stdatomic.h>` header, where `atomic_store_explicit`
+  and `atomic_load_explicit` macros expand to statement expressions containing
+  `__auto_type __atomic_store_ptr = (PTR)` declarations. Also added missing
+  `__CHAR16_TYPE__` and `__CHAR32_TYPE__` predefined macros needed by stdatomic.h.
+  This unblocks libuv (all 7 tests pass) and liburing (builds successfully).
 - **Fix long double `++`/`--` increment/decrement**: The `inc_dec_step_and_type`
   function had no branch for `IrType::F128` (long double), causing it to fall
   through to the integer path and emit `Add(f128_value, I64(1))` - a type mismatch
@@ -318,6 +326,10 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | jq | PASS | All 12 tests pass |
 | sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
+| libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
+| libsodium | PARTIAL | 6/7 tests pass; "box" test fails (runtime issue) |
+| liburing | PARTIAL | Builds successfully; tests require io_uring kernel support |
+| mquickjs | PARTIAL | Builds; JS tests fail at runtime (JS parser error) |
 | redis | PARTIAL | Builds; version/cli work; server has bind EFAULT issue (same as postgres) |
 | postgres | PARTIAL | Build succeeds; initdb fully works; `make check` temp-install succeeds but postmaster has bind EFAULT issue |
 

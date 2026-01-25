@@ -715,6 +715,8 @@ impl SemanticAnalyzer {
                     variadic: *variadic,
                 }))))
             }
+            // AutoType should be resolved from initializer during lowering
+            TypeSpecifier::AutoType => CType::Int,
         }
     }
 

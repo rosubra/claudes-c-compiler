@@ -52,6 +52,11 @@ impl Parser {
                 | TokenKind::Auto => {
                     self.advance();
                 }
+                // __auto_type - GCC extension: type inferred from initializer
+                TokenKind::AutoType => {
+                    self.advance();
+                    return Some(TypeSpecifier::AutoType);
+                }
                 TokenKind::Inline => {
                     self.advance();
                     self.parsing_inline = true;

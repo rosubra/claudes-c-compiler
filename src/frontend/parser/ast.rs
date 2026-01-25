@@ -159,6 +159,8 @@ pub enum TypeSpecifier {
     Typeof(Box<Expr>),
     /// typeof(type-name) - GCC extension: type from a type name
     TypeofType(Box<TypeSpecifier>),
+    /// __auto_type - GCC extension: type inferred from initializer expression
+    AutoType,
 }
 
 /// A field declaration in a struct/union.

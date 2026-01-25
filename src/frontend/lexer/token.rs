@@ -88,6 +88,8 @@ pub enum TokenKind {
     RealPart,
     /// __imag__ - extract imaginary part of complex number (GCC extension)
     ImagPart,
+    /// __auto_type - GCC extension for type inference from initializer
+    AutoType,
 
     /// #pragma pack directive, emitted by preprocessor as synthetic token.
     /// Variants: Set(N), Push(N), Pop, Reset (pack())
@@ -234,6 +236,7 @@ impl TokenKind {
             "__uint128_t" => Some(TokenKind::UInt128),
             "__real__" | "__real" => Some(TokenKind::RealPart),
             "__imag__" | "__imag" => Some(TokenKind::ImagPart),
+            "__auto_type" => Some(TokenKind::AutoType),
             // __builtin_va_start, __builtin_va_end, __builtin_va_copy remain as
             // Identifier tokens so they flow through the normal builtin call path
             _ => None,

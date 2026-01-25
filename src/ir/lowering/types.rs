@@ -179,8 +179,8 @@ impl Lowerer {
         }
     }
 
-    /// Convert a CType back to a TypeSpecifier (for typeof resolution).
-    fn ctype_to_type_spec(ctype: &CType) -> TypeSpecifier {
+    /// Convert a CType back to a TypeSpecifier (for typeof and __auto_type resolution).
+    pub(super) fn ctype_to_type_spec(ctype: &CType) -> TypeSpecifier {
         match ctype {
             CType::Void => TypeSpecifier::Void,
             CType::Bool => TypeSpecifier::Bool,
@@ -501,6 +501,8 @@ impl Lowerer {
             }
             TypeSpecifier::TypeofType(inner) => self.type_spec_to_ir(inner),
             TypeSpecifier::FunctionPointer(_, _, _) => IrType::Ptr, // function pointer is a pointer
+            // AutoType should be resolved before reaching here (in lower_local_decl)
+            TypeSpecifier::AutoType => IrType::I64,
         }
     }
 
@@ -1195,6 +1197,8 @@ impl Lowerer {
             TypeSpecifier::TypeofType(inner_ts) => {
                 self.type_spec_to_ctype(inner_ts)
             }
+            // AutoType should be resolved before reaching here (in lower_local_decl)
+            TypeSpecifier::AutoType => CType::Int,
         }
     }
 

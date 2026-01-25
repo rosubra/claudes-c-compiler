@@ -208,7 +208,7 @@ impl Parser {
             TokenKind::Register | TokenKind::Typedef | TokenKind::Inline | TokenKind::Bool |
             TokenKind::Typeof | TokenKind::Attribute | TokenKind::Extension |
             TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
-            TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas |
+            TokenKind::Atomic | TokenKind::Auto | TokenKind::AutoType | TokenKind::Alignas |
             TokenKind::Builtin | TokenKind::Int128 | TokenKind::UInt128 => true,
             TokenKind::Identifier(name) => self.typedefs.contains(name) && !self.shadowed_typedefs.contains(name),
             _ => false,
