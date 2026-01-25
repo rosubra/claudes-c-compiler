@@ -1,0 +1,13 @@
+Fix two-register struct return ABI for all architectures
+
+Problem: When a function returns a struct that fits in 2 registers (9-16 bytes),
+the IR lowering correctly packs the struct into an I128 value using Shl+Or,
+but the function's return_type is never set to IrType::I128. This causes the
+codegen to use the scalar return path (only setting a0, never a1).
+
+The fix is in ir/lowering/lowering.rs: set the function's return_type to I128
+when two_reg_ret_size is set.
+
+This affects RISC-V primarily (many struct-passing tests fail), but also ARM.
+
+Status: In progress
