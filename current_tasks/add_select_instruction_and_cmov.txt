@@ -1,0 +1,14 @@
+Task: Add Select instruction and cmov/csel codegen
+
+Goal: Improve generated code performance by adding conditional move support.
+
+Currently the compiler has no Select instruction in the IR and no cmov/csel support
+in any backend. Every ternary operator and simple conditional value generates a full
+branch diamond (3+ basic blocks), which is very slow for tight loops.
+
+Plan:
+1. Add Select { dest, cond, true_val, false_val, ty } to the IR Instruction enum
+2. Add an if-conversion pass that converts simple branch+phi diamonds to Select
+3. Emit cmov for x86, csel for ARM, and branch-based lowering for RISC-V
+4. Wire Select through all existing passes (DCE, copy prop, GVN, etc.)
+5. Benchmark improvement on zlib/libjpeg
