@@ -4,7 +4,7 @@
 /// - #include directives with file resolution (system and local includes)
 /// - #define / #undef (object-like and function-like macros)
 /// - #if / #ifdef / #ifndef / #elif / #else / #endif (conditional compilation)
-/// - #pragma (once support, others ignored)
+/// - #pragma (once, pack, weak, redefine_extname; others ignored)
 /// - #error (emits diagnostic)
 /// - Line continuation (backslash-newline)
 /// - Macro expansion in non-directive lines
@@ -42,6 +42,12 @@ pub struct Preprocessor {
     /// Line offset set by #line directive: effective_line = line_offset + (source_line - line_offset_base)
     /// When None, no #line has been issued and __LINE__ uses the source line directly.
     line_override: Option<(usize, usize)>, // (target_line, source_line_at_directive)
+    /// #pragma weak directives: (symbol, optional_alias_target)
+    /// - (symbol, None) means "mark symbol as weak"
+    /// - (symbol, Some(target)) means "symbol is a weak alias for target"
+    pub weak_pragmas: Vec<(String, Option<String>)>,
+    /// #pragma redefine_extname directives: (old_name, new_name)
+    pub redefine_extname_pragmas: Vec<(String, String)>,
 }
 
 impl Preprocessor {
@@ -60,6 +66,8 @@ impl Preprocessor {
             pending_injections: Vec::new(),
             macro_save_stack: FxHashMap::default(),
             line_override: None,
+            weak_pragmas: Vec::new(),
+            redefine_extname_pragmas: Vec::new(),
         };
         pp.define_predefined_macros();
         define_builtin_macros(&mut pp.macros);
@@ -261,6 +269,8 @@ impl Preprocessor {
             ("__GCC_ATOMIC_POINTER_LOCK_FREE", "2"),
             // ELF/PIC
             ("__ELF__", "1"), ("__PIC__", "2"), ("__pic__", "2"),
+            // Pragma support flags
+            ("__PRAGMA_REDEFINE_EXTNAME", "1"),
         ];
 
         for &(name, body) in PREDEFINED_OBJECT_MACROS {
@@ -1096,6 +1106,18 @@ impl Preprocessor {
             return None;
         }
 
+        // Handle #pragma weak symbol [= alias]
+        if let Some(weak_content) = rest.strip_prefix("weak") {
+            self.handle_pragma_weak(weak_content.trim());
+            return None;
+        }
+
+        // Handle #pragma redefine_extname old new
+        if let Some(redefine_content) = rest.strip_prefix("redefine_extname") {
+            self.handle_pragma_redefine_extname(redefine_content.trim());
+            return None;
+        }
+
         // Other pragmas (GCC, diagnostic, etc.) are silently ignored
         None
     }
@@ -1138,6 +1160,42 @@ impl Preprocessor {
             return None;
         }
         Some(name.to_string())
+    }
+
+    /// Handle #pragma weak directives.
+    /// Forms:
+    ///   #pragma weak symbol         - mark symbol as weak
+    ///   #pragma weak symbol = target - symbol becomes a weak alias for target
+    fn handle_pragma_weak(&mut self, content: &str) {
+        let content = content.trim();
+        if content.is_empty() {
+            return;
+        }
+        if let Some(eq_pos) = content.find('=') {
+            let symbol = content[..eq_pos].trim().to_string();
+            let target = content[eq_pos + 1..].trim().to_string();
+            if !symbol.is_empty() && !target.is_empty() {
+                self.weak_pragmas.push((symbol, Some(target)));
+            }
+        } else {
+            // Just mark the symbol as weak
+            let symbol = content.split_whitespace().next().unwrap_or("").to_string();
+            if !symbol.is_empty() {
+                self.weak_pragmas.push((symbol, None));
+            }
+        }
+    }
+
+    /// Handle #pragma redefine_extname old new
+    /// Redirects external symbol 'old' to 'new' (non-weak alias).
+    fn handle_pragma_redefine_extname(&mut self, content: &str) {
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let old_name = parts[0].to_string();
+            let new_name = parts[1].to_string();
+            // Redirect external references from old_name to new_name.
+            self.redefine_extname_pragmas.push((old_name, new_name));
+        }
     }
 
     /// Handle #pragma pack directives and emit synthetic tokens for the parser.

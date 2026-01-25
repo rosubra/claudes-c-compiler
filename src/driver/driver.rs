@@ -459,6 +459,26 @@ impl Driver {
             sema_result.const_values,
         );
         let mut module = lowerer.lower(&ast);
+
+        // Apply #pragma weak directives from the preprocessor.
+        for (symbol, target) in &preprocessor.weak_pragmas {
+            if let Some(ref alias_target) = target {
+                // #pragma weak symbol = alias -> create weak alias
+                module.aliases.push((symbol.clone(), alias_target.clone(), true));
+            } else {
+                // #pragma weak symbol -> mark as weak
+                module.symbol_attrs.push((symbol.clone(), true, None));
+            }
+        }
+
+        // Apply #pragma redefine_extname directives from the preprocessor.
+        // TODO: This uses .set aliases which works when both symbols are defined
+        // locally, but a proper implementation would rename symbol references
+        // during lowering/codegen for the case where new_name is external.
+        for (old_name, new_name) in &preprocessor.redefine_extname_pragmas {
+            module.aliases.push((old_name.clone(), new_name.clone(), false));
+        }
+
         if time_phases { eprintln!("[TIME] lowering: {:.3}s ({} functions)", t4.elapsed().as_secs_f64(), module.functions.len()); }
 
         if self.verbose {
