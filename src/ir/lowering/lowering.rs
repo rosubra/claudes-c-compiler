@@ -243,7 +243,7 @@ impl Lowerer {
                     }
                     if let Some(key) = found_key {
                         if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
-                            layout.is_transparent_union = true;
+                            std::rc::Rc::make_mut(layout).is_transparent_union = true;
                         }
                     }
                 }
@@ -1201,7 +1201,7 @@ impl Lowerer {
                 }
                 if let Some(key) = found_key {
                     if let Some(layout) = self.types.struct_layouts.get_mut(&key) {
-                        layout.is_transparent_union = true;
+                        std::rc::Rc::make_mut(layout).is_transparent_union = true;
                     }
                 }
             }

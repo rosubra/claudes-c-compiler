@@ -14,7 +14,8 @@
 //! scope push/pop instead of O(total-map-size).
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::common::types::{StructLayout, CType};
+use std::rc::Rc;
+use crate::common::types::{StructLayout, RcLayout, CType};
 use crate::frontend::parser::ast::{TypeSpecifier, ParamDecl, DerivedDeclarator};
 
 /// Information about a function typedef (e.g., `typedef int func_t(int, int);`).
@@ -74,7 +75,8 @@ pub struct TypeScopeFrame {
     /// Keys newly inserted into `struct_layouts`.
     pub struct_layouts_added: Vec<String>,
     /// Keys that were overwritten in `struct_layouts`: (key, previous_value).
-    pub struct_layouts_shadowed: Vec<(String, StructLayout)>,
+    /// Uses Rc<StructLayout> so saving/restoring is a cheap refcount bump.
+    pub struct_layouts_shadowed: Vec<(String, RcLayout)>,
     /// Keys newly inserted into `ctype_cache`.
     pub ctype_cache_added: Vec<String>,
     /// Keys that were overwritten in `ctype_cache`: (key, previous_value).
@@ -106,8 +108,10 @@ impl TypeScopeFrame {
 /// to the lowerer by ownership for IR emission.
 #[derive(Debug)]
 pub struct TypeContext {
-    /// Struct/union layouts indexed by tag name
-    pub struct_layouts: FxHashMap<String, StructLayout>,
+    /// Struct/union layouts indexed by tag name.
+    /// Uses Rc<StructLayout> so lookups/clones are cheap refcount bumps
+    /// instead of deep-copying all field names and types.
+    pub struct_layouts: FxHashMap<String, RcLayout>,
     /// Enum constant values
     pub enum_constants: FxHashMap<String, i64>,
     /// Typedef mappings (name -> resolved CType)
@@ -133,7 +137,7 @@ pub struct TypeContext {
 
 impl crate::common::types::StructLayoutProvider for TypeContext {
     fn get_struct_layout(&self, key: &str) -> Option<&StructLayout> {
-        self.struct_layouts.get(key)
+        self.struct_layouts.get(key).map(|rc| rc.as_ref())
     }
 }
 
@@ -174,9 +178,9 @@ impl TypeContext {
         // SAFETY: We are single-threaded and no references into struct_layouts
         // are held across this call. The &self reference to TypeContext does not
         // create a mutable alias because we use a raw pointer for the mutation.
-        let ptr = &self.struct_layouts as *const FxHashMap<String, StructLayout>
-            as *mut FxHashMap<String, StructLayout>;
-        unsafe { (*ptr).insert(key.to_string(), layout); }
+        let ptr = &self.struct_layouts as *const FxHashMap<String, RcLayout>
+            as *mut FxHashMap<String, RcLayout>;
+        unsafe { (*ptr).insert(key.to_string(), Rc::new(layout)); }
     }
 
     /// Invalidate a ctype_cache entry from a &self context.
@@ -241,7 +245,7 @@ impl TypeContext {
                 frame.struct_layouts_added.push(key.clone());
             }
         }
-        self.struct_layouts.insert(key, layout);
+        self.struct_layouts.insert(key, Rc::new(layout));
     }
 
     /// Insert a typedef, tracking the change in the current scope frame
@@ -282,8 +286,8 @@ impl TypeContext {
     pub fn insert_struct_layout_scoped_from_ref(&self, key: &str, layout: StructLayout) {
         // SAFETY: Single-threaded; no references into struct_layouts or scope_stack
         // are held across this call.
-        let layouts_ptr = &self.struct_layouts as *const FxHashMap<String, StructLayout>
-            as *mut FxHashMap<String, StructLayout>;
+        let layouts_ptr = &self.struct_layouts as *const FxHashMap<String, RcLayout>
+            as *mut FxHashMap<String, RcLayout>;
         let stack_ptr = &self.scope_stack as *const Vec<TypeScopeFrame>
             as *mut Vec<TypeScopeFrame>;
         unsafe {
@@ -294,7 +298,7 @@ impl TypeContext {
                     frame.struct_layouts_added.push(key.to_string());
                 }
             }
-            (*layouts_ptr).insert(key.to_string(), layout);
+            (*layouts_ptr).insert(key.to_string(), Rc::new(layout));
         }
     }
 

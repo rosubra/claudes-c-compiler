@@ -7,7 +7,7 @@
 
 use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, StructLayout, CType};
+use crate::common::types::{IrType, RcLayout, CType};
 
 /// Type metadata shared between local and global variables.
 ///
@@ -29,7 +29,8 @@ pub(super) struct VarInfo {
     /// Used for correct loads through pointer dereference and subscript.
     pub pointee_type: Option<IrType>,
     /// If this is a struct/union variable, its layout for member access.
-    pub struct_layout: Option<StructLayout>,
+    /// Uses Rc for cheap cloning (struct layouts are shared, never mutated after creation).
+    pub struct_layout: Option<RcLayout>,
     /// Whether this variable is a struct (not a pointer to struct).
     pub is_struct: bool,
     /// For multi-dimensional arrays: stride (in bytes) per dimension level.
@@ -123,7 +124,8 @@ pub(super) struct DeclAnalysis {
     /// Whether this is an array of function pointers.
     pub is_array_of_func_ptrs: bool,
     /// Struct/union layout (for struct variables or pointer-to-struct).
-    pub struct_layout: Option<StructLayout>,
+    /// Uses Rc for cheap cloning.
+    pub struct_layout: Option<RcLayout>,
     /// Whether this is a direct struct variable (not pointer-to or array-of).
     pub is_struct: bool,
     /// Actual allocation size (uses struct layout size for non-array structs).

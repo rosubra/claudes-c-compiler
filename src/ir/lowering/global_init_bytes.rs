@@ -1110,11 +1110,11 @@ impl Lowerer {
     /// Get the StructLayout for a composite (struct or union) CType.
     /// Like `get_struct_layout_for_ctype` but returns a fallback empty layout instead of None.
     /// Panics if called on a non-composite type.
-    pub(super) fn get_composite_layout(&self, ty: &CType) -> StructLayout {
+    pub(super) fn get_composite_layout(&self, ty: &CType) -> crate::common::types::RcLayout {
         self.get_struct_layout_for_ctype(ty)
             .unwrap_or_else(|| {
                 if matches!(ty, CType::Struct(_) | CType::Union(_)) {
-                    if matches!(ty, CType::Union(_)) { StructLayout::empty_union() } else { StructLayout::empty() }
+                    if matches!(ty, CType::Union(_)) { StructLayout::empty_union_rc() } else { StructLayout::empty_rc() }
                 } else {
                     unreachable!("get_composite_layout called on non-composite type")
                 }

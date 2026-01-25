@@ -422,7 +422,7 @@ impl Lowerer {
                     init: item.init.clone(),
                 };
                 let sub_layout = self.get_struct_layout_for_ctype(&field.ty)
-                    .unwrap_or_else(StructLayout::empty);
+                    .unwrap_or_else(StructLayout::empty_rc);
                 self.emit_sub_struct_to_compound(elements, &[sub_item], &sub_layout, field_size);
             } else if h::has_nested_field_designator(item) {
                 self.emit_compound_nested_designator_field(
@@ -452,7 +452,7 @@ impl Lowerer {
                     }
                 }).collect();
                 let sub_layout = self.get_struct_layout_for_ctype(&field.ty)
-                    .unwrap_or_else(StructLayout::empty);
+                    .unwrap_or_else(StructLayout::empty_rc);
                 self.emit_sub_struct_to_compound(elements, &sub_items, &sub_layout, field_size);
             } else {
                 self.emit_compound_flat_array_init(elements, inits, &field.ty, field_size);
@@ -746,7 +746,7 @@ impl Lowerer {
     }
 
     /// Get a StructLayout for a CType if it's a struct or union.
-    pub(super) fn get_struct_layout_for_ctype(&self, ty: &CType) -> Option<StructLayout> {
+    pub(super) fn get_struct_layout_for_ctype(&self, ty: &CType) -> Option<crate::common::types::RcLayout> {
         match ty {
             CType::Struct(key) | CType::Union(key) => {
                 self.types.struct_layouts.get(&**key).cloned()

@@ -475,9 +475,9 @@ impl Lowerer {
                                 current_layout = match &f.ty {
                                     CType::Struct(key) | CType::Union(key) => {
                                         self.types.struct_layouts.get(&**key).cloned()
-                                            .unwrap_or_else(StructLayout::empty)
+                                            .unwrap_or_else(StructLayout::empty_rc)
                                     }
-                                    _ => StructLayout::empty(),
+                                    _ => StructLayout::empty_rc(),
                                 };
                                 found = true;
                                 break;

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use crate::common::type_builder;
 use crate::frontend::parser::ast::*;
-use crate::common::types::{IrType, StructField, StructLayout, CType};
+use crate::common::types::{IrType, StructField, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 use super::definitions::FuncSig;
 
@@ -504,15 +504,16 @@ impl Lowerer {
         }
     }
 
-    /// Look up a struct/union layout by tag name, returning the full layout.
-    fn get_struct_union_layout_by_tag(&self, kind: &str, tag: &str) -> Option<&StructLayout> {
+    /// Look up a struct/union layout by tag name, returning a cheap Rc clone.
+    fn get_struct_union_layout_by_tag(&self, kind: &str, tag: &str) -> Option<RcLayout> {
         let key = format!("{}.{}", kind, tag);
-        self.types.struct_layouts.get(&key)
+        self.types.struct_layouts.get(&key).cloned()
     }
 
     /// Get the struct/union layout for a resolved TypeSpecifier.
     /// Handles both inline field definitions and tag-only forward references.
-    fn struct_union_layout(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
+    /// Returns an Rc<StructLayout> for cheap cloning.
+    fn struct_union_layout(&self, ts: &TypeSpecifier) -> Option<RcLayout> {
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged structs
@@ -522,7 +523,7 @@ impl Lowerer {
                     }
                 }
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                Some(self.compute_struct_union_layout_packed(fields, false, max_field_align))
+                Some(Rc::new(self.compute_struct_union_layout_packed(fields, false, max_field_align)))
             }
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged unions
@@ -532,12 +533,12 @@ impl Lowerer {
                     }
                 }
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                Some(self.compute_struct_union_layout_packed(fields, true, max_field_align))
+                Some(Rc::new(self.compute_struct_union_layout_packed(fields, true, max_field_align)))
             }
             TypeSpecifier::Struct(Some(tag), None, _, _, _) =>
-                self.get_struct_union_layout_by_tag("struct", tag).cloned(),
+                self.get_struct_union_layout_by_tag("struct", tag),
             TypeSpecifier::Union(Some(tag), None, _, _, _) =>
-                self.get_struct_union_layout_by_tag("union", tag).cloned(),
+                self.get_struct_union_layout_by_tag("union", tag),
             _ => None,
         }
     }
@@ -958,7 +959,7 @@ impl Lowerer {
     }
 
     /// Get the innermost element size for a CType::Array chain.
-    fn ctype_innermost_elem_size(ctype: &CType, layouts: &crate::common::fx_hash::FxHashMap<String, StructLayout>) -> usize {
+    fn ctype_innermost_elem_size(ctype: &CType, layouts: &crate::common::fx_hash::FxHashMap<String, RcLayout>) -> usize {
         let mut current = ctype;
         while let CType::Array(inner, _) = current {
             current = inner.as_ref();

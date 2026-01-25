@@ -6,6 +6,11 @@ use crate::common::fx_hash::FxHashMap;
 /// Cloning is a cheap reference count increment instead of a heap allocation.
 pub type RcStr = Rc<str>;
 
+/// Reference-counted struct layout. Cloning is a cheap reference count
+/// increment instead of deep-copying all field names, types, and offsets.
+/// This eliminates the most expensive cloning in the lowering phase.
+pub type RcLayout = Rc<StructLayout>;
+
 /// Trait for looking up struct/union layout information.
 /// TypeContext implements this trait, allowing CType methods in common/
 /// to resolve struct/union sizes and alignments without depending on
@@ -15,9 +20,9 @@ pub trait StructLayoutProvider {
 }
 
 /// A HashMap-based provider for struct layouts (used by TypeContext and sema).
-impl StructLayoutProvider for FxHashMap<String, StructLayout> {
+impl StructLayoutProvider for FxHashMap<String, RcLayout> {
     fn get_struct_layout(&self, key: &str) -> Option<&StructLayout> {
-        self.get(key)
+        self.get(key).map(|rc| rc.as_ref())
     }
 }
 
@@ -125,6 +130,16 @@ impl StructLayout {
             is_union: true,
             is_transparent_union: false,
         }
+    }
+
+    /// Create an Rc-wrapped empty StructLayout.
+    pub fn empty_rc() -> RcLayout {
+        Rc::new(Self::empty())
+    }
+
+    /// Create an Rc-wrapped empty union StructLayout.
+    pub fn empty_union_rc() -> RcLayout {
+        Rc::new(Self::empty_union())
     }
 }
 
@@ -647,7 +662,7 @@ impl CType {
             CType::Struct(_) | CType::Union(_) => 0,
             _ => {
                 // For non-struct/union types, we can use an empty provider
-                let empty: FxHashMap<String, StructLayout> = FxHashMap::default();
+                let empty: FxHashMap<String, RcLayout> = FxHashMap::default();
                 self.size_ctx(&empty)
             }
         }
@@ -659,7 +674,7 @@ impl CType {
         match self {
             CType::Struct(_) | CType::Union(_) => 1,
             _ => {
-                let empty: FxHashMap<String, StructLayout> = FxHashMap::default();
+                let empty: FxHashMap<String, RcLayout> = FxHashMap::default();
                 self.align_ctx(&empty)
             }
         }

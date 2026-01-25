@@ -312,7 +312,7 @@ impl<'a> SemaConstEval<'a> {
     }
 
     /// Get the struct layout for a type specifier.
-    fn get_struct_layout_for_type(&self, type_spec: &TypeSpecifier) -> Option<crate::common::types::StructLayout> {
+    fn get_struct_layout_for_type(&self, type_spec: &TypeSpecifier) -> Option<crate::common::types::RcLayout> {
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
             CType::Struct(key) | CType::Union(key) => {

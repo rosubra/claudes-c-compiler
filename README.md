@@ -72,6 +72,7 @@ See `git log` for full history. Key milestones:
 - XMM register "x" constraint support for x86 inline assembly
 - `__attribute__((alias, weak, visibility))` and top-level `asm()` support (musl libc)
 - `register` variable `__asm__("regname")` support for pinning variables to specific registers in inline asm
+- Performance: Rc<StructLayout> eliminates deep cloning in lowering (~18% compile speedup on sqlite3.c)
 
 ### Project Build Status
 

@@ -5,13 +5,13 @@
 //! IR types (for correct loads/stores through pointer dereference and subscript).
 
 use crate::frontend::parser::ast::*;
-use crate::common::types::{IrType, StructLayout, CType};
+use crate::common::types::{IrType, RcLayout, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the
     /// pointed-to struct's layout. This enables `p->field` access.
-    pub(super) fn get_struct_layout_for_pointer_param(&self, type_spec: &TypeSpecifier) -> Option<StructLayout> {
+    pub(super) fn get_struct_layout_for_pointer_param(&self, type_spec: &TypeSpecifier) -> Option<RcLayout> {
         // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match resolved {

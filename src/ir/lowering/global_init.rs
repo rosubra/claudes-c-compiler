@@ -8,7 +8,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, StructLayout, CType};
+use crate::common::types::{IrType, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 use super::global_init_helpers as h;
 
@@ -22,7 +22,7 @@ impl Lowerer {
         is_array: bool,
         elem_size: usize,
         total_size: usize,
-        struct_layout: &Option<StructLayout>,
+        struct_layout: &Option<RcLayout>,
         array_dim_strides: &[usize],
     ) -> GlobalInit {
         // Check if the target type is long double (need to emit as x87 80-bit)

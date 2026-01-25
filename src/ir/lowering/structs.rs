@@ -1,6 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, StructLayout, CType};
+use std::rc::Rc;
+use crate::common::types::{IrType, StructLayout, RcLayout, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -136,7 +137,8 @@ impl Lowerer {
 
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
     /// Prefers cached layout from struct_layouts when a tag name is available.
-    pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
+    /// Returns Rc<StructLayout> for cheap cloning.
+    pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<RcLayout> {
         // For TypedefName, resolve through CType
         if let TypeSpecifier::TypedefName(name) = ts {
             if let Some(ctype) = self.types.typedefs.get(name) {
@@ -153,7 +155,7 @@ impl Lowerer {
                     }
                 }
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                Some(self.compute_struct_union_layout_packed(&fields, false, max_field_align))
+                Some(Rc::new(self.compute_struct_union_layout_packed(&fields, false, max_field_align)))
             }
             TypeSpecifier::Struct(Some(tag), None, _, _, _) => {
                 self.types.struct_layouts.get(&format!("struct.{}", tag)).cloned()
@@ -165,7 +167,7 @@ impl Lowerer {
                     }
                 }
                 let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                Some(self.compute_struct_union_layout_packed(&fields, true, max_field_align))
+                Some(Rc::new(self.compute_struct_union_layout_packed(&fields, true, max_field_align)))
             }
             TypeSpecifier::Union(Some(tag), None, _, _, _) => {
                 self.types.struct_layouts.get(&format!("union.{}", tag)).cloned()
@@ -384,7 +386,7 @@ impl Lowerer {
     /// Look up the struct layout for a member access expression.
     /// For direct access (s.field), gets the layout of the base expression.
     /// For pointer access (p->field), gets the layout that the pointer points to.
-    fn get_member_layout(&self, base_expr: &Expr, is_pointer_access: bool) -> Option<StructLayout> {
+    fn get_member_layout(&self, base_expr: &Expr, is_pointer_access: bool) -> Option<RcLayout> {
         if is_pointer_access {
             self.get_pointed_struct_layout(base_expr)
         } else {
@@ -443,7 +445,7 @@ impl Lowerer {
     }
 
     /// Try to determine the struct layout that an expression (a pointer) points to.
-    fn get_pointed_struct_layout(&self, expr: &Expr) -> Option<StructLayout> {
+    fn get_pointed_struct_layout(&self, expr: &Expr) -> Option<RcLayout> {
         match expr {
             Expr::Identifier(name, _) => {
                 // Check static locals first
@@ -575,7 +577,7 @@ impl Lowerer {
 
     /// Get struct layout from a CType (struct or union).
     /// Prefers cached layout from struct_layouts when available.
-    pub(super) fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<StructLayout> {
+    pub(super) fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<RcLayout> {
         match ctype {
             CType::Struct(key) | CType::Union(key) => {
                 self.types.struct_layouts.get(key.as_ref()).cloned()
@@ -585,7 +587,7 @@ impl Lowerer {
     }
 
     /// Get struct layout from a type specifier that should be a pointer to struct
-    fn get_struct_layout_for_pointer_type(&self, type_spec: &TypeSpecifier) -> Option<StructLayout> {
+    fn get_struct_layout_for_pointer_type(&self, type_spec: &TypeSpecifier) -> Option<RcLayout> {
         let ctype = self.type_spec_to_ctype(type_spec);
         if let CType::Pointer(pointee) = &ctype {
             return self.struct_layout_from_ctype(pointee);
@@ -594,7 +596,7 @@ impl Lowerer {
     }
 
     /// Try to get the struct layout for an expression (value, not pointer).
-    fn get_layout_for_expr(&self, expr: &Expr) -> Option<StructLayout> {
+    fn get_layout_for_expr(&self, expr: &Expr) -> Option<RcLayout> {
         match expr {
             Expr::Identifier(name, _) => {
                 // Check static locals first (resolved via mangled name)
@@ -678,7 +680,7 @@ impl Lowerer {
     /// `want_pointer_deref`: whether the caller wants the field treated as a pointer
     ///   (true for get_pointed_struct_layout: field is a pointer to struct, resolve its pointee)
     ///   (false for get_layout_for_expr: field is a struct, resolve its own layout)
-    fn resolve_field_struct_layout(&self, base: &Expr, field: &str, is_pointer_base: bool, want_pointer_deref: bool) -> Option<StructLayout> {
+    fn resolve_field_struct_layout(&self, base: &Expr, field: &str, is_pointer_base: bool, want_pointer_deref: bool) -> Option<RcLayout> {
         let base_layout = self.get_member_layout(base, is_pointer_base)?;
         let (_offset, ctype) = base_layout.field_offset(field, &self.types)?;
         if want_pointer_deref {
@@ -702,7 +704,7 @@ impl Lowerer {
     /// Shared helper: resolve struct layout from a function call expression.
     /// For get_pointed_struct_layout: the return type is a pointer to struct, resolve its pointee.
     /// For get_layout_for_expr: the return type is a struct, resolve its layout.
-    fn resolve_func_call_struct_layout(&self, func: &Expr, call_expr: &Expr, want_pointer_deref: bool) -> Option<StructLayout> {
+    fn resolve_func_call_struct_layout(&self, func: &Expr, call_expr: &Expr, want_pointer_deref: bool) -> Option<RcLayout> {
         // Try direct function name first
         if let Expr::Identifier(name, _) = func {
             if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
@@ -773,7 +775,7 @@ impl Lowerer {
 
     /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
     /// Handles self-referential structs by looking up the cache when fields are empty.
-    fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<StructLayout> {
+    fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<RcLayout> {
         if let CType::Pointer(inner) = ctype {
             return self.struct_layout_from_ctype(inner);
         }
