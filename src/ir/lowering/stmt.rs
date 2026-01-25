@@ -165,6 +165,7 @@ impl Lowerer {
             });
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
             local_info.vla_size = vla_size;
+            local_info.asm_register = declarator.asm_register.clone();
             self.insert_local_scoped(declarator.name.clone(), local_info);
 
             // Track function pointer return and param types
@@ -1230,8 +1231,18 @@ impl Lowerer {
                 // Also collect types for synthetic "+" inputs separately
                 let mut plus_input_types = Vec::new();
                 for out in outputs {
-                    let constraint = out.constraint.clone();
+                    let mut constraint = out.constraint.clone();
                     let name = out.name.clone();
+                    // Rewrite output constraint for register variables with __asm__("regname")
+                    if let Expr::Identifier(ref var_name, _) = out.expr {
+                        if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                            let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                            if stripped.contains('r') || stripped == "g" {
+                                let prefix: String = constraint.chars().take_while(|c| *c == '=' || *c == '+' || *c == '&').collect();
+                                constraint = format!("{}{{{}}}", prefix, asm_reg);
+                            }
+                        }
+                    }
                     // Use CType-based type for inline asm operands to get correct register
                     // sizing (e.g., int -> I32 -> 32-bit register, not I64 -> 64-bit register)
                     let out_ty = IrType::from_ctype(&self.expr_ctype(&out.expr));
@@ -1260,8 +1271,20 @@ impl Lowerer {
                 // Process input operands: evaluate expression to get value
                 let mut input_symbols: Vec<Option<String>> = Vec::new();
                 for inp in inputs {
-                    let constraint = inp.constraint.clone();
+                    let mut constraint = inp.constraint.clone();
                     let name = inp.name.clone();
+                    // For register variables with __asm__("regname"), when the constraint
+                    // allows a register ("r"), rewrite it to a specific register constraint
+                    // so the backend places the value in the exact register requested.
+                    // This implements GCC's register variable semantics.
+                    if let Expr::Identifier(ref var_name, _) = inp.expr {
+                        if let Some(asm_reg) = self.get_local_asm_register(var_name) {
+                            let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                            if stripped.contains('r') || stripped == "g" {
+                                constraint = format!("{{{}}}", asm_reg);
+                            }
+                        }
+                    }
                     // Use CType-based type for correct register sizing in inline asm
                     let inp_ty = IrType::from_ctype(&self.expr_ctype(&inp.expr));
                     // For immediate constraints ("I", "i", "n"), try to evaluate as
@@ -1339,6 +1362,14 @@ impl Lowerer {
             Expr::Cast(_, inner, _) => Self::extract_symbol_name(inner),
             _ => None,
         }
+    }
+
+    /// Look up the asm register name for a local variable, if it was declared with
+    /// `register <type> <name> __asm__("regname")`.
+    fn get_local_asm_register(&self, name: &str) -> Option<String> {
+        self.func_state.as_ref()
+            .and_then(|fs| fs.locals.get(name))
+            .and_then(|info| info.asm_register.clone())
     }
 
     /// Recursively emit struct field initialization from an initializer list.

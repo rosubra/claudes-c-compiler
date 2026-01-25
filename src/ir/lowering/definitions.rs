@@ -67,6 +67,9 @@ pub(super) struct LocalInfo {
     /// For VLA local variables: the runtime Value holding sizeof(this_variable).
     /// Used when sizeof is applied to a VLA local variable.
     pub vla_size: Option<Value>,
+    /// For register variables with __asm__("regname"): the specific register name.
+    /// Used to rewrite inline asm "r" constraints to specific register constraints.
+    pub asm_register: Option<String>,
 }
 
 impl std::ops::Deref for LocalInfo {
@@ -272,6 +275,7 @@ impl LocalInfo {
             static_global_name: None,
             vla_strides: vec![],
             vla_size: None,
+            asm_register: None,
         }
     }
 
@@ -285,6 +289,7 @@ impl LocalInfo {
             static_global_name: Some(static_name),
             vla_strides: vec![],
             vla_size: None,
+            asm_register: None,
         }
     }
 }

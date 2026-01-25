@@ -95,6 +95,8 @@ pub struct InitDeclarator {
     pub visibility: Option<String>,
     /// __attribute__((section("..."))) - place in specific ELF section
     pub section: Option<String>,
+    /// register var __asm__("regname") - pin to specific register for inline asm
+    pub asm_register: Option<String>,
     pub span: Span,
 }
 

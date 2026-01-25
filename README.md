@@ -71,6 +71,7 @@ See `git log` for full history. Key milestones:
 - Assembly file (.S/.s) passthrough to target assembler
 - XMM register "x" constraint support for x86 inline assembly
 - `__attribute__((alias, weak, visibility))` and top-level `asm()` support (musl libc)
+- `register` variable `__asm__("regname")` support for pinning variables to specific registers in inline asm
 
 ### Project Build Status
 
@@ -89,9 +90,9 @@ See `git log` for full history. Key milestones:
 | liburing | PARTIAL | Builds successfully; tests require io_uring kernel support |
 | mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | postgres | PARTIAL | Build succeeds; `make check` initdb fails during regression |
-| musl | PARTIAL | Builds and links; hello test passes. Some runtime tests fail (codegen issues in musl's libc) |
-| libffi | PARTIAL | Builds with .S passthrough; runtime tests crash (complex asm/stack manipulation) |
-| tcc | FAIL | Build fails: preprocessor/conditional compilation issues with arch-specific defines |
+| musl | PARTIAL | Builds and links; hello test passes. malloc works (register asm variable fix). stdio printf output missing in some tests |
+| libffi | PARTIAL | Builds; 5/6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args). Closure test segfaults |
+| tcc | FAIL | TCC binary builds but segfaults when compiling (optimizer drops conditional assignments) |
 
 ### What's Not Yet Implemented
 - Some GNU C extensions in system headers (partial `__attribute__` support)

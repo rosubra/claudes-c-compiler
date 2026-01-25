@@ -106,7 +106,7 @@ impl Parser {
         self.consume_post_type_qualifiers();
 
         let (name, derived, decl_mode, decl_common, decl_aligned) = self.parse_declarator_with_attrs();
-        let (post_ctor, post_dtor, post_mode, post_common, post_aligned) = self.parse_asm_and_attributes();
+        let (post_ctor, post_dtor, post_mode, post_common, post_aligned, _asm_reg) = self.parse_asm_and_attributes();
         let mode_kind = decl_mode.or(post_mode);
         let is_common = decl_common || post_common;
         // Merge alignment from _Alignas (type specifier), declarator attrs, and post-declarator attrs.
@@ -359,10 +359,11 @@ impl Parser {
             alias_target,
             visibility,
             section: section.clone(),
+            asm_register: None,
             span: start,
         });
 
-        let (extra_ctor, extra_dtor, _, extra_common, extra_aligned) = self.parse_asm_and_attributes();
+        let (extra_ctor, extra_dtor, _, extra_common, extra_aligned, _extra_asm_reg) = self.parse_asm_and_attributes();
         if extra_ctor {
             declarators.last_mut().unwrap().is_constructor = true;
         }
@@ -394,7 +395,7 @@ impl Parser {
         // Parse additional declarators separated by commas
         while self.consume_if(&TokenKind::Comma) {
             let (dname, dderived) = self.parse_declarator();
-            let (d_ctor, d_dtor, _, d_common, _) = self.parse_asm_and_attributes();
+            let (d_ctor, d_dtor, _, d_common, _, _d_asm_reg) = self.parse_asm_and_attributes();
             is_common = is_common || d_common;
             let d_weak = self.parsing_weak;
             let d_alias = self.parsing_alias_target.take();
@@ -416,9 +417,10 @@ impl Parser {
                 alias_target: d_alias,
                 visibility: d_vis,
                 section: d_section,
+                asm_register: None,
                 span: start,
             });
-            let (_, skip_aligned) = self.skip_asm_and_attributes();
+            let (_, skip_aligned, _skip_asm_reg) = self.skip_asm_and_attributes();
             if let Some(a) = skip_aligned {
                 alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
             }
@@ -471,7 +473,7 @@ impl Parser {
         let mut alignment: Option<usize> = None;
         loop {
             let (name, derived, decl_mode, _, decl_aligned) = self.parse_declarator_with_attrs();
-            let (skip_mode, skip_aligned) = self.skip_asm_and_attributes();
+            let (skip_mode, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
             mode_kind = mode_kind.or(decl_mode).or(skip_mode);
             // Merge alignment from declarator and post-declarator attributes
             for a in [decl_aligned, skip_aligned].iter().copied().flatten() {
@@ -492,9 +494,10 @@ impl Parser {
                 alias_target: None,
                 visibility: None,
                 section: None,
+                asm_register: skip_asm_reg,
                 span: start,
             });
-            let (_, post_init_aligned) = self.skip_asm_and_attributes();
+            let (_, post_init_aligned, _post_asm_reg) = self.skip_asm_and_attributes();
             if let Some(a) = post_init_aligned {
                 alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
             }

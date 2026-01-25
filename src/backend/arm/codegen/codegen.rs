@@ -2565,6 +2565,11 @@ impl InlineAsmEmitter for ArmCodegen {
     // TODO: Support ARM-specific immediate constraints ("I", "J", "K", "L", etc.).
     fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
         let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+        // Explicit register constraint from register variable: {regname}
+        if c.starts_with('{') && c.ends_with('}') {
+            let reg_name = &c[1..c.len()-1];
+            return AsmOperandKind::Specific(reg_name.to_string());
+        }
         // TODO: ARM =@cc not fully implemented — needs CSET/CSINC in store_output_from_reg.
         // Currently stores incorrect results (just a GP register value, no condition capture).
         if let Some(cond) = c.strip_prefix("@cc") {

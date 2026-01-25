@@ -495,27 +495,31 @@ impl Parser {
     }
 
     /// Skip __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (mode_kind, aligned_value).
-    pub(super) fn skip_asm_and_attributes(&mut self) -> (Option<ModeKind>, Option<usize>) {
-        let (_, _, mk, _, aligned) = self.parse_asm_and_attributes();
-        (mk, aligned)
+    /// Returns (mode_kind, aligned_value, asm_register).
+    pub(super) fn skip_asm_and_attributes(&mut self) -> (Option<ModeKind>, Option<usize>, Option<String>) {
+        let (_, _, mk, _, aligned, asm_reg) = self.parse_asm_and_attributes();
+        (mk, aligned, asm_reg)
     }
 
     /// Parse __asm__("..."), __attribute__(...), and __extension__ after declarators.
-    /// Returns (is_constructor, is_destructor, mode_kind, is_common, aligned_value).
-    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, Option<ModeKind>, bool, Option<usize>) {
+    /// Returns (is_constructor, is_destructor, mode_kind, is_common, aligned_value, asm_register).
+    /// The asm_register captures the register name from `register var __asm__("regname")`.
+    pub(super) fn parse_asm_and_attributes(&mut self) -> (bool, bool, Option<ModeKind>, bool, Option<usize>, Option<String>) {
         let mut is_constructor = false;
         let mut is_destructor = false;
         let mut mode_kind: Option<ModeKind> = None;
         let mut has_common = false;
         let mut aligned: Option<usize> = None;
+        let mut asm_register: Option<String> = None;
         loop {
             match self.peek() {
                 TokenKind::Asm => {
                     self.advance();
                     self.consume_if(&TokenKind::Volatile);
                     if matches!(self.peek(), TokenKind::LParen) {
-                        self.skip_balanced_parens();
+                        // Try to extract the asm register name: __asm__("regname")
+                        // This is a single string literal inside parentheses.
+                        asm_register = asm_register.or_else(|| self.try_parse_asm_register_name());
                     }
                 }
                 TokenKind::Attribute => {
@@ -534,7 +538,33 @@ impl Parser {
                 _ => break,
             }
         }
-        (is_constructor, is_destructor, mode_kind, has_common, aligned)
+        (is_constructor, is_destructor, mode_kind, has_common, aligned, asm_register)
+    }
+
+    /// Try to extract a register name from __asm__("regname") on a variable declaration.
+    /// Called when the current token is LParen after __asm__. If the content is a simple
+    /// string literal (register name), returns Some("regname"). Otherwise falls back to
+    /// skip_balanced_parens and returns None.
+    fn try_parse_asm_register_name(&mut self) -> Option<String> {
+        // Save position so we can fall back
+        let saved_pos = self.pos;
+        self.advance(); // consume '('
+        // Check for a string literal
+        if let TokenKind::StringLiteral(s) = self.peek() {
+            let reg_name = s.clone();
+            self.advance(); // consume string
+            if matches!(self.peek(), TokenKind::RParen) {
+                self.advance(); // consume ')'
+                if !reg_name.is_empty() {
+                    return Some(reg_name);
+                }
+                return None;
+            }
+        }
+        // Not a simple register name, restore and skip
+        self.pos = saved_pos;
+        self.skip_balanced_parens();
+        None
     }
 
     /// Parse the ((...)) parameter list of __attribute__.

@@ -2543,6 +2543,11 @@ impl InlineAsmEmitter for RiscvCodegen {
         // TODO: RISC-V =@cc not fully implemented — needs SLTU/SEQZ/etc. in store_output_from_reg.
         // Currently stores incorrect results (just a GP register value, no condition capture).
         let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+        // Explicit register constraint from register variable: {regname}
+        if c.starts_with('{') && c.ends_with('}') {
+            let reg_name = &c[1..c.len()-1];
+            return AsmOperandKind::Specific(reg_name.to_string());
+        }
         if let Some(cond) = c.strip_prefix("@cc") {
             return AsmOperandKind::ConditionCode(cond.to_string());
         }
