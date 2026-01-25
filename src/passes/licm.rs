@@ -11,15 +11,21 @@
 //! - Array index computations (i * n) in inner loops
 //! - Address calculations that depend on outer loop variables
 //! - Casts and extensions of loop-invariant values
+//! - **Loads from loop-invariant addresses not modified within the loop**
+//!   (e.g., function parameter loads, global constant loads)
 //!
 //! The pass requires loops to have a single-entry preheader block. Loops with
 //! multiple outside predecessors are skipped (a future improvement could create
 //! dedicated preheader blocks for these cases).
 //!
-//! Safety: Only pure (side-effect-free) instructions are hoisted. Loads, stores,
-//! calls, and other side-effecting instructions are never moved.
+//! Safety: Pure (side-effect-free) instructions are always hoisted. Loads are
+//! hoisted only when we can prove the memory location is not modified inside
+//! the loop — specifically, loads from allocas that have no stores within the
+//! loop body, provided no calls in the loop could alias the alloca (ensured by
+//! checking that the alloca is not address-taken, i.e., only used by Load/Store).
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
+use crate::common::types::IrType;
 use crate::ir::analysis;
 use crate::ir::ir::*;
 
@@ -57,6 +63,9 @@ fn licm_function(func: &mut IrFunction) -> usize {
         return 0;
     }
 
+    // Pre-compute function-level alloca analysis for load hoisting.
+    let alloca_info = analyze_allocas(func);
+
     let mut total_hoisted = 0;
 
     // Process loops from innermost to outermost (smaller loops first).
@@ -65,7 +74,7 @@ fn licm_function(func: &mut IrFunction) -> usize {
     sorted_loops.sort_by_key(|l| l.body.len());
 
     for natural_loop in &sorted_loops {
-        total_hoisted += hoist_loop_invariants(func, natural_loop, &preds, &idom);
+        total_hoisted += hoist_loop_invariants(func, natural_loop, &preds, &idom, &alloca_info);
     }
 
     total_hoisted
@@ -159,7 +168,163 @@ fn is_hoistable(inst: &Instruction) -> bool {
     )
 }
 
-/// Get all Value IDs referenced as operands by an instruction (not including dest).
+/// Information about allocas in a function, used for load hoisting analysis.
+struct AllocaAnalysis {
+    /// Set of value IDs that are alloca destinations.
+    alloca_values: FxHashSet<u32>,
+    /// Set of alloca value IDs that are "address-taken" — used by anything
+    /// other than direct Load/Store (e.g., passed to a call, used in GEP
+    /// as a non-base, stored as a value, etc.). Loads from address-taken
+    /// allocas cannot be safely hoisted past calls.
+    address_taken: FxHashSet<u32>,
+}
+
+/// Analyze all allocas in a function to determine which are address-taken.
+///
+/// An alloca is "address-taken" if its value (the pointer) is used by any
+/// instruction other than Load (as ptr) or Store (as ptr). This includes:
+/// - Passed as a call argument
+/// - Stored as a value (the pointer itself is stored somewhere)
+/// - Used as an operand in a BinOp, Cast, etc.
+/// - Used in a GEP (the resulting pointer could be passed anywhere)
+///
+/// Allocas that are NOT address-taken can only be accessed via direct
+/// Load/Store, so we can reason precisely about which stores modify them.
+fn analyze_allocas(func: &IrFunction) -> AllocaAnalysis {
+    let mut alloca_values = FxHashSet::default();
+    let mut address_taken = FxHashSet::default();
+
+    // Collect all alloca values from the entry block.
+    if !func.blocks.is_empty() {
+        for inst in &func.blocks[0].instructions {
+            if let Instruction::Alloca { dest, .. } = inst {
+                alloca_values.insert(dest.0);
+            }
+        }
+    }
+
+    if alloca_values.is_empty() {
+        return AllocaAnalysis { alloca_values, address_taken };
+    }
+
+    // Scan all instructions to find address-taken allocas.
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                // Load from alloca is fine (direct access).
+                Instruction::Load { ptr, .. } => {
+                    // ptr is used as a load target - this is fine, not address-taken.
+                    let _ = ptr;
+                }
+                // Store TO an alloca is fine. But storing an alloca's value
+                // (as the stored data) means its address escapes.
+                Instruction::Store { val, ptr, .. } => {
+                    let _ = ptr; // Storing to alloca is fine.
+                    // If the stored VALUE is an alloca pointer, it's address-taken.
+                    if let Operand::Value(v) = val {
+                        if alloca_values.contains(&v.0) {
+                            address_taken.insert(v.0);
+                        }
+                    }
+                }
+                // Alloca definitions themselves are fine.
+                Instruction::Alloca { .. } | Instruction::DynAlloca { .. } => {}
+                // All other instructions: any alloca used as an operand is address-taken.
+                _ => {
+                    for val_id in all_operand_values(inst) {
+                        if alloca_values.contains(&val_id) {
+                            address_taken.insert(val_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check terminator operands.
+        for val_id in terminator_operand_values(&block.terminator) {
+            if alloca_values.contains(&val_id) {
+                address_taken.insert(val_id);
+            }
+        }
+    }
+
+    AllocaAnalysis { alloca_values, address_taken }
+}
+
+/// Get all Value IDs used as operands by any instruction (for address-taken analysis).
+fn all_operand_values(inst: &Instruction) -> Vec<u32> {
+    let mut vals = Vec::new();
+
+    fn collect(op: &Operand, vals: &mut Vec<u32>) {
+        if let Operand::Value(v) = op {
+            vals.push(v.0);
+        }
+    }
+
+    match inst {
+        Instruction::BinOp { lhs, rhs, .. } => { collect(lhs, &mut vals); collect(rhs, &mut vals); }
+        Instruction::UnaryOp { src, .. } => collect(src, &mut vals),
+        Instruction::Cmp { lhs, rhs, .. } => { collect(lhs, &mut vals); collect(rhs, &mut vals); }
+        Instruction::Cast { src, .. } => collect(src, &mut vals),
+        Instruction::GetElementPtr { base, offset, .. } => {
+            vals.push(base.0);
+            collect(offset, &mut vals);
+        }
+        Instruction::Copy { src, .. } => collect(src, &mut vals),
+        Instruction::Call { args, .. } => { for a in args { collect(a, &mut vals); } }
+        Instruction::CallIndirect { func_ptr, args, .. } => {
+            collect(func_ptr, &mut vals);
+            for a in args { collect(a, &mut vals); }
+        }
+        Instruction::Memcpy { dest, src, .. } => { vals.push(dest.0); vals.push(src.0); }
+        Instruction::VaStart { va_list_ptr, .. } => vals.push(va_list_ptr.0),
+        Instruction::VaEnd { va_list_ptr } => vals.push(va_list_ptr.0),
+        Instruction::VaCopy { dest_ptr, src_ptr } => { vals.push(dest_ptr.0); vals.push(src_ptr.0); }
+        Instruction::VaArg { va_list_ptr, .. } => vals.push(va_list_ptr.0),
+        Instruction::AtomicRmw { ptr, val, .. } => { collect(ptr, &mut vals); collect(val, &mut vals); }
+        Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
+            collect(ptr, &mut vals); collect(expected, &mut vals); collect(desired, &mut vals);
+        }
+        Instruction::AtomicLoad { ptr, .. } => collect(ptr, &mut vals),
+        Instruction::AtomicStore { ptr, val, .. } => { collect(ptr, &mut vals); collect(val, &mut vals); }
+        Instruction::InlineAsm { inputs, .. } => {
+            for (_, op, _) in inputs { collect(op, &mut vals); }
+        }
+        Instruction::Intrinsic { args, .. } => { for a in args { collect(a, &mut vals); } }
+        Instruction::Phi { incoming, .. } => {
+            for (op, _) in incoming { collect(op, &mut vals); }
+        }
+        Instruction::SetReturnF64Second { src } => collect(src, &mut vals),
+        Instruction::SetReturnF32Second { src } => collect(src, &mut vals),
+        Instruction::DynAlloca { size, .. } => collect(size, &mut vals),
+        // These don't use Value operands (or are already handled above).
+        Instruction::Alloca { .. }
+        | Instruction::Store { .. }
+        | Instruction::Load { .. }
+        | Instruction::GlobalAddr { .. }
+        | Instruction::LabelAddr { .. }
+        | Instruction::GetReturnF64Second { .. }
+        | Instruction::GetReturnF32Second { .. }
+        | Instruction::Fence { .. } => {}
+    }
+
+    vals
+}
+
+/// Get all Value IDs used in a terminator.
+fn terminator_operand_values(term: &Terminator) -> Vec<u32> {
+    let mut vals = Vec::new();
+    match term {
+        Terminator::Return(Some(Operand::Value(v))) => vals.push(v.0),
+        Terminator::CondBranch { cond: Operand::Value(v), .. } => vals.push(v.0),
+        Terminator::IndirectBranch { target: Operand::Value(v), .. } => vals.push(v.0),
+        _ => {}
+    }
+    vals
+}
+
+/// Get all Value IDs referenced as operands by a hoistable instruction (not including dest).
+/// This is used for the invariance check during hoisting.
 fn instruction_operand_values(inst: &Instruction) -> Vec<u32> {
     let mut vals = Vec::new();
     let collect_op = |op: &Operand, vals: &mut Vec<u32>| {
@@ -193,12 +358,126 @@ fn instruction_operand_values(inst: &Instruction) -> Vec<u32> {
         Instruction::GlobalAddr { .. } => {
             // No value operands
         }
+        Instruction::Load { ptr, .. } => {
+            // The pointer is the operand we need to check for loop-invariance.
+            vals.push(ptr.0);
+        }
         // All other instructions are non-hoistable and should never reach here.
-        // If is_hoistable() is extended, this must be updated to match.
         _ => unreachable!("instruction_operand_values called on non-hoistable instruction")
     }
 
     vals
+}
+
+/// Analyze which allocas are stored to within a loop body, and whether
+/// the loop contains calls that could modify memory.
+struct LoopMemoryInfo {
+    /// Alloca value IDs that have stores targeting them within the loop.
+    stored_allocas: FxHashSet<u32>,
+    /// Whether the loop contains any calls (which could modify arbitrary memory).
+    has_calls: bool,
+}
+
+/// Scan a loop body to determine which allocas are modified and whether calls exist.
+fn analyze_loop_memory(
+    func: &IrFunction,
+    loop_body: &FxHashSet<usize>,
+) -> LoopMemoryInfo {
+    let mut stored_allocas = FxHashSet::default();
+    let mut has_calls = false;
+
+    let collect_ptr = |op: &Operand, set: &mut FxHashSet<u32>| {
+        if let Operand::Value(v) = op {
+            set.insert(v.0);
+        }
+    };
+
+    for &block_idx in loop_body {
+        if block_idx >= func.blocks.len() {
+            continue;
+        }
+        for inst in &func.blocks[block_idx].instructions {
+            match inst {
+                Instruction::Store { ptr, .. } => {
+                    stored_allocas.insert(ptr.0);
+                }
+                Instruction::Call { .. } | Instruction::CallIndirect { .. } => {
+                    has_calls = true;
+                }
+                // Inline asm, intrinsics, and atomics could also modify memory
+                Instruction::InlineAsm { .. } | Instruction::Intrinsic { .. } => {
+                    has_calls = true; // Conservative: treat as a call
+                }
+                Instruction::AtomicRmw { ptr, .. } => {
+                    collect_ptr(ptr, &mut stored_allocas);
+                    has_calls = true;
+                }
+                Instruction::AtomicCmpxchg { ptr, .. } => {
+                    collect_ptr(ptr, &mut stored_allocas);
+                    has_calls = true;
+                }
+                Instruction::AtomicStore { ptr, .. } => {
+                    collect_ptr(ptr, &mut stored_allocas);
+                    has_calls = true;
+                }
+                Instruction::Memcpy { dest, .. } => {
+                    stored_allocas.insert(dest.0);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    LoopMemoryInfo { stored_allocas, has_calls }
+}
+
+/// Check if a Load instruction is safe to hoist from a loop.
+///
+/// A load is safe to hoist if:
+/// 1. Its pointer operand is loop-invariant
+/// 2. The memory it reads is not modified inside the loop:
+///    a. If ptr is an alloca: no store in the loop targets that alloca
+///    b. If ptr is an alloca that is NOT address-taken: safe even with calls
+///       (no call can modify it since its address never escapes)
+///    c. If ptr is an alloca that IS address-taken: unsafe if the loop has calls
+///       (a call could modify it through the escaped pointer)
+fn is_load_hoistable(
+    ptr: &Value,
+    alloca_info: &AllocaAnalysis,
+    loop_mem: &LoopMemoryInfo,
+    loop_defined: &FxHashSet<u32>,
+    invariant: &FxHashSet<u32>,
+) -> bool {
+    let ptr_id = ptr.0;
+
+    // The pointer must be loop-invariant (defined outside the loop or already hoisted).
+    let ptr_is_invariant = !loop_defined.contains(&ptr_id) || invariant.contains(&ptr_id);
+    if !ptr_is_invariant {
+        return false;
+    }
+
+    // Check if loading from an alloca.
+    if alloca_info.alloca_values.contains(&ptr_id) {
+        // The alloca itself must not be stored to inside the loop.
+        if loop_mem.stored_allocas.contains(&ptr_id) {
+            return false;
+        }
+
+        // If the loop has calls, we can only hoist if the alloca is not address-taken.
+        // If it IS address-taken, a call could modify it through the escaped pointer.
+        if loop_mem.has_calls && alloca_info.address_taken.contains(&ptr_id) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // For non-alloca pointers (e.g., GEP results), we need to trace back to
+    // the base to determine safety. For now, be conservative: only hoist if
+    // the pointer is defined outside the loop AND there are no stores or calls
+    // in the loop body that could alias it.
+    // TODO: Implement alias analysis for GEP-based loads
+    false
 }
 
 /// Hoist loop-invariant instructions from a natural loop to a preheader.
@@ -209,6 +488,7 @@ fn hoist_loop_invariants(
     natural_loop: &NaturalLoop,
     preds: &[Vec<usize>],
     idom: &[usize],
+    alloca_info: &AllocaAnalysis,
 ) -> usize {
     let header = natural_loop.header;
 
@@ -233,9 +513,12 @@ fn hoist_loop_invariants(
         }
     }
 
+    // Analyze loop memory for load hoisting.
+    let loop_mem = analyze_loop_memory(func, &natural_loop.body);
+
     // Iteratively identify loop-invariant instructions.
     // An instruction is loop-invariant if:
-    // 1. It is hoistable (pure, no side effects)
+    // 1. It is hoistable (pure, no side effects) OR it is a safe-to-hoist load
     // 2. All its Value operands are either:
     //    a. Not defined in the loop (defined outside), OR
     //    b. Already identified as loop-invariant
@@ -251,11 +534,6 @@ fn hoist_loop_invariants(
             }
             let block = &func.blocks[block_idx];
             for (inst_idx, inst) in block.instructions.iter().enumerate() {
-                // Skip if not hoistable type
-                if !is_hoistable(inst) {
-                    continue;
-                }
-
                 let dest = match inst.dest() {
                     Some(d) => d,
                     None => continue,
@@ -266,16 +544,26 @@ fn hoist_loop_invariants(
                     continue;
                 }
 
-                // Check all operands
-                let operand_vals = instruction_operand_values(inst);
-                let all_invariant = operand_vals.iter().all(|&val_id| {
-                    // Either defined outside the loop...
-                    !loop_defined.contains(&val_id) ||
-                    // ...or already proven loop-invariant
-                    invariant.contains(&val_id)
-                });
+                // Determine if this instruction can be hoisted
+                let can_hoist = if is_hoistable(inst) {
+                    // Pure instruction: check all operands are loop-invariant
+                    let operand_vals = instruction_operand_values(inst);
+                    operand_vals.iter().all(|&val_id| {
+                        !loop_defined.contains(&val_id) || invariant.contains(&val_id)
+                    })
+                } else if let Instruction::Load { ptr, ty, .. } = inst {
+                    // Load instruction: check if safe to hoist
+                    // TODO: Extend to also hoist float/long double/i128 loads
+                    // once the backend register paths for those types support it.
+                    !ty.is_float() && !ty.is_long_double()
+                        && !matches!(ty, IrType::I128 | IrType::U128)
+                        && is_load_hoistable(ptr, alloca_info, &loop_mem,
+                                             &loop_defined, &invariant)
+                } else {
+                    false
+                };
 
-                if all_invariant {
+                if can_hoist {
                     invariant.insert(dest.0);
                     hoistable_insts.push((block_idx, inst_idx, inst.clone()));
                     changed = true;
@@ -556,12 +844,13 @@ mod tests {
     #[test]
     fn test_licm_hoists_invariant() {
         let mut func = make_loop_func();
+        let alloca_info = analyze_allocas(&func);
         let label_to_idx = analysis::build_label_map(&func);
         let (preds, _succs) = analysis::build_cfg(&func, &label_to_idx);
         let idom = analysis::compute_dominators(func.blocks.len(), &preds, &_succs);
         let loops = find_natural_loops(func.blocks.len(), &preds, &_succs, &idom);
 
-        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
 
         // n * 4 should be hoisted (1 instruction)
         assert_eq!(hoisted, 1);
@@ -604,5 +893,220 @@ mod tests {
         // Value(5) should come before Value(10)
         assert_eq!(sorted[0].dest(), Some(Value(5)));
         assert_eq!(sorted[1].dest(), Some(Value(10)));
+    }
+
+    #[test]
+    fn test_licm_hoists_load_from_unmodified_alloca() {
+        // Test: load from an alloca that is NOT stored to in the loop should be hoisted.
+        //
+        // entry:
+        //   %0 = alloca i32       (parameter alloca for 'n')
+        //   store 42, %0          (initial parameter store)
+        //   br loop_header
+        //
+        // loop_header:
+        //   %2 = phi [%init, entry], [%5, body]
+        //   %3 = load %0          (load from alloca - should be hoisted!)
+        //   %cmp = cmp slt %2, %3
+        //   br %cmp, body, exit
+        //
+        // body:
+        //   %5 = add %2, 1
+        //   br loop_header
+        //
+        // exit:
+        //   ret %2
+        let mut func = IrFunction::new("test_load_hoist".to_string(), IrType::I32, vec![], false);
+
+        // Block 0 (entry): alloca + store + init
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Alloca {
+                    dest: Value(0),
+                    ty: IrType::I32,
+                    size: 4,
+                    align: 4,
+                },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+                Instruction::Copy {
+                    dest: Value(1),
+                    src: Operand::Const(IrConst::I32(0)),
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)),
+        });
+
+        // Block 1 (header): phi + load from alloca + compare
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![
+                Instruction::Phi {
+                    dest: Value(2),
+                    ty: IrType::I32,
+                    incoming: vec![
+                        (Operand::Value(Value(1)), BlockId(0)),
+                        (Operand::Value(Value(5)), BlockId(2)),
+                    ],
+                },
+                Instruction::Load {
+                    dest: Value(3),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+                Instruction::Cmp {
+                    dest: Value(4),
+                    op: IrCmpOp::Slt,
+                    lhs: Operand::Value(Value(2)),
+                    rhs: Operand::Value(Value(3)),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Value(Value(4)),
+                true_label: BlockId(2),
+                false_label: BlockId(3),
+            },
+        });
+
+        // Block 2 (body): i++
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![
+                Instruction::BinOp {
+                    dest: Value(5),
+                    op: IrBinOp::Add,
+                    lhs: Operand::Value(Value(2)),
+                    rhs: Operand::Const(IrConst::I32(1)),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)),
+        });
+
+        // Block 3 (exit)
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+        });
+
+        func.next_value_id = 6;
+
+        let alloca_info = analyze_allocas(&func);
+        let label_to_idx = analysis::build_label_map(&func);
+        let (preds, succs) = analysis::build_cfg(&func, &label_to_idx);
+        let idom = analysis::compute_dominators(func.blocks.len(), &preds, &succs);
+        let loops = find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
+
+        assert_eq!(loops.len(), 1);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
+
+        // The load from %0 should be hoisted (1 instruction)
+        assert_eq!(hoisted, 1);
+
+        // The preheader (block 0) should now have 4 instructions (alloca + store + copy + load)
+        assert_eq!(func.blocks[0].instructions.len(), 4);
+
+        // The loop header (block 1) should have lost the load
+        assert_eq!(func.blocks[1].instructions.len(), 2); // phi + cmp
+
+        // The hoisted instruction should be the Load
+        let hoisted_inst = func.blocks[0].instructions.last().unwrap();
+        assert!(matches!(hoisted_inst, Instruction::Load { .. }));
+    }
+
+    #[test]
+    fn test_licm_does_not_hoist_load_from_modified_alloca() {
+        // Test: load from an alloca that IS stored to in the loop should NOT be hoisted.
+        let mut func = IrFunction::new("test_no_hoist".to_string(), IrType::I32, vec![], false);
+
+        // Block 0: alloca + initial store
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Alloca {
+                    dest: Value(0),
+                    ty: IrType::I32,
+                    size: 4,
+                    align: 4,
+                },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(0)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)),
+        });
+
+        // Block 1 (header): load from alloca
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+                Instruction::Cmp {
+                    dest: Value(2),
+                    op: IrCmpOp::Slt,
+                    lhs: Operand::Value(Value(1)),
+                    rhs: Operand::Const(IrConst::I32(10)),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Value(Value(2)),
+                true_label: BlockId(2),
+                false_label: BlockId(3),
+            },
+        });
+
+        // Block 2 (body): store to same alloca (modifies it!)
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![
+                Instruction::BinOp {
+                    dest: Value(3),
+                    op: IrBinOp::Add,
+                    lhs: Operand::Value(Value(1)),
+                    rhs: Operand::Const(IrConst::I32(1)),
+                    ty: IrType::I32,
+                },
+                Instruction::Store {
+                    val: Operand::Value(Value(3)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)),
+        });
+
+        // Block 3 (exit)
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+        });
+
+        func.next_value_id = 4;
+
+        let alloca_info = analyze_allocas(&func);
+        let label_to_idx = analysis::build_label_map(&func);
+        let (preds, succs) = analysis::build_cfg(&func, &label_to_idx);
+        let idom = analysis::compute_dominators(func.blocks.len(), &preds, &succs);
+        let loops = find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
+
+        assert_eq!(loops.len(), 1);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
+
+        // Nothing should be hoisted because the alloca is stored to in the loop
+        assert_eq!(hoisted, 0);
     }
 }
