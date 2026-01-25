@@ -309,10 +309,31 @@ impl MacroTable {
                                 }
 
                                 if !expanded.is_empty() {
-                                    if !result.is_empty() && !result.ends_with(' ') && !result.ends_with('\t') && !result.ends_with('\n') {
-                                        result.push(' ');
+                                    // Insert space before expansion to prevent accidental token pasting
+                                    if !result.is_empty() {
+                                        let last = result.as_bytes()[result.len() - 1];
+                                        let first = expanded.as_bytes()[0];
+                                        if would_paste_tokens(last, first) {
+                                            result.push(' ');
+                                        } else if !last.is_ascii_whitespace() && !first.is_ascii_whitespace() {
+                                            // Also add space if the result doesn't end with whitespace
+                                            // and the expansion doesn't start with whitespace
+                                            // (to avoid things like identifier pasting)
+                                            if is_ident_cont_byte(last) && is_ident_cont_byte(first) {
+                                                result.push(' ');
+                                            }
+                                        }
                                     }
                                     result.push_str(&expanded);
+                                    // Insert space after expansion to prevent the expanded token
+                                    // from merging with the next source token
+                                    if i < len {
+                                        let last_expanded = expanded.as_bytes()[expanded.len() - 1];
+                                        let next_byte = bytes[i];
+                                        if would_paste_tokens(last_expanded, next_byte) {
+                                            result.push(' ');
+                                        }
+                                    }
                                 }
                                 continue;
                             } else {
@@ -352,7 +373,7 @@ impl MacroTable {
                                 }
                             }
 
-                            // Insert space to prevent accidental token pasting
+                            // Insert space to prevent accidental token pasting (leading edge)
                             if !expanded.is_empty() && !result.is_empty() {
                                 let last = result.as_bytes()[result.len() - 1];
                                 let first = expanded.as_bytes()[0];
@@ -361,6 +382,14 @@ impl MacroTable {
                                 }
                             }
                             result.push_str(&expanded);
+                            // Insert space to prevent accidental token pasting (trailing edge)
+                            if !expanded.is_empty() && i < len {
+                                let last_expanded = expanded.as_bytes()[expanded.len() - 1];
+                                let next_byte = bytes[i];
+                                if would_paste_tokens(last_expanded, next_byte) {
+                                    result.push(' ');
+                                }
+                            }
                             continue;
                         }
                     }

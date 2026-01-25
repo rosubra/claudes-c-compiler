@@ -202,6 +202,14 @@ impl Lowerer {
             }
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
             local_info.vla_size = vla_size;
+            // For local VLAs with multiple dimensions, compute runtime strides
+            // so that subscript operations use the correct element sizes.
+            if vla_size.is_some() {
+                let strides = self.compute_vla_local_strides(&decl.type_spec, &declarator.derived);
+                if !strides.is_empty() {
+                    local_info.vla_strides = strides;
+                }
+            }
             local_info.asm_register = declarator.asm_register.clone();
             self.insert_local_scoped(declarator.name.clone(), local_info);
 
@@ -1466,6 +1474,125 @@ impl Lowerer {
         }
 
         None
+    }
+
+    /// Compute VLA strides for a local VLA variable declaration.
+    ///
+    /// For `double a[n][m]`, we need strides:
+    ///   stride[0] = m * sizeof(double)   (stride for first dimension = row stride)
+    ///   stride[1] = sizeof(double)       (stride for second dimension = element stride)
+    ///
+    /// The strides array has one entry per array dimension. Each entry is
+    /// `Some(Value)` if the stride requires a runtime computation, or `None`
+    /// if it's a compile-time constant (handled by the fallback path).
+    ///
+    /// We process dimensions from innermost to outermost, accumulating the
+    /// product of inner dimensions * base element size.
+    pub(super) fn compute_vla_local_strides(
+        &mut self,
+        type_spec: &TypeSpecifier,
+        derived: &[DerivedDeclarator],
+    ) -> Vec<Option<Value>> {
+        // Collect array dimensions from derived declarators
+        let array_dims: Vec<&Option<Box<Expr>>> = derived.iter().filter_map(|d| {
+            if let DerivedDeclarator::Array(size) = d {
+                Some(size)
+            } else {
+                None
+            }
+        }).collect();
+
+        if array_dims.len() < 2 {
+            // For 1D VLAs, no stride info needed (the element size is known at compile time)
+            return vec![];
+        }
+
+        // Check if any dimension is a VLA
+        let mut has_vla = false;
+        for dim in &array_dims {
+            if let Some(expr) = dim {
+                if self.expr_as_array_size(expr).is_none() {
+                    has_vla = true;
+                    break;
+                }
+            }
+        }
+        if !has_vla {
+            return vec![];
+        }
+
+        let base_elem_size = self.sizeof_type(type_spec);
+        let num_dims = array_dims.len();
+        let num_strides = num_dims + 1; // +1 for base element size level
+        let mut vla_strides: Vec<Option<Value>> = vec![None; num_strides];
+
+        // Process dimensions from innermost (last) to outermost (first).
+        // Each stride[i] = product of all inner dimension sizes * base_elem_size.
+        // stride[num_dims-1] is always base_elem_size (the innermost element stride).
+        // stride[i] = array_dims[i+1] * stride[i+1] for i < num_dims-1.
+        let mut current_stride: Option<Value> = None;
+        let mut current_const_stride: usize = base_elem_size;
+
+        for i in (0..num_dims).rev() {
+            if i == num_dims - 1 {
+                // Innermost dimension: stride is base_elem_size (compile-time constant)
+                // No need to set vla_strides[i] since the fallback handles constants.
+                // But we need to track it for computing outer strides.
+                continue;
+            }
+
+            // The stride for dimension i = dimension_size[i+1] * stride[i+1]
+            // We need to compute this from the (i+1)th dimension.
+            let inner_dim = &array_dims[i + 1];
+            if let Some(expr) = inner_dim {
+                if let Some(const_val) = self.expr_as_array_size(expr) {
+                    // Inner dimension is a compile-time constant
+                    current_const_stride *= const_val as usize;
+                    if current_stride.is_some() {
+                        // Previous stride was runtime, multiply by constant
+                        let stride_val = self.emit_binop_val(
+                            IrBinOp::Mul,
+                            Operand::Value(current_stride.unwrap()),
+                            Operand::Const(IrConst::I64(const_val as i64)),
+                            IrType::I64,
+                        );
+                        current_stride = Some(stride_val);
+                        vla_strides[i] = Some(stride_val);
+                    }
+                    // else: purely const, fallback handles it
+                } else {
+                    // Inner dimension is a runtime VLA dimension
+                    let dim_val = self.lower_expr(expr);
+                    let dim_value = self.operand_to_value(dim_val);
+
+                    let stride_val = if let Some(prev) = current_stride {
+                        self.emit_binop_val(
+                            IrBinOp::Mul,
+                            Operand::Value(dim_value),
+                            Operand::Value(prev),
+                            IrType::I64,
+                        )
+                    } else {
+                        // First runtime dimension: multiply by accumulated const
+                        if current_const_stride > 1 {
+                            self.emit_binop_val(
+                                IrBinOp::Mul,
+                                Operand::Value(dim_value),
+                                Operand::Const(IrConst::I64(current_const_stride as i64)),
+                                IrType::I64,
+                            )
+                        } else {
+                            dim_value
+                        }
+                    };
+                    current_stride = Some(stride_val);
+                    current_const_stride = 0;
+                    vla_strides[i] = Some(stride_val);
+                }
+            }
+        }
+
+        vla_strides
     }
 
     /// Compute VLA size from a typedef'd array type (e.g., typedef char buf[n]).
