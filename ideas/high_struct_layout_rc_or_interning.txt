@@ -1,0 +1,40 @@
+HIGH PRIORITY: Eliminate StructLayout cloning via Rc<StructLayout> or interning
+
+PROBLEM:
+Profiling shows the IR lowering phase takes ~0.35s for sqlite3.c. A major
+contributor is cloning StructLayout on every struct member access, every
+struct variable declaration, and every pointer-to-struct dereference.
+
+Each StructLayout clone involves:
+- N String clones (one per field name)
+- N CType clones (each can contain Box<CType>, String keys)
+- N StructFieldLayout copies
+For a struct with 50 fields (common in sqlite3.c: sqlite3, Vdbe, Parse),
+that's ~100 heap allocations per clone.
+
+There are ~65 .cloned() calls on struct_layouts across the lowering code:
+- structs.rs: get_struct_layout_for_type, get_pointed_struct_layout
+- expr.rs: lower_identifier (for struct locals)
+- lvalue.rs: lower_lvalue
+- stmt.rs: statement initialization
+- global_init_bytes.rs, global_init_compound.rs: global init
+
+PROPOSED SOLUTION:
+Replace StructLayout with Rc<StructLayout> in the struct_layouts HashMap
+and in VarInfo.struct_layout. An Rc clone is a single atomic increment
+(essentially free) vs the current deep clone of all fields.
+
+Alternative: Use an arena/interning approach where StructLayouts are stored
+in a Vec<StructLayout> and referenced by index (LayoutId = u32). This
+avoids even the atomic increment cost but requires more refactoring.
+
+ESTIMATED IMPACT:
+Could save 30-50ms on sqlite3.c lowering (from 0.35s to ~0.30s).
+The improvement compounds for codebases with complex struct hierarchies.
+
+RELATED:
+- format!("struct.{}", tag) / format!("union.{}", tag) for every layout
+  lookup could be optimized by keying on &str or an interned string ID
+  instead of constructing a new String each time.
+- field_offset() does O(n) linear scan; could add a HashMap<String, usize>
+  index for fast field lookup on large structs.
