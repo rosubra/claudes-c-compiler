@@ -88,7 +88,7 @@ impl Lowerer {
         } else {
             None
         };
-        self.decompose_complex_call_args(&mut arg_vals, &mut arg_types, &param_ctypes_for_decompose, args);
+        self.decompose_complex_call_args(&mut arg_vals, &mut arg_types, &mut struct_arg_sizes, &param_ctypes_for_decompose, args);
 
         let dest = self.fresh_value();
 

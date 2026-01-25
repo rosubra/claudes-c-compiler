@@ -225,6 +225,8 @@ pub enum Stmt {
         outputs: Vec<AsmOperand>,
         inputs: Vec<AsmOperand>,
         clobbers: Vec<String>,
+        /// Goto labels for asm goto (e.g., `asm goto("..." : : : : label1, label2)`)
+        goto_labels: Vec<String>,
     },
 }
 

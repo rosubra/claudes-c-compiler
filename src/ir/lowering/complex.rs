@@ -891,6 +891,7 @@ impl Lowerer {
         &mut self,
         arg_vals: &mut Vec<Operand>,
         arg_types: &mut Vec<IrType>,
+        struct_arg_sizes: &mut Vec<Option<usize>>,
         param_ctypes: &Option<Vec<CType>>,
         args: &[Expr],
     ) {
@@ -905,6 +906,7 @@ impl Lowerer {
         let uses_packed_cf = self.uses_packed_complex_float();
         let mut new_vals = Vec::with_capacity(arg_vals.len() * 2);
         let mut new_types = Vec::with_capacity(arg_types.len() * 2);
+        let mut new_struct_sizes = Vec::with_capacity(struct_arg_sizes.len() * 2);
 
         for (i, (val, ty)) in arg_vals.iter().zip(arg_types.iter()).enumerate() {
             let ctype = pctypes.get(i);
@@ -934,6 +936,7 @@ impl Lowerer {
                 self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::F64 });
                 new_vals.push(Operand::Value(packed));
                 new_types.push(IrType::F64);
+                new_struct_sizes.push(None); // packed scalar, not a struct
                 continue;
             }
 
@@ -975,15 +978,19 @@ impl Lowerer {
 
                 new_vals.push(real);
                 new_types.push(comp_ty);
+                new_struct_sizes.push(None); // decomposed scalar
                 new_vals.push(imag);
                 new_types.push(comp_ty);
+                new_struct_sizes.push(None); // decomposed scalar
             } else {
                 new_vals.push(val.clone());
                 new_types.push(*ty);
+                new_struct_sizes.push(struct_arg_sizes.get(i).copied().flatten());
             }
         }
 
         *arg_vals = new_vals;
         *arg_types = new_types;
+        *struct_arg_sizes = new_struct_sizes;
     }
 }

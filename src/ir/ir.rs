@@ -281,6 +281,8 @@ pub enum Instruction {
         clobbers: Vec<String>,
         /// Types of operands (outputs first, then inputs) for register size selection
         operand_types: Vec<IrType>,
+        /// Goto labels for asm goto: (C label name, resolved block ID)
+        goto_labels: Vec<(String, BlockId)>,
     },
 
     /// Target-independent intrinsic operation (fences, SIMD, CRC32, etc.).

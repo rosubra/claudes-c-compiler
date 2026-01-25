@@ -2316,8 +2316,8 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {
-        emit_inline_asm_common(self, template, outputs, inputs, operand_types);
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)]) {
+        emit_inline_asm_common(self, template, outputs, inputs, operand_types, goto_labels);
     }
 
     fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
@@ -2624,10 +2624,13 @@ impl InlineAsmEmitter for ArmCodegen {
         }
     }
 
-    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], _gcc_to_internal: &[usize], _operand_types: &[IrType]) -> String {
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], _gcc_to_internal: &[usize], _operand_types: &[IrType], goto_labels: &[(String, BlockId)]) -> String {
         let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
         let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
-        Self::substitute_asm_operands_static(line, &op_regs, &op_names)
+        let mut result = Self::substitute_asm_operands_static(line, &op_regs, &op_names);
+        // Substitute %l[name] goto label references
+        result = crate::backend::inline_asm::substitute_goto_labels(&result, goto_labels, operands.len());
+        result
     }
 
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {

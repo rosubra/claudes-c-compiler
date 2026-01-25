@@ -1854,8 +1854,8 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {
-        emit_inline_asm_common(self, template, outputs, inputs, operand_types);
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)]) {
+        emit_inline_asm_common(self, template, outputs, inputs, operand_types, goto_labels);
     }
 
     fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
@@ -2064,6 +2064,10 @@ impl InlineAsmEmitter for X86Codegen {
         if c == "m" {
             return AsmOperandKind::Memory;
         }
+        // Immediate constraints: "i", "I", "n" — value must be a compile-time constant
+        if c == "i" || c == "I" || c == "n" {
+            return AsmOperandKind::Immediate;
+        }
         // Specific register constraints
         match c {
             "a" => AsmOperandKind::Specific("rax".to_string()),
@@ -2091,6 +2095,15 @@ impl InlineAsmEmitter for X86Codegen {
                             op.mem_addr = String::new();
                         }
                     }
+                }
+                _ => {}
+            }
+        }
+        if matches!(op.kind, AsmOperandKind::Immediate) {
+            // Extract the immediate constant value
+            match val {
+                Operand::Const(c) => {
+                    op.imm_value = c.to_i64();
                 }
                 _ => {}
             }
@@ -2179,12 +2192,13 @@ impl InlineAsmEmitter for X86Codegen {
         }
     }
 
-    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], operand_types: &[IrType]) -> String {
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], operand_types: &[IrType], goto_labels: &[(String, BlockId)]) -> String {
         // Build the parallel arrays that substitute_x86_asm_operands expects
         let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
         let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
         let op_is_memory: Vec<bool> = operands.iter().map(|o| matches!(o.kind, AsmOperandKind::Memory)).collect();
         let op_mem_addrs: Vec<String> = operands.iter().map(|o| o.mem_addr.clone()).collect();
+        let op_imm_values: Vec<Option<i64>> = operands.iter().map(|o| o.imm_value).collect();
 
         // Build operand type array for register size selection
         let total = operands.len();
@@ -2201,7 +2215,7 @@ impl InlineAsmEmitter for X86Codegen {
             }
         }
 
-        Self::substitute_x86_asm_operands(line, &op_regs, &op_names, &op_is_memory, &op_mem_addrs, &op_types, gcc_to_internal)
+        Self::substitute_x86_asm_operands(line, &op_regs, &op_names, &op_is_memory, &op_mem_addrs, &op_types, gcc_to_internal, goto_labels, &op_imm_values)
     }
 
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {

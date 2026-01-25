@@ -1206,7 +1206,7 @@ impl Lowerer {
                 self.start_block(label);
                 self.lower_stmt(stmt);
             }
-            Stmt::InlineAsm { template, outputs, inputs, clobbers } => {
+            Stmt::InlineAsm { template, outputs, inputs, clobbers, goto_labels } => {
                 let mut ir_outputs = Vec::new();
                 let mut ir_inputs = Vec::new();
                 let mut operand_types = Vec::new();
@@ -1272,12 +1272,19 @@ impl Lowerer {
                     operand_types.push(inp_ty);
                 }
 
+                // Resolve goto label names to block IDs
+                let ir_goto_labels: Vec<(String, BlockId)> = goto_labels.iter().map(|name| {
+                    let block = self.get_or_create_user_label(name);
+                    (name.clone(), block)
+                }).collect();
+
                 self.emit(Instruction::InlineAsm {
                     template: template.clone(),
                     outputs: ir_outputs,
                     inputs: ir_inputs,
                     clobbers: clobbers.clone(),
                     operand_types,
+                    goto_labels: ir_goto_labels,
                 });
             }
         }

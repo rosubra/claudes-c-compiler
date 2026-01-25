@@ -249,6 +249,7 @@ impl Parser {
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
         let mut clobbers = Vec::new();
+        let mut goto_labels = Vec::new();
 
         // First colon: outputs
         if matches!(self.peek(), TokenKind::Colon) {
@@ -265,12 +266,10 @@ impl Parser {
                     self.advance();
                     clobbers = self.parse_asm_clobbers();
 
-                    // Fourth colon: goto labels (just skip)
+                    // Fourth colon: goto labels
                     if matches!(self.peek(), TokenKind::Colon) {
                         self.advance();
-                        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                            self.advance();
-                        }
+                        goto_labels = self.parse_asm_goto_labels();
                     }
                 }
             }
@@ -279,7 +278,7 @@ impl Parser {
         self.expect(&TokenKind::RParen);
         self.consume_if(&TokenKind::Semicolon);
 
-        Stmt::InlineAsm { template, outputs, inputs, clobbers }
+        Stmt::InlineAsm { template, outputs, inputs, clobbers, goto_labels }
     }
 
     fn parse_asm_string(&mut self) -> String {
@@ -361,5 +360,26 @@ impl Parser {
             }
         }
         clobbers
+    }
+
+    /// Parse the goto labels section (fourth colon) of an asm goto statement.
+    /// Labels are comma-separated identifiers: `asm goto("..." : : : : label1, label2)`
+    fn parse_asm_goto_labels(&mut self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if matches!(self.peek(), TokenKind::RParen) {
+            return labels;
+        }
+        loop {
+            if let TokenKind::Identifier(ref name) = self.peek() {
+                labels.push(name.clone());
+                self.advance();
+            } else {
+                break;
+            }
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        labels
     }
 }

@@ -626,6 +626,15 @@ impl Parser {
             Expr::Cast(_, inner, _) => {
                 Self::eval_const_int_expr(inner)
             }
+            Expr::Sizeof(arg, _) => {
+                match arg.as_ref() {
+                    SizeofArg::Type(ts) => Some(Self::sizeof_type_spec(ts) as i64),
+                    SizeofArg::Expr(_) => None,
+                }
+            }
+            Expr::Alignof(ts, _) => {
+                Some(Self::alignof_type_spec(ts) as i64)
+            }
             _ => None,
         }
     }

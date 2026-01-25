@@ -578,14 +578,10 @@ impl Parser {
         self.advance(); // consume (
         if self.is_type_specifier() {
             if let Some(ts) = self.parse_type_specifier() {
-                let _result_type = self.parse_abstract_declarator_suffix(ts);
+                let result_type = self.parse_abstract_declarator_suffix(ts);
                 if matches!(self.peek(), TokenKind::RParen) {
                     self.advance(); // consume )
-                    // TODO: evaluate alignof(type) - for now, we'd need the
-                    // full type system to compute alignment. Return None to fall
-                    // back to default alignment for type-based _Alignas.
-                    // Most real code uses integer expressions for alignment.
-                    return None;
+                    return Some(Self::alignof_type_spec(&result_type));
                 }
             }
         }
@@ -598,5 +594,68 @@ impl Parser {
             self.advance();
         }
         Self::eval_const_int_expr(&expr).map(|v| v as usize)
+    }
+
+    /// Compute sizeof (in bytes) for a type specifier.
+    /// Used by sizeof(type) in parser-level constant evaluation.
+    pub(super) fn sizeof_type_spec(ts: &TypeSpecifier) -> usize {
+        match ts {
+            TypeSpecifier::Void | TypeSpecifier::Bool
+            | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
+            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
+            TypeSpecifier::Int | TypeSpecifier::UnsignedInt
+            | TypeSpecifier::Signed | TypeSpecifier::Unsigned
+            | TypeSpecifier::Float => 4,
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
+            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
+            | TypeSpecifier::Double
+            | TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
+            | TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::ComplexFloat => 8,
+            TypeSpecifier::ComplexDouble => 16,
+            TypeSpecifier::ComplexLongDouble => 32,
+            TypeSpecifier::Array(elem, Some(size_expr)) => {
+                let elem_size = Self::sizeof_type_spec(elem);
+                let count = Self::eval_const_int_expr(size_expr).unwrap_or(0) as usize;
+                elem_size * count
+            }
+            TypeSpecifier::Array(_, None) => 0,
+            TypeSpecifier::Enum(_, _) => 4,
+            _ => 8, // conservative default for struct/union/typedef
+        }
+    }
+
+    /// Compute alignment (in bytes) for a type specifier.
+    /// Used by _Alignas(type) to determine the alignment value.
+    pub(super) fn alignof_type_spec(ts: &TypeSpecifier) -> usize {
+        match ts {
+            TypeSpecifier::Void | TypeSpecifier::Bool
+            | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
+            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
+            TypeSpecifier::Int | TypeSpecifier::UnsignedInt
+            | TypeSpecifier::Signed | TypeSpecifier::Unsigned
+            | TypeSpecifier::Float => 4,
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
+            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
+            | TypeSpecifier::Double
+            | TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
+            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128
+            | TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::ComplexFloat => 4,
+            TypeSpecifier::ComplexDouble => 8,
+            TypeSpecifier::ComplexLongDouble => 16,
+            TypeSpecifier::Array(elem, _) => Self::alignof_type_spec(elem),
+            TypeSpecifier::Struct(_, _, is_packed, _, struct_aligned) => {
+                if *is_packed { return 1; }
+                if let Some(a) = struct_aligned { return *a; }
+                // Fallback: structs are at least 8-byte aligned on x86-64
+                8
+            }
+            TypeSpecifier::Union(..) => 8,
+            TypeSpecifier::Enum(_, _) => 4,
+            TypeSpecifier::TypedefName(_) => 8, // conservative default
+            _ => 8,
+        }
     }
 }

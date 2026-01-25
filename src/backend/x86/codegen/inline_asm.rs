@@ -5,10 +5,11 @@
 //! formatting with size modifiers (b/w/k/q/h/l).
 
 use crate::common::types::IrType;
+use crate::ir::ir::BlockId;
 use super::codegen::X86Codegen;
 
 impl X86Codegen {
-    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4 etc. in x86 asm template.
+    /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %l[name] etc. in x86 asm template.
     /// Uses operand_types to determine the default register size when no modifier is given.
     pub(super) fn substitute_x86_asm_operands(
         line: &str,
@@ -18,6 +19,8 @@ impl X86Codegen {
         op_mem_addrs: &[String],
         op_types: &[IrType],
         gcc_to_internal: &[usize],
+        goto_labels: &[(String, BlockId)],
+        op_imm_values: &[Option<i64>],
     ) -> String {
         let mut result = String::new();
         let chars: Vec<char> = line.chars().collect();
@@ -31,9 +34,51 @@ impl X86Codegen {
                     i += 1;
                     continue;
                 }
-                // Check for x86 size modifier: k (32), w (16), b (8-low), h (8-high), q (64), l (32-alt)
+                // Check for x86 size/format modifiers:
+                //   k (32), w (16), b (8-low), h (8-high), q (64), l (32-alt), c (raw constant)
+                // But 'l' followed by '[' may be a goto label reference %l[name]
                 let mut modifier = None;
-                if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l') {
+                if chars[i] == 'l' && i + 1 < chars.len() && chars[i + 1] == '[' && !goto_labels.is_empty() {
+                    // This could be %l[name] goto label reference
+                    // Parse the name and check if it's a goto label first
+                    let saved_i = i;
+                    i += 1; // skip 'l'
+                    i += 1; // skip '['
+                    let name_start = i;
+                    while i < chars.len() && chars[i] != ']' { i += 1; }
+                    let name: String = chars[name_start..i].iter().collect();
+                    if i < chars.len() { i += 1; } // skip ']'
+
+                    if let Some((_, block_id)) = goto_labels.iter().find(|(n, _)| n == &name) {
+                        // It's a goto label — emit the assembly label
+                        result.push_str(&block_id.to_string());
+                        continue;
+                    }
+                    // Not a goto label — backtrack and treat as %l (32-bit modifier) + [name]
+                    i = saved_i;
+                    modifier = Some('l');
+                    i += 1; // skip 'l', will parse [name] below
+                } else if chars[i] == 'l' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() && !goto_labels.is_empty() {
+                    // %l<N> could be a goto label positional reference
+                    let saved_i = i;
+                    i += 1; // skip 'l'
+                    let mut num = 0usize;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        num = num * 10 + (chars[i] as usize - '0' as usize);
+                        i += 1;
+                    }
+                    // GCC numbers goto labels after all operands.
+                    // %l<N> where N >= num_operands refers to label (N - num_operands).
+                    let label_idx = num.wrapping_sub(op_regs.len());
+                    if label_idx < goto_labels.len() {
+                        result.push_str(&goto_labels[label_idx].1.to_string());
+                        continue;
+                    }
+                    // Not a valid label index — backtrack
+                    i = saved_i;
+                    modifier = Some('l');
+                    i += 1;
+                } else if matches!(chars[i], 'k' | 'w' | 'b' | 'h' | 'q' | 'l' | 'c') {
                     if i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '[') {
                         modifier = Some(chars[i]);
                         i += 1;
@@ -54,7 +99,17 @@ impl X86Codegen {
                     for (idx, op_name) in op_names.iter().enumerate() {
                         if let Some(ref n) = op_name {
                             if n == &name {
-                                if op_is_memory[idx] {
+                                if modifier == Some('c') {
+                                    // %c[name]: raw constant — emit immediate value or register without prefix
+                                    if let Some(Some(imm)) = op_imm_values.get(idx) {
+                                        result.push_str(&format!("{}", imm));
+                                    } else {
+                                        result.push_str(&op_regs[idx]);
+                                    }
+                                } else if let Some(Some(imm)) = op_imm_values.get(idx) {
+                                    // Immediate operand — emit as $value
+                                    result.push_str(&format!("${}", imm));
+                                } else if op_is_memory[idx] {
                                     result.push_str(&op_mem_addrs[idx]);
                                 } else {
                                     let effective_mod = modifier.or_else(|| Self::default_modifier_for_type(op_types.get(idx).copied()));
@@ -87,7 +142,17 @@ impl X86Codegen {
                         num // fallback: direct mapping
                     };
                     if internal_idx < op_regs.len() {
-                        if op_is_memory[internal_idx] {
+                        if modifier == Some('c') {
+                            // %c<N>: raw constant — emit immediate value or register without prefix
+                            if let Some(Some(imm)) = op_imm_values.get(internal_idx) {
+                                result.push_str(&format!("{}", imm));
+                            } else {
+                                result.push_str(&op_regs[internal_idx]);
+                            }
+                        } else if let Some(Some(imm)) = op_imm_values.get(internal_idx) {
+                            // Immediate operand — emit as $value
+                            result.push_str(&format!("${}", imm));
+                        } else if op_is_memory[internal_idx] {
                             result.push_str(&op_mem_addrs[internal_idx]);
                         } else {
                             let effective_mod = modifier.or_else(|| Self::default_modifier_for_type(op_types.get(internal_idx).copied()));

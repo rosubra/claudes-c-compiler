@@ -10,7 +10,7 @@
 //! classification, loading, and storage. The shared `emit_inline_asm_common`
 //! orchestrates the phases.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::ir::{BlockId, Operand, Value};
 use crate::common::types::IrType;
 use super::state::CodegenState;
 
@@ -102,7 +102,7 @@ pub trait InlineAsmEmitter {
     fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value);
 
     /// Substitute operand references in a single template line and return the result.
-    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], operand_types: &[IrType]) -> String;
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], operand_types: &[IrType], goto_labels: &[(String, BlockId)]) -> String;
 
     /// Store an output register value back to its stack slot after the asm executes.
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, constraint: &str);
@@ -125,6 +125,7 @@ pub fn emit_inline_asm_common(
     outputs: &[(String, Value, Option<String>)],
     inputs: &[(String, Operand, Option<String>)],
     operand_types: &[IrType],
+    goto_labels: &[(String, BlockId)],
 ) {
     emitter.reset_scratch_state();
     let total_operands = outputs.len() + inputs.len();
@@ -285,7 +286,7 @@ pub fn emit_inline_asm_common(
         if line.is_empty() {
             continue;
         }
-        let resolved = emitter.substitute_template_line(line, &operands, &gcc_to_internal, operand_types);
+        let resolved = emitter.substitute_template_line(line, &operands, &gcc_to_internal, operand_types, goto_labels);
         emitter.asm_state().emit_fmt(format_args!("    {}", resolved));
     }
 
@@ -295,4 +296,71 @@ pub fn emit_inline_asm_common(
             emitter.store_output_from_reg(&operands[i], ptr, constraint);
         }
     }
+}
+
+/// Substitute `%l[name]` and `%lN` goto label references in an already-substituted line.
+/// In GCC asm goto, `%l[name]` resolves to the assembly label for the C goto label `name`,
+/// and `%lN` resolves to the label at index N (relative to the total number of
+/// output+input operands, so label 0 is at GCC operand index = num_operands).
+///
+/// This is called as a post-processing step after regular operand substitution,
+/// to handle any remaining `%l[...]` or `%l<digit>` patterns that weren't consumed.
+pub fn substitute_goto_labels(line: &str, goto_labels: &[(String, BlockId)], num_operands: usize) -> String {
+    if goto_labels.is_empty() {
+        return line.to_string();
+    }
+    let mut result = String::new();
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '%' && i + 1 < chars.len() && chars[i + 1] == 'l' {
+            // Check for %l[name] or %l<digit>
+            if i + 2 < chars.len() && chars[i + 2] == '[' {
+                // %l[name] - named goto label reference
+                let mut j = i + 3;
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                let name: String = chars[i + 3..j].iter().collect();
+                if j < chars.len() { j += 1; } // skip ]
+                // Look up the label name
+                if let Some((_, block_id)) = goto_labels.iter().find(|(n, _)| n == &name) {
+                    result.push_str(&block_id.to_string());
+                    i = j;
+                    continue;
+                }
+                // Not found - emit as-is
+                result.push(chars[i]);
+                i += 1;
+            } else if i + 2 < chars.len() && chars[i + 2].is_ascii_digit() {
+                // %l<digit> - positional goto label reference
+                // In GCC, %l0 refers to the first goto label (GCC numbers labels after operands)
+                let mut j = i + 2;
+                let mut num = 0usize;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    num = num * 10 + (chars[j] as usize - '0' as usize);
+                    j += 1;
+                }
+                // GCC numbers goto labels after all output+input operands.
+                // %l<N> where N >= num_operands refers to label (N - num_operands).
+                // If N < num_operands, this is not a valid label reference.
+                let label_idx = num.wrapping_sub(num_operands);
+                if label_idx < goto_labels.len() {
+                    result.push_str(&goto_labels[label_idx].1.to_string());
+                    i = j;
+                    continue;
+                }
+                // Not found - emit as-is
+                result.push(chars[i]);
+                i += 1;
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
 }
