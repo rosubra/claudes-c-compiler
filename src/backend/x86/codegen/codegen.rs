@@ -1406,6 +1406,7 @@ impl ArchCodegen for X86Codegen {
         if need_align_pad {
             self.state.emit("    subq $8, %rsp");
         }
+        let arg_padding = crate::backend::call_abi::compute_stack_arg_padding(arg_classes);
         let stack_indices: Vec<usize> = (0..args.len())
             .filter(|&i| arg_classes[i].is_stack())
             .collect();
@@ -1467,6 +1468,12 @@ impl ArchCodegen for X86Codegen {
                     self.state.emit("    pushq %rax");
                 }
                 _ => {}
+            }
+            // In reverse push order, forward-layout padding (before arg in memory)
+            // must be emitted after the arg push (subq to reserve padding space).
+            let pad = arg_padding[si];
+            if pad > 0 {
+                self.state.emit(&format!("    subq ${}, %rsp", pad));
             }
         }
         // Return total SP adjustment (for x86 this doesn't affect register arg loading)
@@ -1617,17 +1624,20 @@ impl ArchCodegen for X86Codegen {
         }
 
         if is_f128 {
-            // F128 (long double) on x86-64: always from overflow_arg_area, 16 bytes.
-            // Read 10-byte x87 extended precision from overflow area, convert to f64.
+            // F128 (long double) on x86-64: always from overflow_arg_area, 16-byte aligned.
+            // Per ABI, align overflow_arg_area to 16 before reading long double.
             self.state.emit("    movq 8(%rcx), %rdx");       // overflow_arg_area
+            self.state.emit("    addq $15, %rdx");           // align up to 16
+            self.state.emit("    andq $-16, %rdx");
             // Use x87 to load 80-bit extended and convert to f64
             self.state.emit("    fldt (%rdx)");              // load 80-bit extended from [rdx]
             self.state.emit("    subq $8, %rsp");            // temp space for f64
             self.state.emit("    fstpl (%rsp)");             // store as f64 to [rsp]
             self.state.emit("    movq (%rsp), %rax");        // load f64 bit pattern into rax
             self.state.emit("    addq $8, %rsp");            // free temp space
-            // Advance overflow_arg_area by 16 (x87 long double is 16-byte aligned on stack)
-            self.state.emit("    addq $16, 8(%rcx)");
+            // Advance overflow_arg_area past this 16-byte long double (from aligned position)
+            self.state.emit("    addq $16, %rdx");
+            self.state.emit("    movq %rdx, 8(%rcx)");
             // Store result and jump to end
             if let Some(slot) = self.state.get_slot(dest.0) {
                 self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
