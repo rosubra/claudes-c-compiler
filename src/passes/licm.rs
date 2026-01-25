@@ -11,21 +11,18 @@
 //! - Array index computations (i * n) in inner loops
 //! - Address calculations that depend on outer loop variables
 //! - Casts and extensions of loop-invariant values
-//! - **Loads from loop-invariant addresses not modified within the loop**
-//!   (e.g., function parameter loads, global constant loads)
 //!
 //! The pass requires loops to have a single-entry preheader block. Loops with
 //! multiple outside predecessors are skipped (a future improvement could create
 //! dedicated preheader blocks for these cases).
 //!
-//! Safety: Pure (side-effect-free) instructions are always hoisted. Loads are
-//! hoisted only when we can prove the memory location is not modified inside
-//! the loop — specifically, loads from allocas that have no stores within the
-//! loop body, provided no calls in the loop could alias the alloca (ensured by
-//! checking that the alloca is not address-taken, i.e., only used by Load/Store).
+//! Safety: Pure (side-effect-free) instructions are always hoisted. Load
+//! hoisting is currently **disabled** because the alias analysis is not precise
+//! enough to handle stores through GEP-derived pointers that modify memory
+//! within an alloca (e.g., struct field stores).  Re-enable once proper alias
+//! analysis is implemented.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::common::types::IrType;
 use crate::ir::analysis;
 use crate::ir::ir::*;
 
@@ -79,6 +76,9 @@ fn licm_function(func: &mut IrFunction) -> usize {
     // Pre-compute function-level alloca analysis for load hoisting.
     let alloca_info = analyze_allocas(func);
 
+    // Build a map from pointer value IDs to their base alloca (tracing through GEP/Copy).
+    let base_ptr_map = build_base_pointer_map(func, &alloca_info.alloca_values);
+
     let mut total_hoisted = 0;
 
     // Process loops from innermost to outermost (smaller loops first).
@@ -87,7 +87,7 @@ fn licm_function(func: &mut IrFunction) -> usize {
     sorted_loops.sort_by_key(|l| l.body.len());
 
     for natural_loop in &sorted_loops {
-        total_hoisted += hoist_loop_invariants(func, natural_loop, &preds, &idom, &alloca_info);
+        total_hoisted += hoist_loop_invariants(func, natural_loop, &preds, &idom, &alloca_info, &base_ptr_map);
     }
 
     total_hoisted
@@ -425,17 +425,67 @@ struct LoopMemoryInfo {
     has_calls: bool,
 }
 
+/// Build a map from value IDs to their base alloca, tracing through GEP and Copy chains.
+///
+/// When the compiler lowers `s.field` where `s` is a struct alloca, field accesses at
+/// offset 0 reuse the alloca pointer directly, while non-zero offsets go through GEP.
+/// A store to `GEP(alloca, offset)` modifies memory within the alloca, so we must
+/// track this relationship to avoid incorrectly hoisting loads from the alloca.
+fn build_base_pointer_map(func: &IrFunction, alloca_values: &FxHashSet<u32>) -> FxHashMap<u32, u32> {
+    let mut base_map: FxHashMap<u32, u32> = FxHashMap::default();
+
+    // Every alloca maps to itself.
+    for &a in alloca_values {
+        base_map.insert(a, a);
+    }
+
+    // Trace GEP and Copy chains to find base allocas.
+    // We need multiple passes since a GEP might use another GEP's result.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    Instruction::GetElementPtr { dest, base, .. } => {
+                        if !base_map.contains_key(&dest.0) {
+                            if let Some(&base_alloca) = base_map.get(&base.0) {
+                                base_map.insert(dest.0, base_alloca);
+                                changed = true;
+                            }
+                        }
+                    }
+                    Instruction::Copy { dest, src: Operand::Value(src_val), .. } => {
+                        if !base_map.contains_key(&dest.0) {
+                            if let Some(&base_alloca) = base_map.get(&src_val.0) {
+                                base_map.insert(dest.0, base_alloca);
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    base_map
+}
+
 /// Scan a loop body to determine which allocas are modified and whether calls exist.
 fn analyze_loop_memory(
     func: &IrFunction,
     loop_body: &FxHashSet<usize>,
+    base_ptr_map: &FxHashMap<u32, u32>,
 ) -> LoopMemoryInfo {
     let mut stored_allocas = FxHashSet::default();
     let mut has_calls = false;
 
-    let collect_ptr = |op: &Operand, set: &mut FxHashSet<u32>| {
-        if let Operand::Value(v) = op {
-            set.insert(v.0);
+    let mut mark_stored = |ptr_id: u32| {
+        stored_allocas.insert(ptr_id);
+        // Also mark the base alloca if this pointer derives from one via GEP/Copy.
+        if let Some(&base) = base_ptr_map.get(&ptr_id) {
+            stored_allocas.insert(base);
         }
     };
 
@@ -446,7 +496,7 @@ fn analyze_loop_memory(
         for inst in &func.blocks[block_idx].instructions {
             match inst {
                 Instruction::Store { ptr, .. } => {
-                    stored_allocas.insert(ptr.0);
+                    mark_stored(ptr.0);
                 }
                 Instruction::Call { .. } | Instruction::CallIndirect { .. } => {
                     has_calls = true;
@@ -456,19 +506,25 @@ fn analyze_loop_memory(
                     has_calls = true; // Conservative: treat as a call
                 }
                 Instruction::AtomicRmw { ptr, .. } => {
-                    collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        mark_stored(v.0);
+                    }
                     has_calls = true;
                 }
                 Instruction::AtomicCmpxchg { ptr, .. } => {
-                    collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        mark_stored(v.0);
+                    }
                     has_calls = true;
                 }
                 Instruction::AtomicStore { ptr, .. } => {
-                    collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        mark_stored(v.0);
+                    }
                     has_calls = true;
                 }
                 Instruction::Memcpy { dest, .. } => {
-                    stored_allocas.insert(dest.0);
+                    mark_stored(dest.0);
                 }
                 _ => {}
             }
@@ -488,6 +544,8 @@ fn analyze_loop_memory(
 ///       (no call can modify it since its address never escapes)
 ///    c. If ptr is an alloca that IS address-taken: unsafe if the loop has calls
 ///       (a call could modify it through the escaped pointer)
+// TODO: Re-enable once field-sensitive alias analysis is implemented.
+#[allow(dead_code)]
 fn is_load_hoistable(
     ptr: &Value,
     alloca_info: &AllocaAnalysis,
@@ -535,7 +593,8 @@ fn hoist_loop_invariants(
     natural_loop: &NaturalLoop,
     preds: &[Vec<usize>],
     idom: &[usize],
-    alloca_info: &AllocaAnalysis,
+    _alloca_info: &AllocaAnalysis, // TODO: used by load hoisting when re-enabled
+    base_ptr_map: &FxHashMap<u32, u32>,
 ) -> usize {
     let header = natural_loop.header;
 
@@ -560,8 +619,9 @@ fn hoist_loop_invariants(
         }
     }
 
-    // Analyze loop memory for load hoisting.
-    let loop_mem = analyze_loop_memory(func, &natural_loop.body);
+    // TODO: Re-enable load hoisting once field-sensitive alias analysis is implemented.
+    // analyze_loop_memory is kept here to exercise the base_ptr_map tracking logic.
+    let _loop_mem = analyze_loop_memory(func, &natural_loop.body, base_ptr_map);
 
     // Iteratively identify loop-invariant instructions.
     // An instruction is loop-invariant if:
@@ -598,14 +658,14 @@ fn hoist_loop_invariants(
                     operand_vals.iter().all(|&val_id| {
                         !loop_defined.contains(&val_id) || invariant.contains(&val_id)
                     })
-                } else if let Instruction::Load { ptr, ty, .. } = inst {
-                    // Load instruction: check if safe to hoist
-                    // TODO: Extend to also hoist float/long double/i128 loads
-                    // once the backend register paths for those types support it.
-                    !ty.is_float() && !ty.is_long_double()
-                        && !matches!(ty, IrType::I128 | IrType::U128)
-                        && is_load_hoistable(ptr, alloca_info, &loop_mem,
-                                             &loop_defined, &invariant)
+                } else if let Instruction::Load { .. } = inst {
+                    // Load hoisting is disabled: the alias analysis is not
+                    // precise enough to determine when a load from an alloca
+                    // is safe to hoist past stores through GEP-derived pointers
+                    // (e.g., struct field stores that modify memory within the
+                    // same alloca).  Re-enable once proper alias analysis is
+                    // implemented.
+                    false
                 } else {
                     false
                 };
@@ -897,7 +957,8 @@ mod tests {
         let idom = analysis::compute_dominators(func.blocks.len(), &preds, &_succs);
         let loops = find_natural_loops(func.blocks.len(), &preds, &_succs, &idom);
 
-        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
+        let base_ptr_map = build_base_pointer_map(&func, &alloca_info.alloca_values);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info, &base_ptr_map);
 
         // n * 4 should be hoisted (1 instruction)
         assert_eq!(hoisted, 1);
@@ -943,8 +1004,9 @@ mod tests {
     }
 
     #[test]
-    fn test_licm_hoists_load_from_unmodified_alloca() {
-        // Test: load from an alloca that is NOT stored to in the loop should be hoisted.
+    fn test_licm_does_not_hoist_loads() {
+        // Test: load hoisting is disabled, so even loads from allocas that are
+        // NOT stored to in the loop must NOT be hoisted.
         //
         // entry:
         //   %0 = alloca i32       (parameter alloca for 'n')
@@ -953,7 +1015,7 @@ mod tests {
         //
         // loop_header:
         //   %2 = phi [%init, entry], [%5, body]
-        //   %3 = load %0          (load from alloca - should be hoisted!)
+        //   %3 = load %0          (load from alloca - NOT hoisted)
         //   %cmp = cmp slt %2, %3
         //   br %cmp, body, exit
         //
@@ -1052,20 +1114,17 @@ mod tests {
         let loops = find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
 
         assert_eq!(loops.len(), 1);
-        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
+        let base_ptr_map = build_base_pointer_map(&func, &alloca_info.alloca_values);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info, &base_ptr_map);
 
-        // The load from %0 should be hoisted (1 instruction)
-        assert_eq!(hoisted, 1);
+        // Load hoisting is disabled, so nothing should be hoisted
+        assert_eq!(hoisted, 0);
 
-        // The preheader (block 0) should now have 4 instructions (alloca + store + copy + load)
-        assert_eq!(func.blocks[0].instructions.len(), 4);
+        // The preheader (block 0) should be unchanged (alloca + store + copy)
+        assert_eq!(func.blocks[0].instructions.len(), 3);
 
-        // The loop header (block 1) should have lost the load
-        assert_eq!(func.blocks[1].instructions.len(), 2); // phi + cmp
-
-        // The hoisted instruction should be the Load
-        let hoisted_inst = func.blocks[0].instructions.last().unwrap();
-        assert!(matches!(hoisted_inst, Instruction::Load { .. }));
+        // The loop header (block 1) should still have the load
+        assert_eq!(func.blocks[1].instructions.len(), 3); // phi + load + cmp
     }
 
     #[test]
@@ -1153,7 +1212,8 @@ mod tests {
         let loops = find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
 
         assert_eq!(loops.len(), 1);
-        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info);
+        let base_ptr_map = build_base_pointer_map(&func, &alloca_info.alloca_values);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &idom, &alloca_info, &base_ptr_map);
 
         // Nothing should be hoisted because the alloca is stored to in the loop
         assert_eq!(hoisted, 0);

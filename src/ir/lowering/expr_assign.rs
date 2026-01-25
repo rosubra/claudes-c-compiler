@@ -147,14 +147,25 @@ impl Lowerer {
     /// Try to lower assignment to a bitfield member.
     fn try_lower_bitfield_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(lhs)?;
+        let is_bool = self.is_bool_lvalue(lhs);
         let rhs_val = self.lower_expr(rhs);
-        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, rhs_val.clone());
-        Some(self.truncate_to_bitfield_value(rhs_val, bit_width, storage_ty.is_signed()))
+        // C standard 6.3.1.2: assigning to _Bool converts the value to 0 or 1
+        // (any nonzero becomes 1) BEFORE bitfield truncation. Without this,
+        // e.g. `s.bool_bf = 2` would mask 2 (0b10) to 1 bit = 0, not 1.
+        let store_val = if is_bool {
+            let rhs_ty = self.get_expr_type(rhs);
+            self.emit_bool_normalize_typed(rhs_val.clone(), rhs_ty)
+        } else {
+            rhs_val.clone()
+        };
+        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, store_val.clone());
+        Some(self.truncate_to_bitfield_value(store_val, bit_width, storage_ty.is_signed()))
     }
 
     /// Try to lower compound assignment to a bitfield member (e.g., s.bf += val).
     pub(super) fn try_lower_bitfield_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
         let (field_addr, storage_ty, bit_offset, bit_width) = self.resolve_bitfield_lvalue(lhs)?;
+        let is_bool = self.is_bool_lvalue(lhs);
 
         let current_val = self.extract_bitfield_from_addr(field_addr, storage_ty, bit_offset, bit_width);
 
@@ -164,8 +175,16 @@ impl Lowerer {
         let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
         let result = self.emit_binop_val(ir_op, current_val, rhs_val, IrType::I64);
 
-        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, Operand::Value(result));
-        Some(self.truncate_to_bitfield_value(Operand::Value(result), bit_width, storage_ty.is_signed()))
+        // C standard 6.3.1.2: when the target is _Bool, normalize the result
+        // to 0 or 1 before storing into the bitfield.
+        let store_val = if is_bool {
+            self.emit_bool_normalize_typed(Operand::Value(result), IrType::I64)
+        } else {
+            Operand::Value(result)
+        };
+
+        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, store_val.clone());
+        Some(self.truncate_to_bitfield_value(store_val, bit_width, storage_ty.is_signed()))
     }
 
     /// Store a value into a bitfield: load storage unit, clear field bits, OR in new value, store back.
