@@ -73,7 +73,7 @@ pub trait ArchCodegen {
                     SlotAddr::Direct(slot) => self.emit_store_pair_to_slot(slot),
                     SlotAddr::Indirect(slot) => {
                         self.emit_save_acc_pair();
-                        self.emit_load_ptr_from_slot(slot);
+                        self.emit_load_ptr_from_slot(slot, ptr.0);
                         self.emit_store_pair_indirect();
                     }
                 }
@@ -92,7 +92,7 @@ pub trait ArchCodegen {
                 SlotAddr::Direct(slot) => self.emit_typed_store_to_slot(store_instr, ty, slot),
                 SlotAddr::Indirect(slot) => {
                     self.emit_save_acc();
-                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_load_ptr_from_slot(slot, ptr.0);
                     self.emit_typed_store_indirect(store_instr, ty);
                 }
             }
@@ -112,7 +112,7 @@ pub trait ArchCodegen {
                     }
                     SlotAddr::Direct(slot) => self.emit_load_pair_from_slot(slot),
                     SlotAddr::Indirect(slot) => {
-                        self.emit_load_ptr_from_slot(slot);
+                        self.emit_load_ptr_from_slot(slot, ptr.0);
                         self.emit_load_pair_indirect();
                     }
                 }
@@ -129,7 +129,7 @@ pub trait ArchCodegen {
                 }
                 SlotAddr::Direct(slot) => self.emit_typed_load_from_slot(load_instr, slot),
                 SlotAddr::Indirect(slot) => {
-                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_load_ptr_from_slot(slot, ptr.0);
                     self.emit_typed_load_indirect(load_instr);
                 }
             }
@@ -301,8 +301,8 @@ pub trait ArchCodegen {
                     self.emit_alloca_aligned_addr_to_acc(slot, id);
                     self.emit_acc_to_secondary();
                 }
-                SlotAddr::Direct(slot) => self.emit_slot_addr_to_secondary(slot, true),
-                SlotAddr::Indirect(slot) => self.emit_slot_addr_to_secondary(slot, false),
+                SlotAddr::Direct(slot) => self.emit_slot_addr_to_secondary(slot, true, base.0),
+                SlotAddr::Indirect(slot) => self.emit_slot_addr_to_secondary(slot, false, base.0),
             }
         }
         self.emit_load_operand(offset);
@@ -359,8 +359,8 @@ pub trait ArchCodegen {
                     self.emit_alloca_aligned_addr(slot, id);
                     self.emit_memcpy_store_dest_from_acc();
                 }
-                SlotAddr::Direct(slot) => self.emit_memcpy_load_dest_addr(slot, true),
-                SlotAddr::Indirect(slot) => self.emit_memcpy_load_dest_addr(slot, false),
+                SlotAddr::Direct(slot) => self.emit_memcpy_load_dest_addr(slot, true, dest.0),
+                SlotAddr::Indirect(slot) => self.emit_memcpy_load_dest_addr(slot, false, dest.0),
             }
         }
         if let Some(addr) = self.state_ref().resolve_slot_addr(src.0) {
@@ -369,8 +369,8 @@ pub trait ArchCodegen {
                     self.emit_alloca_aligned_addr(slot, id);
                     self.emit_memcpy_store_src_from_acc();
                 }
-                SlotAddr::Direct(slot) => self.emit_memcpy_load_src_addr(slot, true),
-                SlotAddr::Indirect(slot) => self.emit_memcpy_load_src_addr(slot, false),
+                SlotAddr::Direct(slot) => self.emit_memcpy_load_src_addr(slot, true, src.0),
+                SlotAddr::Indirect(slot) => self.emit_memcpy_load_src_addr(slot, false, src.0),
             }
         }
         self.emit_memcpy_impl(size);
@@ -513,7 +513,9 @@ pub trait ArchCodegen {
     fn emit_save_acc(&mut self);
 
     /// Load a pointer value from a non-alloca slot into the address register.
-    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot);
+    /// `val_id` is the IR value ID of the pointer, allowing register-aware backends
+    /// to load from a callee-saved register instead of the stack slot.
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, val_id: u32);
 
     /// Store the saved accumulator through the address register.
     fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType);
@@ -524,7 +526,9 @@ pub trait ArchCodegen {
     // --- GEP primitives ---
 
     /// Load a slot's effective address into a secondary register.
-    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool);
+    /// `val_id` is the IR value ID, allowing register-aware backends to use
+    /// a callee-saved register instead of loading from the stack slot.
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32);
 
     /// Add the secondary register to the accumulator.
     fn emit_add_secondary_to_acc(&mut self);
@@ -546,10 +550,12 @@ pub trait ArchCodegen {
     // --- Memcpy primitives ---
 
     /// Load the dest address for memcpy into the arch-specific dest register.
-    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool);
+    /// `val_id` is the IR value ID for register-aware backends.
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32);
 
     /// Load the src address for memcpy into the arch-specific src register.
-    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool);
+    /// `val_id` is the IR value ID for register-aware backends.
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32);
 
     /// Emit the actual copy loop/instruction for memcpy.
     fn emit_memcpy_impl(&mut self, size: usize);

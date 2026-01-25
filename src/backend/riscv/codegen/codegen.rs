@@ -263,18 +263,18 @@ impl RiscvCodegen {
         }
     }
 
-    /// Store t0 to a value's location (register and/or stack slot).
-    /// Write-through strategy: always write to stack slot for safety (other code
-    /// paths may read it directly), and also write to the callee-saved register
-    /// so subsequent loads via operand_to_t0 can use the fast register path.
+    /// Store t0 to a value's location (register or stack slot).
+    /// Register-only strategy: if the value has a callee-saved register assignment,
+    /// store ONLY to the register (skip the stack write). This eliminates redundant
+    /// memory stores for register-allocated values.
     fn store_t0_to(&mut self, dest: &Value) {
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            self.emit_store_to_s0("t0", slot.0, "sd");
-        }
-        // Also mirror to the assigned callee-saved register.
         if let Some(&reg) = self.reg_assignments.get(&dest.0) {
+            // Value has a callee-saved register: store only to register, skip stack.
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mv {}, t0", reg_name));
+        } else if let Some(slot) = self.state.get_slot(dest.0) {
+            // No register: store to stack slot.
+            self.emit_store_to_s0("t0", slot.0, "sd");
         }
         self.state.reg_cache.set_acc(dest.0, false);
     }
@@ -1211,8 +1211,14 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t3, t0");
     }
 
-    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot) {
-        self.emit_load_from_s0("t5", slot.0, "ld");
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, val_id: u32) {
+        // Check register allocation: use callee-saved register if available.
+        if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv t5, {}", reg_name));
+        } else {
+            self.emit_load_from_s0("t5", slot.0, "ld");
+        }
     }
 
     fn emit_typed_store_indirect(&mut self, instr: &'static str, _ty: IrType) {
@@ -1225,9 +1231,12 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit_fmt(format_args!("    {} t0, 0(t5)", instr));
     }
 
-    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.emit_addi_s0("t1", slot.0);
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv t1, {}", reg_name));
         } else {
             self.emit_load_from_s0("t1", slot.0, "ld");
         }
@@ -1255,17 +1264,23 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit_fmt(format_args!("    andi t0, t0, -{}", align));
     }
 
-    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.emit_addi_s0("t1", slot.0);
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv t1, {}", reg_name));
         } else {
             self.emit_load_from_s0("t1", slot.0, "ld");
         }
     }
 
-    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.emit_addi_s0("t2", slot.0);
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv t2, {}", reg_name));
         } else {
             self.emit_load_from_s0("t2", slot.0, "ld");
         }

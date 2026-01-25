@@ -11,10 +11,10 @@ Code generation targeting the RISC-V 64-bit (RV64GC) architecture.
 
 ## Register Allocation
 
-The RISC-V backend includes a linear scan register allocator that assigns callee-saved registers to frequently-used IR values. This is the first backend with register allocation; x86 and ARM remain stack-only.
+The RISC-V backend includes a linear scan register allocator that assigns callee-saved registers to frequently-used IR values. The x86 backend also has register allocation; ARM remains stack-only.
 
 **Allocated registers**: s1, s7-s11 (6 registers). s0 is the frame pointer; s2-s6 are reserved as temporaries for `emit_call_reg_args`.
 
-**Strategy**: Write-through — values are always stored to both the stack slot and the callee-saved register. Reads check the register first (`operand_to_t0`). This ensures safety since some codegen paths bypass `store_t0_to`.
+**Strategy**: Register-only — values with a callee-saved register assignment are stored only to the register, skipping the stack slot entirely. All load paths (including `operand_to_t0`, pointer loads for Store/Load/GEP/Memcpy) check register assignments before falling back to stack loads.
 
 **Disabled for**: functions with loops (back-edges in CFG), inline assembly, atomic operations, float/i128/long-double types. Only BinOp, UnaryOp, Cmp, Cast, Load, and GEP results are eligible.

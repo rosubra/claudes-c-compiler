@@ -1022,7 +1022,7 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    mov x1, x0");
     }
 
-    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot) {
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, _val_id: u32) {
         self.emit_load_from_sp("x9", slot.0, "ldr");
     }
 
@@ -1036,7 +1036,7 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit_fmt(format_args!("    {} {}, [x9]", actual_instr, dest_reg));
     }
 
-    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, _val_id: u32) {
         if is_alloca {
             self.emit_add_sp_offset("x1", slot.0);
         } else {
@@ -1066,7 +1066,7 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit_fmt(format_args!("    and x0, x0, #{}", -(align as i64)));
     }
 
-    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, _val_id: u32) {
         if is_alloca {
             self.emit_add_sp_offset("x9", slot.0);
         } else {
@@ -1074,7 +1074,7 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, _val_id: u32) {
         if is_alloca {
             self.emit_add_sp_offset("x10", slot.0);
         } else {

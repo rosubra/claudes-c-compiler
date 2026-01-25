@@ -161,18 +161,19 @@ impl X86Codegen {
         }
     }
 
-    /// Store %rax to a value's location (register and/or stack slot).
-    /// Write-through strategy: always write to stack slot for safety (other code
-    /// paths may read it directly), and also write to the callee-saved register
-    /// so subsequent loads via operand_to_rax can use the fast register path.
+    /// Store %rax to a value's location (register or stack slot).
+    /// Register-only strategy: if the value has a callee-saved register assignment,
+    /// store ONLY to the register (skip the stack write). This eliminates redundant
+    /// memory stores for register-allocated values. Values without a register
+    /// assignment are stored to their stack slot as before.
     fn store_rax_to(&mut self, dest: &Value) {
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", slot.0));
-        }
-        // Also mirror to the assigned callee-saved register.
         if let Some(&reg) = self.reg_assignments.get(&dest.0) {
+            // Value has a callee-saved register: store only to register, skip stack.
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    movq %rax, %{}", reg_name));
+        } else if let Some(slot) = self.state.get_slot(dest.0) {
+            // No register: store to stack slot.
+            self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", slot.0));
         }
         // After storing to dest, %rax still holds dest's value
         self.state.reg_cache.set_acc(dest.0, false);
@@ -1141,13 +1142,19 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    movq %rax, %rdx");
     }
 
-    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot) {
+    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, val_id: u32) {
         // Load pointer to rcx. Used by all indirect paths:
         // - i128 store: pair saved to rsi:rdi, ptr to rcx (no conflict)
         // - regular store: val saved to rdx, ptr to rcx (no conflict)
         // - i128 load: ptr to rcx, then load pair through rcx
         // - regular load: ptr to rcx, then load through rcx
-        self.state.emit_fmt(format_args!("    movq {}(%rbp), %rcx", slot.0));
+        // Check register allocation: use callee-saved register if available.
+        if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rcx", reg_name));
+        } else {
+            self.state.emit_fmt(format_args!("    movq {}(%rbp), %rcx", slot.0));
+        }
     }
 
     fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType) {
@@ -1162,10 +1169,14 @@ impl ArchCodegen for X86Codegen {
         self.state.emit_fmt(format_args!("    {} (%rcx), {}", instr, dest_reg));
     }
 
-    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         // Load base address directly into rcx (no push/pop needed).
         if is_alloca {
             self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rcx", slot.0));
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            // Register-allocated: use callee-saved register directly.
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rcx", reg_name));
         } else {
             self.state.emit_fmt(format_args!("    movq {}(%rbp), %rcx", slot.0));
         }
@@ -1199,17 +1210,23 @@ impl ArchCodegen for X86Codegen {
         self.state.reg_cache.invalidate_all();
     }
 
-    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rdi", slot.0));
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rdi", reg_name));
         } else {
             self.state.emit_fmt(format_args!("    movq {}(%rbp), %rdi", slot.0));
         }
     }
 
-    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool) {
+    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
             self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rsi", slot.0));
+        } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rsi", reg_name));
         } else {
             self.state.emit_fmt(format_args!("    movq {}(%rbp), %rsi", slot.0));
         }
@@ -1849,8 +1866,12 @@ impl ArchCodegen for X86Codegen {
         let label_mem = self.state.fresh_label("va_arg_mem");
         let label_end = self.state.fresh_label("va_arg_end");
 
-        // Load va_list pointer into %rcx
-        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+        // Load va_list pointer into %rcx (register-aware).
+        if let Some(&reg) = self.reg_assignments.get(&va_list_ptr.0) {
+            // Value is in a callee-saved register.
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rcx", reg_name));
+        } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
                 self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rcx", slot.0));
             } else {
@@ -1873,10 +1894,8 @@ impl ArchCodegen for X86Codegen {
             // Advance overflow_arg_area past this 16-byte long double (from aligned position)
             self.state.emit("    addq $16, %rdx");
             self.state.emit("    movq %rdx, 8(%rcx)");
-            // Store result and jump to end
-            if let Some(slot) = self.state.get_slot(dest.0) {
-                self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", slot.0));
-            }
+            // Store result via store_rax_to to handle register-allocated destinations.
+            self.store_rax_to(dest);
             self.state.reg_cache.invalidate_all();
             return;
         } else if is_fp {
@@ -1933,10 +1952,8 @@ impl ArchCodegen for X86Codegen {
 
         // End
         self.state.emit_fmt(format_args!("{}:", label_end));
-        // Store result
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", slot.0));
-        }
+        // Store result via store_rax_to to handle register-allocated destinations.
+        self.store_rax_to(dest);
         self.state.reg_cache.invalidate_all(); // complex control flow, don't track
     }
 
@@ -1949,8 +1966,11 @@ impl ArchCodegen for X86Codegen {
         //   [8]  void* overflow_arg_area: pointer to next stack-passed arg
         //   [16] void* reg_save_area:   pointer to saved register args
 
-        // Load va_list pointer into %rax
-        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+        // Load va_list pointer into %rax (register-aware).
+        if let Some(&reg) = self.reg_assignments.get(&va_list_ptr.0) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rax", reg_name));
+        } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
             if self.state.is_alloca(va_list_ptr.0) {
                 self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rax", slot.0));
             } else {
@@ -1986,15 +2006,21 @@ impl ArchCodegen for X86Codegen {
     // emit_va_end: uses default no-op implementation
 
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
-        // Copy 24 bytes from src va_list to dest va_list
-        if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
+        // Copy 24 bytes from src va_list to dest va_list (register-aware).
+        if let Some(&reg) = self.reg_assignments.get(&src_ptr.0) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rsi", reg_name));
+        } else if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
             if self.state.is_alloca(src_ptr.0) {
                 self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rsi", src_slot.0));
             } else {
                 self.state.emit_fmt(format_args!("    movq {}(%rbp), %rsi", src_slot.0));
             }
         }
-        if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
+        if let Some(&reg) = self.reg_assignments.get(&dest_ptr.0) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    movq %{}, %rdi", reg_name));
+        } else if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
             if self.state.is_alloca(dest_ptr.0) {
                 self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rdi", dest_slot.0));
             } else {
