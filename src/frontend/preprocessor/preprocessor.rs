@@ -130,281 +130,165 @@ impl Preprocessor {
     }
 
     /// Define standard predefined macros.
+    ///
+    /// Object-like macros are defined via a static table to keep this compact.
+    /// Function-like macros (with parameters) are defined individually below.
     fn define_predefined_macros(&mut self) {
-        // Standard C predefined macros
-        self.define_simple_macro("__STDC__", "1");
-        self.define_simple_macro("__STDC_VERSION__", "201710L"); // C17
-        self.define_simple_macro("__STDC_HOSTED__", "1");
+        // All object-like predefined macros as (name, body) pairs.
+        // Grouped by category; order matches GCC's predefined macro output.
+        const PREDEFINED_OBJECT_MACROS: &[(&str, &str)] = &[
+            // Standard C
+            ("__STDC__", "1"),
+            ("__STDC_VERSION__", "201710L"), // C17
+            ("__STDC_HOSTED__", "1"),
+            // Platform
+            ("__linux__", "1"), ("__linux", "1"), ("linux", "1"),
+            ("__unix__", "1"), ("__unix", "1"), ("unix", "1"),
+            ("__LP64__", "1"), ("_LP64", "1"),
+            // Default arch: x86_64 (overridden by set_target)
+            ("__x86_64__", "1"), ("__x86_64", "1"),
+            ("__amd64__", "1"), ("__amd64", "1"),
+            // GCC compat: claim GCC 4.8 (we support bswap16/32/64, clz, ctz, etc.)
+            ("__GNUC__", "4"), ("__GNUC_MINOR__", "8"), ("__GNUC_PATCHLEVEL__", "0"),
+            // sizeof macros
+            ("__SIZEOF_POINTER__", "8"), ("__SIZEOF_INT__", "4"),
+            ("__SIZEOF_LONG__", "8"), ("__SIZEOF_LONG_LONG__", "8"),
+            ("__SIZEOF_SHORT__", "2"), ("__SIZEOF_FLOAT__", "4"),
+            ("__SIZEOF_DOUBLE__", "8"), ("__SIZEOF_SIZE_T__", "8"),
+            ("__SIZEOF_PTRDIFF_T__", "8"), ("__SIZEOF_WCHAR_T__", "4"),
+            ("__SIZEOF_INT128__", "16"), ("__SIZEOF_WINT_T__", "4"),
+            // Byte order
+            ("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__"),
+            ("__ORDER_LITTLE_ENDIAN__", "1234"), ("__ORDER_BIG_ENDIAN__", "4321"),
+            // Type limits
+            ("__CHAR_BIT__", "8"),
+            ("__INT_MAX__", "2147483647"),
+            ("__LONG_MAX__", "9223372036854775807L"),
+            ("__LONG_LONG_MAX__", "9223372036854775807LL"),
+            ("__SCHAR_MAX__", "127"), ("__SHRT_MAX__", "32767"),
+            ("__SIZE_MAX__", "18446744073709551615UL"),
+            ("__PTRDIFF_MAX__", "9223372036854775807L"),
+            ("__WCHAR_MAX__", "2147483647"), ("__WCHAR_MIN__", "(-2147483647-1)"),
+            ("__WINT_MAX__", "4294967295U"), ("__WINT_MIN__", "0U"),
+            ("__SIG_ATOMIC_MAX__", "2147483647"), ("__SIG_ATOMIC_MIN__", "(-2147483647-1)"),
+            // Type names
+            ("__SIZE_TYPE__", "long unsigned int"), ("__PTRDIFF_TYPE__", "long int"),
+            ("__WCHAR_TYPE__", "int"), ("__WINT_TYPE__", "unsigned int"),
+            ("__CHAR16_TYPE__", "short unsigned int"), ("__CHAR32_TYPE__", "unsigned int"),
+            ("__INTMAX_TYPE__", "long int"), ("__UINTMAX_TYPE__", "long unsigned int"),
+            ("__INT8_TYPE__", "signed char"), ("__INT16_TYPE__", "short int"),
+            ("__INT32_TYPE__", "int"), ("__INT64_TYPE__", "long int"),
+            ("__UINT8_TYPE__", "unsigned char"), ("__UINT16_TYPE__", "unsigned short int"),
+            ("__UINT32_TYPE__", "unsigned int"), ("__UINT64_TYPE__", "long unsigned int"),
+            ("__INTPTR_TYPE__", "long int"), ("__UINTPTR_TYPE__", "long unsigned int"),
+            ("__INT_LEAST8_TYPE__", "signed char"), ("__INT_LEAST16_TYPE__", "short int"),
+            ("__INT_LEAST32_TYPE__", "int"), ("__INT_LEAST64_TYPE__", "long int"),
+            ("__UINT_LEAST8_TYPE__", "unsigned char"),
+            ("__UINT_LEAST16_TYPE__", "unsigned short int"),
+            ("__UINT_LEAST32_TYPE__", "unsigned int"),
+            ("__UINT_LEAST64_TYPE__", "long unsigned int"),
+            ("__INT_FAST8_TYPE__", "signed char"), ("__INT_FAST16_TYPE__", "long int"),
+            ("__INT_FAST32_TYPE__", "long int"), ("__INT_FAST64_TYPE__", "long int"),
+            ("__UINT_FAST8_TYPE__", "unsigned char"),
+            ("__UINT_FAST16_TYPE__", "long unsigned int"),
+            ("__UINT_FAST32_TYPE__", "unsigned int"),
+            ("__UINT_FAST64_TYPE__", "long unsigned int"),
+            // FLT characteristics
+            ("__FLT_MANT_DIG__", "24"), ("__FLT_DIG__", "6"),
+            ("__FLT_MIN_EXP__", "(-125)"), ("__FLT_MIN_10_EXP__", "(-37)"),
+            ("__FLT_MAX_EXP__", "128"), ("__FLT_MAX_10_EXP__", "38"),
+            ("__FLT_MAX__", "3.40282346638528859811704183484516925e+38F"),
+            ("__FLT_MIN__", "1.17549435082228750796873653722224568e-38F"),
+            ("__FLT_EPSILON__", "1.19209289550781250000000000000000000e-7F"),
+            ("__FLT_RADIX__", "2"),
+            ("__FLT_DENORM_MIN__", "1.40129846432481707092372958328991613e-45F"),
+            // DBL characteristics
+            ("__DBL_MANT_DIG__", "53"), ("__DBL_DIG__", "15"),
+            ("__DBL_MIN_EXP__", "(-1021)"), ("__DBL_MIN_10_EXP__", "(-307)"),
+            ("__DBL_MAX_EXP__", "1024"), ("__DBL_MAX_10_EXP__", "308"),
+            ("__DBL_MAX__", "1.79769313486231570814527423731704357e+308"),
+            ("__DBL_MIN__", "2.22507385850720138309023271733240406e-308"),
+            ("__DBL_EPSILON__", "2.22044604925031308084726333618164062e-16"),
+            ("__DBL_DENORM_MIN__", "4.94065645841246544176568792868221372e-324"),
+            // LDBL characteristics
+            ("__LDBL_MANT_DIG__", "64"), ("__LDBL_DIG__", "18"),
+            ("__LDBL_MIN_EXP__", "(-16381)"), ("__LDBL_MIN_10_EXP__", "(-4931)"),
+            ("__LDBL_MAX_EXP__", "16384"), ("__LDBL_MAX_10_EXP__", "4932"),
+            ("__LDBL_MAX__", "1.18973149535723176502e+4932L"),
+            ("__LDBL_MIN__", "3.36210314311209350626e-4932L"),
+            ("__LDBL_EPSILON__", "1.08420217248550443401e-19L"),
+            ("__LDBL_DENORM_MIN__", "3.64519953188247460252840593361941982e-4951L"),
+            ("__SIZEOF_LONG_DOUBLE__", "16"),
+            // Float feature flags
+            ("__FLT_HAS_INFINITY__", "1"), ("__FLT_HAS_QUIET_NAN__", "1"),
+            ("__FLT_HAS_DENORM__", "1"),
+            ("__DBL_HAS_INFINITY__", "1"), ("__DBL_HAS_QUIET_NAN__", "1"),
+            ("__DBL_HAS_DENORM__", "1"),
+            ("__LDBL_HAS_INFINITY__", "1"), ("__LDBL_HAS_QUIET_NAN__", "1"),
+            ("__LDBL_HAS_DENORM__", "1"),
+            ("__FLT_DECIMAL_DIG__", "9"), ("__DBL_DECIMAL_DIG__", "17"),
+            ("__LDBL_DECIMAL_DIG__", "21"), ("__DECIMAL_DIG__", "21"),
+            // GCC extensions
+            ("__GNUC_VA_LIST", "1"), ("__extension__", ""),
+            // NOTE: GNU keyword aliases (__inline__, __volatile__, __asm__, __const__,
+            // __restrict__, __signed__, __typeof__) are handled as keyword tokens in
+            // the lexer (token.rs), not as macros, because GCC treats them as reserved
+            // keywords immune to #define redefinition.
+            ("__alignof", "_Alignof"), ("__alignof__", "_Alignof"),
+            // Named address spaces (Linux kernel): strip since we don't support them
+            ("__seg_gs", ""), ("__seg_fs", ""),
+            // __float128 -> long double (glibc compat)
+            ("__float128", "long double"), ("__SIZEOF_FLOAT128__", "16"),
+            // MSVC integer type specifiers
+            ("__int8", "char"), ("__int16", "short"),
+            ("__int32", "int"), ("__int64", "long long"),
+            // ELF ABI
+            ("__USER_LABEL_PREFIX__", ""),
+            // GNU C attribute macros (strip)
+            ("__LEAF", ""), ("__LEAF_ATTR", ""), ("__wur", ""),
+            // Date/time
+            ("__DATE__", "\"Jan  1 2025\""), ("__TIME__", "\"00:00:00\""),
+            // GCC atomic lock-free macros
+            ("__GCC_ATOMIC_BOOL_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_CHAR_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_CHAR32_T_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_SHORT_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_INT_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_LONG_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_LLONG_LOCK_FREE", "2"),
+            ("__GCC_ATOMIC_POINTER_LOCK_FREE", "2"),
+            // ELF/PIC
+            ("__ELF__", "1"), ("__PIC__", "2"), ("__pic__", "2"),
+        ];
 
-        // Platform macros
-        self.define_simple_macro("__linux__", "1");
-        self.define_simple_macro("__linux", "1");
-        self.define_simple_macro("linux", "1");
-        self.define_simple_macro("__unix__", "1");
-        self.define_simple_macro("__unix", "1");
-        self.define_simple_macro("unix", "1");
-        self.define_simple_macro("__LP64__", "1");
-        self.define_simple_macro("_LP64", "1");
+        for &(name, body) in PREDEFINED_OBJECT_MACROS {
+            self.define_simple_macro(name, body);
+        }
 
-        // Default to x86_64 arch macros (overridden by set_target)
-        self.define_simple_macro("__x86_64__", "1");
-        self.define_simple_macro("__x86_64", "1");
-        self.define_simple_macro("__amd64__", "1");
-        self.define_simple_macro("__amd64", "1");
+        // Function-like predefined macros: (name, params, body)
+        const PREDEFINED_FUNC_MACROS: &[(&str, &[&str], &str)] = &[
+            ("__builtin_expect", &["exp", "c"], "(exp)"),
+            ("__builtin_offsetof", &["type", "member"], "((unsigned long)&((type *)0)->member)"),
+            ("__has_builtin", &["x"], "0"),
+            ("__has_attribute", &["x"], "0"),
+            ("__has_feature", &["x"], "0"),
+            ("__has_include", &["x"], "1"),
+            ("__has_include_next", &["x"], "0"),
+            ("__has_extension", &["x"], "0"),
+        ];
 
-        // GCC compatibility macros - claim GCC 4.8 compat since we support
-        // all builtins available in GCC 4.8 (bswap16/32/64, clz, ctz, etc.)
-        self.define_simple_macro("__GNUC__", "4");
-        self.define_simple_macro("__GNUC_MINOR__", "8");
-        self.define_simple_macro("__GNUC_PATCHLEVEL__", "0");
-
-        // Size macros
-        self.define_simple_macro("__SIZEOF_POINTER__", "8");
-        self.define_simple_macro("__SIZEOF_INT__", "4");
-        self.define_simple_macro("__SIZEOF_LONG__", "8");
-        self.define_simple_macro("__SIZEOF_LONG_LONG__", "8");
-        self.define_simple_macro("__SIZEOF_SHORT__", "2");
-        self.define_simple_macro("__SIZEOF_FLOAT__", "4");
-        self.define_simple_macro("__SIZEOF_DOUBLE__", "8");
-        self.define_simple_macro("__SIZEOF_SIZE_T__", "8");
-        self.define_simple_macro("__SIZEOF_PTRDIFF_T__", "8");
-        self.define_simple_macro("__SIZEOF_WCHAR_T__", "4");
-        self.define_simple_macro("__SIZEOF_INT128__", "16");
-        self.define_simple_macro("__SIZEOF_WINT_T__", "4");
-
-        // Byte order
-        self.define_simple_macro("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
-        self.define_simple_macro("__ORDER_LITTLE_ENDIAN__", "1234");
-        self.define_simple_macro("__ORDER_BIG_ENDIAN__", "4321");
-
-        // Type characteristics
-        self.define_simple_macro("__CHAR_BIT__", "8");
-        self.define_simple_macro("__INT_MAX__", "2147483647");
-        self.define_simple_macro("__LONG_MAX__", "9223372036854775807L");
-        self.define_simple_macro("__LONG_LONG_MAX__", "9223372036854775807LL");
-        self.define_simple_macro("__SCHAR_MAX__", "127");
-        self.define_simple_macro("__SHRT_MAX__", "32767");
-        self.define_simple_macro("__SIZE_MAX__", "18446744073709551615UL");
-        self.define_simple_macro("__PTRDIFF_MAX__", "9223372036854775807L");
-        self.define_simple_macro("__WCHAR_MAX__", "2147483647");
-        self.define_simple_macro("__WCHAR_MIN__", "(-2147483647-1)");
-        self.define_simple_macro("__WINT_MAX__", "4294967295U");
-        self.define_simple_macro("__WINT_MIN__", "0U");
-        self.define_simple_macro("__SIG_ATOMIC_MAX__", "2147483647");
-        self.define_simple_macro("__SIG_ATOMIC_MIN__", "(-2147483647-1)");
-
-        // Type names (GCC built-in macros)
-        self.define_simple_macro("__SIZE_TYPE__", "long unsigned int");
-        self.define_simple_macro("__PTRDIFF_TYPE__", "long int");
-        self.define_simple_macro("__WCHAR_TYPE__", "int");
-        self.define_simple_macro("__WINT_TYPE__", "unsigned int");
-        self.define_simple_macro("__CHAR16_TYPE__", "short unsigned int");
-        self.define_simple_macro("__CHAR32_TYPE__", "unsigned int");
-        self.define_simple_macro("__INTMAX_TYPE__", "long int");
-        self.define_simple_macro("__UINTMAX_TYPE__", "long unsigned int");
-        self.define_simple_macro("__INT8_TYPE__", "signed char");
-        self.define_simple_macro("__INT16_TYPE__", "short int");
-        self.define_simple_macro("__INT32_TYPE__", "int");
-        self.define_simple_macro("__INT64_TYPE__", "long int");
-        self.define_simple_macro("__UINT8_TYPE__", "unsigned char");
-        self.define_simple_macro("__UINT16_TYPE__", "unsigned short int");
-        self.define_simple_macro("__UINT32_TYPE__", "unsigned int");
-        self.define_simple_macro("__UINT64_TYPE__", "long unsigned int");
-        self.define_simple_macro("__INTPTR_TYPE__", "long int");
-        self.define_simple_macro("__UINTPTR_TYPE__", "long unsigned int");
-        self.define_simple_macro("__INT_LEAST8_TYPE__", "signed char");
-        self.define_simple_macro("__INT_LEAST16_TYPE__", "short int");
-        self.define_simple_macro("__INT_LEAST32_TYPE__", "int");
-        self.define_simple_macro("__INT_LEAST64_TYPE__", "long int");
-        self.define_simple_macro("__UINT_LEAST8_TYPE__", "unsigned char");
-        self.define_simple_macro("__UINT_LEAST16_TYPE__", "unsigned short int");
-        self.define_simple_macro("__UINT_LEAST32_TYPE__", "unsigned int");
-        self.define_simple_macro("__UINT_LEAST64_TYPE__", "long unsigned int");
-        self.define_simple_macro("__INT_FAST8_TYPE__", "signed char");
-        self.define_simple_macro("__INT_FAST16_TYPE__", "long int");
-        self.define_simple_macro("__INT_FAST32_TYPE__", "long int");
-        self.define_simple_macro("__INT_FAST64_TYPE__", "long int");
-        self.define_simple_macro("__UINT_FAST8_TYPE__", "unsigned char");
-        self.define_simple_macro("__UINT_FAST16_TYPE__", "long unsigned int");
-        self.define_simple_macro("__UINT_FAST32_TYPE__", "unsigned int");
-        self.define_simple_macro("__UINT_FAST64_TYPE__", "long unsigned int");
-
-        // FLT/DBL/LDBL characteristics
-        self.define_simple_macro("__FLT_MANT_DIG__", "24");
-        self.define_simple_macro("__FLT_DIG__", "6");
-        self.define_simple_macro("__FLT_MIN_EXP__", "(-125)");
-        self.define_simple_macro("__FLT_MIN_10_EXP__", "(-37)");
-        self.define_simple_macro("__FLT_MAX_EXP__", "128");
-        self.define_simple_macro("__FLT_MAX_10_EXP__", "38");
-        self.define_simple_macro("__FLT_MAX__", "3.40282346638528859811704183484516925e+38F");
-        self.define_simple_macro("__FLT_MIN__", "1.17549435082228750796873653722224568e-38F");
-        self.define_simple_macro("__FLT_EPSILON__", "1.19209289550781250000000000000000000e-7F");
-        self.define_simple_macro("__FLT_RADIX__", "2");
-        self.define_simple_macro("__FLT_DENORM_MIN__", "1.40129846432481707092372958328991613e-45F");
-        self.define_simple_macro("__DBL_MANT_DIG__", "53");
-        self.define_simple_macro("__DBL_DIG__", "15");
-        self.define_simple_macro("__DBL_MIN_EXP__", "(-1021)");
-        self.define_simple_macro("__DBL_MIN_10_EXP__", "(-307)");
-        self.define_simple_macro("__DBL_MAX_EXP__", "1024");
-        self.define_simple_macro("__DBL_MAX_10_EXP__", "308");
-        self.define_simple_macro("__DBL_MAX__", "1.79769313486231570814527423731704357e+308");
-        self.define_simple_macro("__DBL_MIN__", "2.22507385850720138309023271733240406e-308");
-        self.define_simple_macro("__DBL_EPSILON__", "2.22044604925031308084726333618164062e-16");
-        self.define_simple_macro("__DBL_DENORM_MIN__", "4.94065645841246544176568792868221372e-324");
-        self.define_simple_macro("__LDBL_MANT_DIG__", "64");
-        self.define_simple_macro("__LDBL_DIG__", "18");
-        self.define_simple_macro("__LDBL_MIN_EXP__", "(-16381)");
-        self.define_simple_macro("__LDBL_MIN_10_EXP__", "(-4931)");
-        self.define_simple_macro("__LDBL_MAX_EXP__", "16384");
-        self.define_simple_macro("__LDBL_MAX_10_EXP__", "4932");
-        self.define_simple_macro("__LDBL_MAX__", "1.18973149535723176502e+4932L");
-        self.define_simple_macro("__LDBL_MIN__", "3.36210314311209350626e-4932L");
-        self.define_simple_macro("__LDBL_EPSILON__", "1.08420217248550443401e-19L");
-        self.define_simple_macro("__LDBL_DENORM_MIN__", "3.64519953188247460252840593361941982e-4951L");
-        self.define_simple_macro("__SIZEOF_LONG_DOUBLE__", "16");
-        self.define_simple_macro("__FLT_HAS_INFINITY__", "1");
-        self.define_simple_macro("__FLT_HAS_QUIET_NAN__", "1");
-        self.define_simple_macro("__FLT_HAS_DENORM__", "1");
-        self.define_simple_macro("__DBL_HAS_INFINITY__", "1");
-        self.define_simple_macro("__DBL_HAS_QUIET_NAN__", "1");
-        self.define_simple_macro("__DBL_HAS_DENORM__", "1");
-        self.define_simple_macro("__LDBL_HAS_INFINITY__", "1");
-        self.define_simple_macro("__LDBL_HAS_QUIET_NAN__", "1");
-        self.define_simple_macro("__LDBL_HAS_DENORM__", "1");
-        self.define_simple_macro("__FLT_DECIMAL_DIG__", "9");
-        self.define_simple_macro("__DBL_DECIMAL_DIG__", "17");
-        self.define_simple_macro("__LDBL_DECIMAL_DIG__", "21");
-        self.define_simple_macro("__DECIMAL_DIG__", "21");
-
-        // GCC built-in function-like macros
-        self.macros.define(MacroDef {
-            name: "__builtin_expect".to_string(),
-            is_function_like: true,
-            params: vec!["exp".to_string(), "c".to_string()],
-            is_variadic: false,
-            body: "(exp)".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__builtin_offsetof".to_string(),
-            is_function_like: true,
-            params: vec!["type".to_string(), "member".to_string()],
-            is_variadic: false,
-            body: "((unsigned long)&((type *)0)->member)".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_builtin".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "0".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_attribute".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "0".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_feature".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "0".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_include".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "1".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_include_next".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "0".to_string(),
-            is_predefined: true,
-        });
-        self.macros.define(MacroDef {
-            name: "__has_extension".to_string(),
-            is_function_like: true,
-            params: vec!["x".to_string()],
-            is_variadic: false,
-            body: "0".to_string(),
-            is_predefined: true,
-        });
-
-        // GCC extension macros
-        self.define_simple_macro("__GNUC_VA_LIST", "1");
-        self.define_simple_macro("__extension__", "");
-        // NOTE: GNU keyword aliases (__inline__, __volatile__, __asm__, __const__,
-        // __restrict__, __signed__, __typeof__) are handled as keyword tokens in the
-        // lexer (token.rs). They must NOT be defined as preprocessor macros because:
-        // (1) In GCC they are reserved keywords immune to #define redefinition.
-        // (2) Defining them as macros breaks when user code redefines the base keyword.
-        //     E.g., the Linux kernel does: #define inline inline __gnu_inline ...
-        //     If __inline__ is a macro expanding to "inline", then asm_inline -> asm __inline
-        //     -> asm inline -> asm inline __gnu_inline ... which is invalid.
-        // Only __alignof/__alignof__ need macro definitions since they map to _Alignof
-        // which is a different token name not covered by the lexer's keyword table.
-        self.define_simple_macro("__alignof", "_Alignof");
-        self.define_simple_macro("__alignof__", "_Alignof");
-
-        // GCC named address space qualifiers (x86 segment overrides).
-        // We don't support named address spaces, so define these as empty to strip them.
-        // The Linux kernel uses these when CONFIG_CC_HAS_NAMED_AS is set.
-        self.define_simple_macro("__seg_gs", "");
-        self.define_simple_macro("__seg_fs", "");
-
-        // GCC 128-bit float type: map to long double since we don't support true 128-bit floats.
-        // glibc headers declare _Float128 functions when __HAVE_FLOAT128 is set
-        // (__GNUC_PREREQ(4,3) on x86_64). The header does `typedef __float128 _Float128;`
-        // for GCC < 7.0, so we just need __float128 as a keyword.
-        self.define_simple_macro("__float128", "long double");
-        self.define_simple_macro("__SIZEOF_FLOAT128__", "16");
-
-        // MSVC-compatible integer type specifiers
-        self.define_simple_macro("__int8", "char");
-        self.define_simple_macro("__int16", "short");
-        self.define_simple_macro("__int32", "int");
-        self.define_simple_macro("__int64", "long long");
-
-        // ELF ABI: no prefix for user labels on Linux
-        self.define_simple_macro("__USER_LABEL_PREFIX__", "");
-
-        // GNU C function declaration attributes
-        self.define_simple_macro("__LEAF", "");
-        self.define_simple_macro("__LEAF_ATTR", "");
-        self.define_simple_macro("__wur", "");
-
-        // __DATE__ and __TIME__
-        self.define_simple_macro("__DATE__", "\"Jan  1 2025\"");
-        self.define_simple_macro("__TIME__", "\"00:00:00\"");
-
-        // GCC built-in type trait macros
-        self.define_simple_macro("__GCC_ATOMIC_BOOL_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_CHAR_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_CHAR32_T_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_SHORT_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_INT_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_LONG_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_LLONG_LOCK_FREE", "2");
-        self.define_simple_macro("__GCC_ATOMIC_POINTER_LOCK_FREE", "2");
-
-        // ELF/Position-independent
-        self.define_simple_macro("__ELF__", "1");
-        self.define_simple_macro("__PIC__", "2");
-        self.define_simple_macro("__pic__", "2");
+        for &(name, params, body) in PREDEFINED_FUNC_MACROS {
+            self.macros.define(MacroDef {
+                name: name.to_string(),
+                is_function_like: true,
+                params: params.iter().map(|s| s.to_string()).collect(),
+                is_variadic: false,
+                body: body.to_string(),
+                is_predefined: true,
+            });
+        }
     }
 
     /// Helper to define a simple object-like macro.

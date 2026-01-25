@@ -810,11 +810,6 @@ impl Lowerer {
         let base_type_size = base_ty.size().max(1);
         if array_dim_strides.len() <= 1 {
             // 1D array: support designated initializers [idx] = val
-            let _total_elems = if !array_dim_strides.is_empty() && base_type_size > 0 {
-                array_dim_strides[0] / base_type_size
-            } else {
-                0
-            };
             let mut current_idx = 0usize;
             for item in items {
                 if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {

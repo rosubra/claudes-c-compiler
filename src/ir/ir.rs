@@ -516,17 +516,23 @@ impl IrConst {
     }
 
     /// Cast a float value (as f64) to the target IR type, producing a new IrConst.
-    /// Used to deduplicate F32/F64/LongDouble -> target cast logic in const eval.
+    /// For unsigned integer targets, converts via the unsigned type first to get correct
+    /// wrapping behavior (e.g., 200.0 as u8 = 200, not saturated to i8 max).
     pub fn cast_float_to_target(fv: f64, target: IrType) -> Option<IrConst> {
         Some(match target {
             IrType::F64 => IrConst::F64(fv),
             IrType::F128 => IrConst::LongDouble(fv),
             IrType::F32 => IrConst::F32(fv as f32),
-            IrType::I8 | IrType::U8 => IrConst::I8(fv as i8),
-            IrType::I16 | IrType::U16 => IrConst::I16(fv as i16),
-            IrType::I32 | IrType::U32 => IrConst::I32(fv as i32),
-            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(fv as i64),
-            IrType::I128 | IrType::U128 => IrConst::I128(fv as i128),
+            IrType::I8 => IrConst::I8(fv as i8),
+            IrType::U8 => IrConst::I8(fv as u8 as i8),
+            IrType::I16 => IrConst::I16(fv as i16),
+            IrType::U16 => IrConst::I16(fv as u16 as i16),
+            IrType::I32 => IrConst::I32(fv as i32),
+            IrType::U32 => IrConst::I32(fv as u32 as i32),
+            IrType::I64 | IrType::Ptr => IrConst::I64(fv as i64),
+            IrType::U64 => IrConst::I64(fv as u64 as i64),
+            IrType::I128 => IrConst::I128(fv as i128),
+            IrType::U128 => IrConst::I128(fv as u128 as i128),
             _ => return None,
         })
     }
@@ -626,67 +632,29 @@ impl IrConst {
             (IrConst::I128(_), IrType::I128 | IrType::U128) => return self.clone(),
             (IrConst::F32(_), IrType::F32) => return self.clone(),
             (IrConst::F64(_), IrType::F64) => return self.clone(),
-            // LongDouble stays as LongDouble when target is F64 or F128
             (IrConst::LongDouble(_), IrType::F64 | IrType::F128) => return self.clone(),
             _ => {}
         }
-        // Convert integer types
+        // Convert integer types via from_i64, with unsigned-aware int-to-float path
         if let Some(int_val) = self.to_i64() {
-            // For int-to-float conversions, check source signedness
-            if target_ty.is_float() {
-                let is_unsigned = src_ty.map_or(false, |t| t.is_unsigned());
-                if is_unsigned {
-                    let uint_val = int_val as u64;
-                    return match target_ty {
-                        IrType::F32 => IrConst::F32(uint_val as f32),
-                        IrType::F64 => IrConst::F64(uint_val as f64),
-                        IrType::F128 => IrConst::LongDouble(uint_val as f64),
-                        _ => IrConst::I64(int_val),
-                    };
-                }
+            if target_ty.is_float() && src_ty.map_or(false, |t| t.is_unsigned()) {
+                let uint_val = int_val as u64;
+                return match target_ty {
+                    IrType::F32 => IrConst::F32(uint_val as f32),
+                    IrType::F64 => IrConst::F64(uint_val as f64),
+                    IrType::F128 => IrConst::LongDouble(uint_val as f64),
+                    _ => IrConst::I64(int_val),
+                };
             }
             return IrConst::from_i64(int_val, target_ty);
         }
-        // Convert float types
-        match (self, target_ty) {
-            (IrConst::F64(v), IrType::F32) => IrConst::F32(*v as f32),
-            (IrConst::F32(v), IrType::F64) => IrConst::F64(*v as f64),
-            (IrConst::F64(v), IrType::I8) => IrConst::I8(*v as i8),
-            (IrConst::F64(v), IrType::U8) => IrConst::I8(*v as u8 as i8),
-            (IrConst::F64(v), IrType::I16) => IrConst::I16(*v as i16),
-            (IrConst::F64(v), IrType::U16) => IrConst::I16(*v as u16 as i16),
-            (IrConst::F64(v), IrType::I32) => IrConst::I32(*v as i32),
-            (IrConst::F64(v), IrType::U32) => IrConst::I32(*v as u32 as i32),
-            (IrConst::F64(v), IrType::I64) => IrConst::I64(*v as i64),
-            (IrConst::F64(v), IrType::U64) => IrConst::I64(*v as u64 as i64),
-            (IrConst::F32(v), IrType::I8) => IrConst::I8(*v as i8),
-            (IrConst::F32(v), IrType::U8) => IrConst::I8(*v as u8 as i8),
-            (IrConst::F32(v), IrType::I16) => IrConst::I16(*v as i16),
-            (IrConst::F32(v), IrType::U16) => IrConst::I16(*v as u16 as i16),
-            (IrConst::F32(v), IrType::I32) => IrConst::I32(*v as i32),
-            (IrConst::F32(v), IrType::U32) => IrConst::I32(*v as u32 as i32),
-            (IrConst::F32(v), IrType::I64) => IrConst::I64(*v as i64),
-            (IrConst::F32(v), IrType::U64) => IrConst::I64(*v as u64 as i64),
-            // LongDouble conversions
-            (IrConst::LongDouble(v), IrType::F64) => IrConst::F64(*v),
-            (IrConst::LongDouble(v), IrType::F32) => IrConst::F32(*v as f32),
-            (IrConst::LongDouble(v), IrType::I8) => IrConst::I8(*v as i8),
-            (IrConst::LongDouble(v), IrType::U8) => IrConst::I8(*v as u8 as i8),
-            (IrConst::LongDouble(v), IrType::I16) => IrConst::I16(*v as i16),
-            (IrConst::LongDouble(v), IrType::U16) => IrConst::I16(*v as u16 as i16),
-            (IrConst::LongDouble(v), IrType::I32) => IrConst::I32(*v as i32),
-            (IrConst::LongDouble(v), IrType::U32) => IrConst::I32(*v as u32 as i32),
-            (IrConst::LongDouble(v), IrType::I64) => IrConst::I64(*v as i64),
-            (IrConst::LongDouble(v), IrType::U64) => IrConst::I64(*v as u64 as i64),
-            // Conversions to F128 (long double)
-            (IrConst::F64(v), IrType::F128) => IrConst::LongDouble(*v),
-            (IrConst::F32(v), IrType::F128) => IrConst::LongDouble(*v as f64),
-            (IrConst::I64(v), IrType::F128) => IrConst::LongDouble(*v as f64),
-            (IrConst::I32(v), IrType::F128) => IrConst::LongDouble(*v as f64),
-            (IrConst::I16(v), IrType::F128) => IrConst::LongDouble(*v as f64),
-            (IrConst::I8(v), IrType::F128) => IrConst::LongDouble(*v as f64),
-            _ => self.clone(),
+        // Convert float types: extract as f64 and use cast_float_to_target
+        if let Some(fv) = self.to_f64() {
+            if let Some(result) = Self::cast_float_to_target(fv, target_ty) {
+                return result;
+            }
         }
+        self.clone()
     }
 
     /// Coerce this constant to match a target IrType (assumes signed source for int-to-float).
@@ -695,21 +663,10 @@ impl IrConst {
     }
 
     /// Normalize a constant for _Bool storage: any nonzero value becomes I8(1), zero becomes I8(0).
-    /// This implements C11 6.3.1.2: "When any scalar value is converted to _Bool, the result
+    /// Implements C11 6.3.1.2: "When any scalar value is converted to _Bool, the result
     /// is 0 if the value compares equal to 0; otherwise, the result is 1."
     pub fn bool_normalize(&self) -> IrConst {
-        let is_nonzero = match self {
-            IrConst::I8(v) => *v != 0,
-            IrConst::I16(v) => *v != 0,
-            IrConst::I32(v) => *v != 0,
-            IrConst::I64(v) => *v != 0,
-            IrConst::I128(v) => *v != 0,
-            IrConst::F32(v) => *v != 0.0,
-            IrConst::F64(v) => *v != 0.0,
-            IrConst::LongDouble(v) => *v != 0.0,
-            IrConst::Zero => false,
-        };
-        IrConst::I8(if is_nonzero { 1 } else { 0 })
+        IrConst::I8(if self.is_zero() { 0 } else { 1 })
     }
 
     /// Get the zero constant for a given IR type.

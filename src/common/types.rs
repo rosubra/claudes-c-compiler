@@ -665,16 +665,6 @@ impl CType {
         }
     }
 
-    /// Extract the tag name from a struct/union key (e.g., "struct.Foo" -> "Foo").
-    pub fn struct_tag_name(&self) -> Option<&str> {
-        match self {
-            CType::Struct(key) | CType::Union(key) => {
-                key.split('.').nth(1)
-            }
-            _ => None,
-        }
-    }
-
     pub fn is_integer(&self) -> bool {
         matches!(self, CType::Bool | CType::Char | CType::UChar | CType::Short | CType::UShort |
                        CType::Int | CType::UInt | CType::Long | CType::ULong |
@@ -706,11 +696,6 @@ impl CType {
             | CType::Short | CType::UShort => CType::Int,
             other => other.clone(),
         }
-    }
-
-    /// Whether this is an arithmetic type (integer, floating, or complex).
-    pub fn is_arithmetic(&self) -> bool {
-        self.is_integer() || self.is_floating() || self.is_complex()
     }
 
     /// Get the component type for a complex type (e.g., ComplexFloat -> Float).

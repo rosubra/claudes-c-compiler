@@ -615,7 +615,6 @@ impl Lowerer {
         bytes: &mut [u8],
         field_offset: usize,
     ) {
-        let _inner_elem_size = self.resolve_ctype_size(inner_elem_ty);
         let mut sub_idx = 0usize;
         let mut ai = 0usize;
         while ai < outer_arr_size && sub_idx < sub_items.len() {
