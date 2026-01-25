@@ -1529,22 +1529,32 @@ impl Lowerer {
         // levels into the function's return type, making the CType shape ambiguous.
         let is_ptr_to_func_ptr = {
             // A pointer-to-function-pointer (e.g., int (**fpp)(int, int)) has derived
-            // = [Pointer, Pointer, FunctionPointer(...)]. The key distinguishing feature:
-            // exactly one FunctionPointer entry AND 2+ Pointer entries before it.
-            // Complex function pointers like int (*(*p)(int,int))(int,int) have
-            // multiple FunctionPointer entries in derived and are NOT ptr-to-fptr.
+            // = [Pointer, FunctionPointer, Pointer]. The extra indirection Pointer
+            // appears AFTER the FunctionPointer entry (added by combine_declarator_parts
+            // as "extra indirection" from inner_derived).
+            //
+            // In contrast, int *(*fnc)() has derived = [Pointer, Pointer, FunctionPointer]
+            // where pointers BEFORE FunctionPointer are return-type pointers, not extra
+            // indirection. The syntax-marker Pointer is always immediately before FunctionPointer.
+            //
+            // So the correct check is: has any Pointer entries AFTER the FunctionPointer entry.
             let fptr_count = derived.iter().filter(|d|
                 matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _))).count();
             if fptr_count == 1 {
-                let mut consecutive_ptrs_before_fptr = 0usize;
+                let mut found_fptr = false;
+                let mut ptrs_after_fptr = 0usize;
                 for d in derived {
                     match d {
-                        DerivedDeclarator::Pointer => consecutive_ptrs_before_fptr += 1,
-                        DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _) => break,
+                        DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _) => {
+                            found_fptr = true;
+                        }
+                        DerivedDeclarator::Pointer if found_fptr => {
+                            ptrs_after_fptr += 1;
+                        }
                         _ => {}
                     }
                 }
-                consecutive_ptrs_before_fptr >= 2
+                ptrs_after_fptr >= 1
             } else {
                 false
             }

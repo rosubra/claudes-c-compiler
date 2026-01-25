@@ -404,32 +404,9 @@ impl Lowerer {
                 // In C, dereferencing a function pointer is a no-op: (*fp)(args) == fp(args).
                 // But dereferencing a pointer-to-function-pointer is a real load:
                 // (*fpp)(args) where fpp is func_ptr* needs to load the func_ptr first.
-                // Detect if inner is a plain function pointer (no-op deref) vs something
-                // that requires a real dereference.
-                let is_noop_deref = if let Expr::Identifier(ref name, _) = **inner {
-                    if let Some(vi) = self.lookup_var_info(name) {
-                        // Pointer-to-function-pointer requires a real load,
-                        // even though its CType looks like Pointer(Function(...))
-                        // due to the extra pointer being absorbed into the return type.
-                        if vi.is_ptr_to_func_ptr {
-                            false
-                        } else if let Some(ref ct) = vi.c_type {
-                            match ct {
-                                // Variable is a function pointer: *fp is no-op
-                                CType::Pointer(inner_ct) => matches!(**inner_ct, CType::Function(_)),
-                                // Variable is a function: *func is no-op
-                                CType::Function(_) => true,
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
+                // Use the comprehensive is_function_pointer_deref check which also handles
+                // cases where c_type is None but ptr_sigs or known_functions provide info.
+                let is_noop_deref = self.is_function_pointer_deref(inner);
                 let n = arg_vals.len();
                 let sas = struct_arg_sizes;
                 let func_ptr = if is_noop_deref {

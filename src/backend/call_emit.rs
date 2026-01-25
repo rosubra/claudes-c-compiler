@@ -159,6 +159,8 @@ pub fn classify_params(func: &IrFunction, config: &CallAbiConfig) -> Vec<ParamCl
                 }
             } else {
                 // x86: F128 always passes on the stack via x87.
+                // Align to 16 bytes to match caller-side padding (compute_stack_arg_padding).
+                stack_offset = (stack_offset + 15) & !15;
                 result.push(ParamClass::F128AlwaysStack { offset: stack_offset });
                 stack_offset += 16;
             }
