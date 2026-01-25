@@ -2324,6 +2324,9 @@ impl InlineAsmEmitter for X86Codegen {
     fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
     fn asm_state_ref(&self) -> &CodegenState { &self.state }
 
+    // TODO: ARM and RISC-V backends should also support multi-alternative constraint
+    // parsing (e.g., "rm", "ri") similar to the x86 implementation below. Currently
+    // they only recognize single-alternative constraints.
     fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
         let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
         // GCC condition code output: =@cc<cond> (e.g. =@cce, =@ccne, =@ccs)
@@ -2336,27 +2339,54 @@ impl InlineAsmEmitter for X86Codegen {
                 return AsmOperandKind::Tied(n);
             }
         }
-        // Pure memory constraint
-        if c == "m" {
-            return AsmOperandKind::Memory;
+        // GCC allows multi-alternative constraints like "Ir" (immediate or register),
+        // "rm" (register or memory), "qm" (byte register or memory), etc.
+        // Parse each character as a constraint alternative and pick the best one.
+        // Priority: specific register > GP register > FP register > memory > immediate
+        // Registers are preferred over memory for performance. Immediate is the fallback
+        // because the shared framework promotes GpReg to Immediate when the value is
+        // a compile-time constant and the constraint allows it (see emit_inline_asm_common).
+        // NOTE: The immediate letters here are x86-specific and intentionally a superset
+        // of the architecture-neutral set in constraint_has_immediate_alt().
+        let mut has_gp = false;
+        let mut has_fp = false;
+        let mut has_mem = false;
+        let mut has_imm = false;
+        let mut specific: Option<String> = None;
+
+        for ch in c.chars() {
+            match ch {
+                'r' | 'q' | 'R' | 'Q' | 'l' => has_gp = true,
+                'g' => { has_gp = true; has_mem = true; has_imm = true; } // "general operand"
+                'x' | 'v' | 'Y' => has_fp = true,
+                'm' | 'o' | 'V' | 'p' => has_mem = true, // 'p' = valid memory address
+                'i' | 'I' | 'n' | 'N' | 'e' | 'E' | 'K' | 'M' | 'G' | 'H' | 'J' | 'L' | 'O' => has_imm = true,
+                'a' if specific.is_none() => specific = Some("rax".to_string()),
+                'b' if specific.is_none() => specific = Some("rbx".to_string()),
+                'c' if specific.is_none() => specific = Some("rcx".to_string()),
+                'd' if specific.is_none() => specific = Some("rdx".to_string()),
+                'S' if specific.is_none() => specific = Some("rsi".to_string()),
+                'D' if specific.is_none() => specific = Some("rdi".to_string()),
+                _ => {}
+            }
         }
-        // Immediate constraints: "i", "I", "n" — value must be a compile-time constant
-        if c == "i" || c == "I" || c == "n" {
-            return AsmOperandKind::Immediate;
-        }
-        // SSE register constraint: "x" means any XMM register
-        if c == "x" {
-            return AsmOperandKind::FpReg;
-        }
-        // Specific register constraints
-        match c {
-            "a" => AsmOperandKind::Specific("rax".to_string()),
-            "b" => AsmOperandKind::Specific("rbx".to_string()),
-            "c" => AsmOperandKind::Specific("rcx".to_string()),
-            "d" => AsmOperandKind::Specific("rdx".to_string()),
-            "S" => AsmOperandKind::Specific("rsi".to_string()),
-            "D" => AsmOperandKind::Specific("rdi".to_string()),
-            _ => AsmOperandKind::GpReg,
+
+        // Return the most appropriate classification.
+        // For multi-alternative constraints like "Ir", the IR lowering will have
+        // already evaluated the operand as a constant if possible, so the actual
+        // substitution code will check imm_value to decide whether to emit $N or %reg.
+        if let Some(reg) = specific {
+            AsmOperandKind::Specific(reg)
+        } else if has_gp {
+            AsmOperandKind::GpReg
+        } else if has_fp {
+            AsmOperandKind::FpReg
+        } else if has_mem {
+            AsmOperandKind::Memory
+        } else if has_imm {
+            AsmOperandKind::Immediate
+        } else {
+            AsmOperandKind::GpReg
         }
     }
 
@@ -2379,13 +2409,11 @@ impl InlineAsmEmitter for X86Codegen {
                 _ => {}
             }
         }
+        // Extract immediate constant value.
+        // For pure Immediate constraints, this provides the value for $N substitution.
         if matches!(op.kind, AsmOperandKind::Immediate) {
-            // Extract the immediate constant value
-            match val {
-                Operand::Const(c) => {
-                    op.imm_value = c.to_i64();
-                }
-                _ => {}
+            if let Operand::Const(c) = val {
+                op.imm_value = c.to_i64();
             }
         }
     }

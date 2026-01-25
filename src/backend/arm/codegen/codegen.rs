@@ -2555,6 +2555,8 @@ impl InlineAsmEmitter for ArmCodegen {
     fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
     fn asm_state_ref(&self) -> &CodegenState { &self.state }
 
+    // TODO: Support multi-alternative constraint parsing (e.g., "rm", "ri") like x86.
+    // TODO: Support ARM-specific immediate constraints ("I", "J", "K", "L", etc.).
     fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
         let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
         // TODO: ARM =@cc not fully implemented — needs CSET/CSINC in store_output_from_reg.

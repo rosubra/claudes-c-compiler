@@ -4,6 +4,7 @@ use crate::common::types::{IrType, CType, StructLayout};
 use super::lowering::Lowerer;
 use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, LValue};
 use crate::frontend::sema::type_context::extract_fptr_typedef_info;
+use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_has_memory_alt};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -1202,7 +1203,9 @@ impl Lowerer {
                 for out in outputs {
                     let constraint = out.constraint.clone();
                     let name = out.name.clone();
-                    let out_ty = self.get_expr_type(&out.expr);
+                    // Use CType-based type for inline asm operands to get correct register
+                    // sizing (e.g., int -> I32 -> 32-bit register, not I64 -> 64-bit register)
+                    let out_ty = IrType::from_ctype(&self.expr_ctype(&out.expr));
                     // Get the lvalue address for the output expression
                     if let Some(lv) = self.lower_lvalue(&out.expr) {
                         let ptr = match lv {
@@ -1211,10 +1214,10 @@ impl Lowerer {
                         // For "+r" (read-write), also treat as input (load current value)
                         if constraint.contains('+') {
                             let cur_val = self.fresh_value();
-                            let ty = self.get_expr_type(&out.expr);
-                            self.emit(Instruction::Load { dest: cur_val, ptr, ty });
+                            // Use the same CType-based type as the operand for consistency
+                            self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty });
                             ir_inputs.push((constraint.replace('+', "").to_string(), Operand::Value(cur_val), name.clone()));
-                            plus_input_types.push(out_ty.clone());
+                            plus_input_types.push(out_ty);
                         }
                         ir_outputs.push((constraint, ptr, name));
                         operand_types.push(out_ty);
@@ -1229,19 +1232,22 @@ impl Lowerer {
                 for inp in inputs {
                     let constraint = inp.constraint.clone();
                     let name = inp.name.clone();
-                    let inp_ty = self.get_expr_type(&inp.expr);
+                    // Use CType-based type for correct register sizing in inline asm
+                    let inp_ty = IrType::from_ctype(&self.expr_ctype(&inp.expr));
                     // For immediate constraints ("I", "i", "n"), try to evaluate as
-                    // a compile-time constant to preserve the value for direct substitution
-                    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-                    let val = if matches!(stripped, "I" | "i" | "n") {
+                    // a compile-time constant to preserve the value for direct substitution.
+                    // GCC allows multi-alternative constraints like "Ir" (immediate or register),
+                    // "ri" (register or immediate), "In" etc. Uses shared helper to check
+                    // the same set of immediate letters as the backend framework.
+                    let val = if constraint_has_immediate_alt(&constraint) {
                         if let Some(const_val) = self.eval_const_expr(&inp.expr) {
                             Operand::Const(const_val)
                         } else {
                             self.lower_expr(&inp.expr)
                         }
-                    } else if stripped == "m" {
-                        // Memory constraint: need the address of the operand, not its value.
-                        // Use lower_lvalue to get the memory address.
+                    } else if constraint_has_memory_alt(&constraint) {
+                        // Memory constraint ("m", "rm", etc.): need the address of the
+                        // operand, not its value. Use lower_lvalue to get the memory address.
                         if let Some(lv) = self.lower_lvalue(&inp.expr) {
                             let ptr = match lv {
                                 LValue::Variable(v) | LValue::Address(v) => v,

@@ -20,6 +20,8 @@ pub(super) enum RvConstraintKind {
 }
 
 /// Classify a RISC-V inline asm constraint string into its kind.
+// TODO: Support multi-alternative constraint parsing (e.g., "rm", "Ir") like x86.
+// Currently only single-alternative constraints are recognized.
 pub(super) fn classify_rv_constraint(constraint: &str) -> RvConstraintKind {
     let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
     // Check for tied operand (all digits)

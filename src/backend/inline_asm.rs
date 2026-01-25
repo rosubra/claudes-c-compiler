@@ -119,6 +119,26 @@ pub trait InlineAsmEmitter {
     fn reset_scratch_state(&mut self);
 }
 
+/// Check whether a constraint string contains an immediate alternative character.
+/// Used by both IR lowering (to decide whether to try constant evaluation) and
+/// the shared inline asm framework (to promote GpReg operands to Immediate when
+/// the input is a compile-time constant).
+///
+/// This covers the architecture-neutral immediate constraint letters ('I', 'i', 'n').
+/// Architecture-specific immediate letters (e.g., x86 'N', 'e', 'K') are handled
+/// separately by each backend's `classify_constraint`.
+pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    stripped.chars().any(|c| matches!(c, 'I' | 'i' | 'n'))
+}
+
+/// Check whether a constraint string contains a memory alternative character.
+/// Handles both single-character ("m") and multi-character constraints ("rm", "mq").
+pub fn constraint_has_memory_alt(constraint: &str) -> bool {
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    stripped.chars().any(|c| c == 'm')
+}
+
 /// Shared inline assembly emission logic. All three backends call this from their
 /// `emit_inline_asm` implementation, providing an `InlineAsmEmitter` to handle
 /// arch-specific details.
@@ -164,6 +184,20 @@ pub fn emit_inline_asm_common(
             input_tied_to.push(None);
         }
         emitter.setup_operand_metadata(&mut op, val, false);
+
+        // For multi-alternative constraints (e.g., "Ir", "ri", "In") that were classified
+        // as GpReg but have a constant input value, promote to Immediate so the value
+        // is emitted as $value instead of loaded into a register. Only do this when
+        // the constraint actually contains an immediate alternative character.
+        if matches!(op.kind, AsmOperandKind::GpReg) {
+            if let Operand::Const(c) = val {
+                if constraint_has_immediate_alt(constraint) {
+                    op.imm_value = c.to_i64();
+                    op.kind = AsmOperandKind::Immediate;
+                }
+            }
+        }
+
         operands.push(op);
     }
 
