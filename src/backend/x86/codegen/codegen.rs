@@ -1349,7 +1349,24 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    pushq %rbp");
         self.state.emit("    movq %rsp, %rbp");
         if frame_size > 0 {
-            self.state.emit_fmt(format_args!("    subq ${}, %rsp", frame_size));
+            const PAGE_SIZE: i64 = 4096;
+            if frame_size > PAGE_SIZE {
+                // Stack probing: for large frames, touch each page so the kernel
+                // can grow the stack mapping. Without this, a single large sub
+                // can skip guard pages and cause a segfault.
+                let probe_label = self.state.fresh_label("stack_probe");
+                self.state.emit_fmt(format_args!("    movq ${}, %r11", frame_size));
+                self.state.emit_fmt(format_args!("{}:", probe_label));
+                self.state.emit_fmt(format_args!("    subq ${}, %rsp", PAGE_SIZE));
+                self.state.emit("    orl $0, (%rsp)");
+                self.state.emit_fmt(format_args!("    subq ${}, %r11", PAGE_SIZE));
+                self.state.emit_fmt(format_args!("    cmpq ${}, %r11", PAGE_SIZE));
+                self.state.emit_fmt(format_args!("    ja {}", probe_label));
+                self.state.emit("    subq %r11, %rsp");
+                self.state.emit("    orl $0, (%rsp)");
+            } else {
+                self.state.emit_fmt(format_args!("    subq ${}, %rsp", frame_size));
+            }
         }
 
         // Save callee-saved registers used by the register allocator.

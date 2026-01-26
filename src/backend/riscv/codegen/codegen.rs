@@ -256,6 +256,8 @@ impl RiscvCodegen {
         // This means total_alloc = frame_size + 64 for variadic, but s0 = sp + frame_size.
         let total_alloc = if self.is_variadic { frame_size + 64 } else { frame_size };
 
+        const PAGE_SIZE: i64 = 4096;
+
         // Small-frame path requires ALL immediates to fit in 12 bits:
         // -total_alloc (sp adjust), and frame_size (s0 setup).
         if Self::fits_imm12(-total_alloc) && Self::fits_imm12(total_alloc) {
@@ -266,6 +268,27 @@ impl RiscvCodegen {
             self.state.emit_fmt(format_args!("    sd ra, {}(sp)", frame_size - 8));
             self.state.emit_fmt(format_args!("    sd s0, {}(sp)", frame_size - 16));
             self.state.emit_fmt(format_args!("    addi s0, sp, {}", frame_size));
+        } else if total_alloc > PAGE_SIZE {
+            // Stack probing: for large frames, touch each page so the kernel
+            // can grow the stack mapping. Without this, a single large sub
+            // can skip guard pages and cause a segfault.
+            let probe_label = self.state.fresh_label("stack_probe");
+            self.state.emit_fmt(format_args!("    li t1, {}", total_alloc));
+            self.state.emit_fmt(format_args!("    li t2, {}", PAGE_SIZE));
+            self.state.emit_fmt(format_args!("{}:", probe_label));
+            self.state.emit("    sub sp, sp, t2");
+            self.state.emit("    sd zero, 0(sp)");
+            self.state.emit("    sub t1, t1, t2");
+            self.state.emit_fmt(format_args!("    bgt t1, t2, {}", probe_label));
+            self.state.emit("    sub sp, sp, t1");
+            self.state.emit("    sd zero, 0(sp)");
+            // Compute s0 = sp + frame_size (NOT total_alloc)
+            self.state.emit_fmt(format_args!("    li t0, {}", frame_size));
+            self.state.emit("    add t0, sp, t0");
+            // Save ra and old s0 at s0-8, s0-16
+            self.state.emit("    sd ra, -8(t0)");
+            self.state.emit("    sd s0, -16(t0)");
+            self.state.emit("    mv s0, t0");
         } else {
             // Large frame: use t0 for offsets
             self.state.emit_fmt(format_args!("    li t0, {}", total_alloc));

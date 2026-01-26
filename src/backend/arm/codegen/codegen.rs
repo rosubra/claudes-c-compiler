@@ -399,8 +399,24 @@ impl ArmCodegen {
 
     /// Emit function prologue: allocate stack and save fp/lr.
     fn emit_prologue_arm(&mut self, frame_size: i64) {
+        const PAGE_SIZE: i64 = 4096;
         if frame_size > 0 && frame_size <= 504 {
             self.state.emit_fmt(format_args!("    stp x29, x30, [sp, #-{}]!", frame_size));
+        } else if frame_size > PAGE_SIZE {
+            // Stack probing: for large frames, touch each page so the kernel
+            // can grow the stack mapping. Without this, a single large sub
+            // can skip guard pages and cause a segfault.
+            let probe_label = self.state.fresh_label("stack_probe");
+            self.emit_load_imm64("x17", frame_size);
+            self.state.emit_fmt(format_args!("{}:", probe_label));
+            self.state.emit_fmt(format_args!("    sub sp, sp, #{}", PAGE_SIZE));
+            self.state.emit("    str xzr, [sp]");
+            self.state.emit_fmt(format_args!("    sub x17, x17, #{}", PAGE_SIZE));
+            self.state.emit_fmt(format_args!("    cmp x17, #{}", PAGE_SIZE));
+            self.state.emit_fmt(format_args!("    b.hi {}", probe_label));
+            self.state.emit("    sub sp, sp, x17");
+            self.state.emit("    str xzr, [sp]");
+            self.state.emit("    stp x29, x30, [sp]");
         } else {
             self.emit_sub_sp(frame_size);
             self.state.emit("    stp x29, x30, [sp]");

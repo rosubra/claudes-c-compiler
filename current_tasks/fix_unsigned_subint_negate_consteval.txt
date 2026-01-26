@@ -1,0 +1,22 @@
+Fix: Unsigned Sub-Int Type Negation in Constant Evaluation
+
+Problem:
+-(unsigned char)(255) evaluates to 1 instead of -255 at compile time.
+-(unsigned short)(-1) < 0 evaluates to FALSE instead of TRUE in const eval,
+causing the TCC lshift_type test expression to compute 4 instead of -4.
+
+Root cause:
+IrConst::I8/I16 stores unsigned sub-int values with signed bit patterns.
+When negate_const(I8(-1)) or the IR constant folder processes Neg on these
+values, they sign-extend to -1 and negate to 1, instead of zero-extending
+to 255/65535 and negating to -255/-65535.
+
+The bug manifests at three levels:
+1. Sema const_eval: negate_const called on I8/I16 without unsigned promotion
+2. Lowerer const_eval: same issue in the lowerer's eval_const_expr for Neg
+3. IR constant fold pass: fold_unaryop extracts I8/I16 via sign-extending to_i64()
+
+Fix:
+1. Sema: promote_sub_int_for_unary() checks expr type and zero-extends unsigned
+2. Lowerer: promote_const_for_unary() does the same with IrType info
+3. Constant fold: as_i64_zero_extended() for UnaryOp to zero-extend I8/I16
