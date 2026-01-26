@@ -122,7 +122,7 @@ impl Lowerer {
             | Expr::FunctionCall(_, _, _) | Expr::Conditional(_, _, _, _)
             | Expr::GnuConditional(_, _, _)
             | Expr::Assign(_, _, _) | Expr::CompoundAssign(_, _, _, _)
-            | Expr::Comma(_, _, _) => {
+            | Expr::Comma(_, _, _) | Expr::Cast(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
                 if ctype.is_struct_or_union() {
                     Some(self.ctype_size(&ctype))
