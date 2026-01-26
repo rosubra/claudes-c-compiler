@@ -70,6 +70,9 @@ pub struct CallAbiConfig {
     pub f128_in_gp_pairs: bool,
     /// Whether variadic float args must go in GP registers instead of FP regs (RISC-V: true, x86: false, ARM: false).
     pub variadic_floats_in_gp: bool,
+    /// Whether large structs (>16 bytes) are passed by reference (pointer in GP reg) per AAPCS64.
+    /// ARM: true (caller passes pointer in x0-x7 or on stack), x86/RISC-V: false (copy to stack).
+    pub large_struct_by_ref: bool,
 }
 
 /// Classify all arguments for a function call, returning a `CallArgClass` per argument.
@@ -108,6 +111,15 @@ pub fn classify_call_args(
                 } else {
                     result.push(CallArgClass::StructByValStack { size });
                     int_idx = config.max_int_regs;
+                }
+            } else if config.large_struct_by_ref {
+                // AAPCS64: composites > 16 bytes are passed by reference.
+                // The caller passes a pointer (the IR value is already a struct pointer).
+                if int_idx < config.max_int_regs {
+                    result.push(CallArgClass::IntReg { reg_idx: int_idx });
+                    int_idx += 1;
+                } else {
+                    result.push(CallArgClass::Stack);
                 }
             } else {
                 result.push(CallArgClass::LargeStructStack { size });

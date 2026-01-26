@@ -44,6 +44,12 @@ pub enum ParamClass {
     StructStack { offset: i64, size: usize },
     /// Large struct (>16 bytes) passed on the stack.
     LargeStructStack { offset: i64, size: usize },
+    /// Large struct (>16 bytes) passed by reference in a GP register (AAPCS64).
+    /// The register holds a pointer to the struct data; callee must copy from it.
+    LargeStructByRefReg { reg_idx: usize, size: usize },
+    /// Large struct (>16 bytes) passed by reference on the stack (AAPCS64, overflow case).
+    /// The stack slot holds a pointer to the struct data; callee must copy from it.
+    LargeStructByRefStack { offset: i64, size: usize },
 }
 
 impl ParamClass {
@@ -52,7 +58,8 @@ impl ParamClass {
         matches!(self,
             ParamClass::StackScalar { .. } | ParamClass::I128Stack { .. } |
             ParamClass::F128Stack { .. } | ParamClass::F128AlwaysStack { .. } |
-            ParamClass::StructStack { .. } | ParamClass::LargeStructStack { .. }
+            ParamClass::StructStack { .. } | ParamClass::LargeStructStack { .. } |
+            ParamClass::LargeStructByRefStack { .. }
         )
     }
 
@@ -60,7 +67,8 @@ impl ParamClass {
     pub fn uses_gp_reg(&self) -> bool {
         matches!(self,
             ParamClass::IntReg { .. } | ParamClass::I128RegPair { .. } |
-            ParamClass::StructByValReg { .. } | ParamClass::F128GpPair { .. }
+            ParamClass::StructByValReg { .. } | ParamClass::F128GpPair { .. } |
+            ParamClass::LargeStructByRefReg { .. }
         )
     }
 
@@ -69,6 +77,7 @@ impl ParamClass {
     pub fn gp_reg_count(&self) -> usize {
         match self {
             ParamClass::IntReg { .. } => 1,
+            ParamClass::LargeStructByRefReg { .. } => 1, // pointer in one GP reg
             ParamClass::I128RegPair { .. } => 2,
             ParamClass::StructByValReg { size, .. } => {
                 // 1 reg for <=8 bytes, 2 regs for >8 bytes (up to 16)
@@ -113,6 +122,16 @@ pub fn classify_params(func: &IrFunction, config: &CallAbiConfig) -> Vec<ParamCl
                     });
                     stack_offset += ((size + 7) & !7) as i64;
                     int_reg_idx = config.max_int_regs;
+                }
+            } else if config.large_struct_by_ref {
+                // AAPCS64: large composites arrive as a pointer in a GP register or on stack.
+                // The callee must copy from the pointer into the local alloca.
+                if int_reg_idx < config.max_int_regs {
+                    result.push(ParamClass::LargeStructByRefReg { reg_idx: int_reg_idx, size });
+                    int_reg_idx += 1;
+                } else {
+                    result.push(ParamClass::LargeStructByRefStack { offset: stack_offset, size });
+                    stack_offset += 8; // stack slot holds a pointer, not the struct data
                 }
             } else {
                 result.push(ParamClass::LargeStructStack {

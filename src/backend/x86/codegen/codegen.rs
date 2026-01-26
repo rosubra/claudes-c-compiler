@@ -1585,8 +1585,9 @@ impl ArchCodegen for X86Codegen {
                         self.state.emit_fmt(format_args!("    movq %rax, {}(%rbp)", dst_off));
                     }
                 }
-                // These variants don't occur for x86 (no F128 in FP/GP pair regs).
-                ParamClass::F128FpReg { .. } | ParamClass::F128GpPair { .. } | ParamClass::F128Stack { .. } => {}
+                // These variants don't occur for x86 (no F128 in FP/GP pair regs, no by-ref structs).
+                ParamClass::F128FpReg { .. } | ParamClass::F128GpPair { .. } | ParamClass::F128Stack { .. } |
+                ParamClass::LargeStructByRefReg { .. } | ParamClass::LargeStructByRefStack { .. } => {}
             }
         }
     }
@@ -2734,6 +2735,7 @@ impl ArchCodegen for X86Codegen {
             align_i128_pairs: false,
             f128_in_fp_regs: false, f128_in_gp_pairs: false,
             variadic_floats_in_gp: false,
+            large_struct_by_ref: false, // x86-64 SysV: large structs passed on stack by value
         }
     }
 

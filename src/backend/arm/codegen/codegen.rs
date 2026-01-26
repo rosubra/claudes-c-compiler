@@ -1032,14 +1032,17 @@ impl ArchCodegen for ArmCodegen {
             self.va_fp_save_offset = space;
             space += 128; // 8 FP/SIMD registers * 16 bytes (q0-q7)
 
-            // Count named GP and FP params to know where variadic args start
+            // Count named GP and FP params using the ABI classification
+            // to properly account for 2-register structs and by-ref structs.
+            let config = self.call_abi_config();
+            let param_classes = crate::backend::call_emit::classify_params(func, &config);
             let mut named_gp = 0usize;
             let mut named_fp = 0usize;
-            for param in &func.params {
-                if param.ty.is_float() {
+            for class in &param_classes {
+                named_gp += class.gp_reg_count();
+                if matches!(class, crate::backend::call_emit::ParamClass::FloatReg { .. }
+                    | crate::backend::call_emit::ParamClass::F128FpReg { .. }) {
                     named_fp += 1;
-                } else {
-                    named_gp += 1;
                 }
             }
             self.va_named_gp_count = named_gp.min(8);
@@ -1140,6 +1143,19 @@ impl ArchCodegen for ArmCodegen {
                     self.emit_store_to_sp(ARM_ARG_REGS[base_reg_idx], slot.0, "str");
                     if size > 8 {
                         self.emit_store_to_sp(ARM_ARG_REGS[base_reg_idx + 1], slot.0 + 8, "str");
+                    }
+                }
+                ParamClass::LargeStructByRefReg { reg_idx, size } => {
+                    // AAPCS64: register holds a pointer to the struct data.
+                    // Copy size bytes from the pointer into the local alloca.
+                    let src_reg = ARM_ARG_REGS[reg_idx];
+                    // Copy 8-byte chunks using x9/x10 as scratch
+                    let n_dwords = (size + 7) / 8;
+                    for qi in 0..n_dwords {
+                        let src_off = (qi * 8) as i64;
+                        let dst_off = slot.0 + src_off;
+                        self.emit_load_from_reg("x9", src_reg, src_off, "ldr");
+                        self.emit_store_to_sp("x9", dst_off, "str");
                     }
                 }
                 _ => {} // Non-GP classes handled below.
@@ -1275,6 +1291,19 @@ impl ArchCodegen for ArmCodegen {
                     let store_instr = Self::str_for_type(ty);
                     let reg = Self::reg_for_type("x0", ty);
                     self.emit_store_to_sp(reg, slot.0, store_instr);
+                }
+                ParamClass::LargeStructByRefStack { offset, size } => {
+                    // AAPCS64: stack slot holds a pointer to the struct data.
+                    // Load the pointer, then copy the struct data into the alloca.
+                    let caller_offset = frame_size + offset;
+                    self.emit_load_from_sp("x0", caller_offset, "ldr");
+                    let n_dwords = (size + 7) / 8;
+                    for qi in 0..n_dwords {
+                        let src_off = (qi * 8) as i64;
+                        let dst_off = slot.0 + src_off;
+                        self.emit_load_from_reg("x1", "x0", src_off, "ldr");
+                        self.emit_store_to_sp("x1", dst_off, "str");
+                    }
                 }
                 _ => {} // Non-stack classes already handled.
             }
@@ -1878,6 +1907,7 @@ impl ArchCodegen for ArmCodegen {
             align_i128_pairs: true,
             f128_in_fp_regs: true, f128_in_gp_pairs: false,
             variadic_floats_in_gp: false,
+            large_struct_by_ref: true, // AAPCS64: composites > 16 bytes passed by reference
         }
     }
 
