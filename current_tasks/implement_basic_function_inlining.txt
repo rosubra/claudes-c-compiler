@@ -1,0 +1,19 @@
+Implement basic function inlining pass for small static/static-inline functions
+
+Problem: The compiler doesn't inline any functions. Static inline functions from kernel
+headers (like is_x32_frame() which returns `0 && expr`) are emitted as separate functions.
+Callers can't see through the call to eliminate dead branches guarded by the constant return.
+This causes link errors when the dead branch references undefined symbols (e.g., x32_setup_rt_frame
+is referenced but doesn't exist because CONFIG_X86_X32_ABI is not set).
+
+Multiple kernel files fail because of this: kernel/signal.c, drivers/acpi/processor_driver.c,
+net/core/dev.c, etc.
+
+Fix: Add an inlining pass (src/passes/inline.rs) that:
+1. Identifies small static functions suitable for inlining (< ~50 instructions)
+2. Clones the callee's basic blocks into the caller, remapping Value and BlockId
+3. Wires up arguments and return values
+4. Runs before the optimization pipeline so subsequent passes can clean up
+
+After inlining, existing constant folding + DCE + CFG simplify will eliminate the dead branches,
+removing references to undefined symbols.
