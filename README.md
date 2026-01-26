@@ -83,6 +83,7 @@ See `git log` for full history. Key milestones:
 - `-Wa,` assembler pass-through: forward flags to assembler (needed by kernel as-version.sh)
 - `-Wp,-MMD,path` and `-MD`/`-MF` dependency file generation: needed by kernel build system
 - Bumped `__GNUC__` from 4.8 to 6.5 (satisfies kernel ≥5.1 minimum, stays <7 for glibc compat)
+- Fix enum constants in designated array initializers: `expr_might_be_addr()` now excludes enum identifiers, fixing musl vfprintf's states[][] table
 
 ### Project Build Status
 
