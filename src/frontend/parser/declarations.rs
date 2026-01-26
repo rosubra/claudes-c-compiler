@@ -7,6 +7,7 @@
 // K&R-style function parameters are also handled here, where parameter types
 // are declared separately after the parameter name list.
 
+use crate::common::fx_hash::FxHashMap;
 use crate::common::source::Span;
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
@@ -729,16 +730,29 @@ impl Parser {
     /// Handles integer/char literals, all arithmetic/bitwise/shift/logical/relational
     /// binary ops, unary ops (neg, bitwise not, logical not), and ternary expressions.
     /// Used for range designator bounds, alignment expressions, etc.
+    /// The optional `enum_consts` map allows resolving enum constant identifiers.
     pub(super) fn eval_const_int_expr(expr: &Expr) -> Option<i64> {
+        Self::eval_const_int_expr_with_enums(expr, None)
+    }
+
+    /// Evaluate a constant integer expression, with access to known enum constants.
+    pub(super) fn eval_const_int_expr_with_enums(
+        expr: &Expr,
+        enum_consts: Option<&FxHashMap<String, i64>>,
+    ) -> Option<i64> {
         match expr {
             Expr::IntLiteral(val, _) => Some(*val),
             Expr::UIntLiteral(val, _) => Some(*val as i64),
             Expr::LongLiteral(val, _) => Some(*val),
             Expr::ULongLiteral(val, _) => Some(*val as i64),
             Expr::CharLiteral(val, _) => Some(*val as i64),
+            // Identifiers: look up enum constants if available
+            Expr::Identifier(name, _) => {
+                enum_consts.and_then(|m| m.get(name.as_str()).copied())
+            }
             Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = Self::eval_const_int_expr(lhs)?;
-                let r = Self::eval_const_int_expr(rhs)?;
+                let l = Self::eval_const_int_expr_with_enums(lhs, enum_consts)?;
+                let r = Self::eval_const_int_expr_with_enums(rhs, enum_consts)?;
                 match op {
                     BinOp::Add => Some(l.wrapping_add(r)),
                     BinOp::Sub => Some(l.wrapping_sub(r)),
@@ -762,27 +776,27 @@ impl Parser {
                 }
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                Self::eval_const_int_expr(inner).map(|v| v.wrapping_neg())
+                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| v.wrapping_neg())
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                Self::eval_const_int_expr(inner).map(|v| !v)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| !v)
             }
             Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
-                Self::eval_const_int_expr(inner).map(|v| if v == 0 { 1 } else { 0 })
+                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| if v == 0 { 1 } else { 0 })
             }
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
-                Self::eval_const_int_expr(inner)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts)
             }
             Expr::Conditional(cond, then_expr, else_expr, _) => {
-                let c = Self::eval_const_int_expr(cond)?;
+                let c = Self::eval_const_int_expr_with_enums(cond, enum_consts)?;
                 if c != 0 {
-                    Self::eval_const_int_expr(then_expr)
+                    Self::eval_const_int_expr_with_enums(then_expr, enum_consts)
                 } else {
-                    Self::eval_const_int_expr(else_expr)
+                    Self::eval_const_int_expr_with_enums(else_expr, enum_consts)
                 }
             }
             Expr::Cast(_, inner, _) => {
-                Self::eval_const_int_expr(inner)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts)
             }
             Expr::Sizeof(arg, _) => {
                 match arg.as_ref() {

@@ -237,6 +237,14 @@ fn real_main() {
                 // The kernel uses -m16 for boot/realmode code (with .code16gcc).
                 driver.gcc_fallback = true;
             }
+            "-mno-sse" | "-mno-sse2" | "-mno-mmx" | "-mno-sse3" | "-mno-ssse3"
+            | "-mno-sse4" | "-mno-sse4.1" | "-mno-sse4.2" | "-mno-avx"
+            | "-mno-avx2" | "-mno-avx512f" | "-mno-3dnow" => {
+                // Disable SSE/AVX/MMX. The kernel uses -mno-sse -mno-mmx -mno-sse2 etc.
+                // to prevent FPU/SIMD use in kernel code. When any of these are set,
+                // we must not emit XMM instructions (e.g., in variadic prologues).
+                driver.no_sse = true;
+            }
             arg if arg.starts_with("-m") => {
                 // -m64, -march=, -mtune=, etc. (ignored for now)
             }

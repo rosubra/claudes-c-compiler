@@ -68,6 +68,10 @@ pub struct Driver {
     /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
     /// Required by the Linux kernel for Intel CET/IBT (Indirect Branch Tracking).
     pub cf_protection_branch: bool,
+    /// Whether SSE is disabled (-mno-sse). When true, the compiler must not emit
+    /// any SSE/SSE2/AVX instructions (movdqu, movss, movsd, etc.).
+    /// The Linux kernel uses -mno-sse to avoid FPU state in kernel code.
+    pub no_sse: bool,
     /// Explicit language override from -x flag.
     /// When set, overrides file extension detection for input language.
     /// Values: "c", "assembler", "assembler-with-cpp", "none" (reset).
@@ -117,6 +121,7 @@ impl Driver {
             indirect_branch_thunk: false,
             patchable_function_entry: None,
             cf_protection_branch: false,
+            no_sse: false,
             explicit_language: None,
             assembler_extra_args: Vec::new(),
             dep_file: None,
@@ -653,6 +658,7 @@ impl Driver {
             indirect_branch_thunk: self.indirect_branch_thunk,
             patchable_function_entry: self.patchable_function_entry,
             cf_protection_branch: self.cf_protection_branch,
+            no_sse: self.no_sse,
         };
         let asm = self.target.generate_assembly_with_opts(&module, &opts);
         if time_phases { eprintln!("[TIME] codegen: {:.3}s ({} bytes asm)", t8.elapsed().as_secs_f64(), asm.len()); }

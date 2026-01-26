@@ -36,6 +36,13 @@ pub struct CodegenOptions {
     /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
     /// Required for Intel CET/IBT (Indirect Branch Tracking).
     pub cf_protection_branch: bool,
+    /// Whether SSE is disabled (-mno-sse). When true, the x86 codegen avoids
+    /// SSE/XMM instructions in variadic prologues (XMM register saving) and
+    /// va_start sets fp_offset to overflow so va_arg never uses XMM regs.
+    /// TODO: Full -mno-sse support would also need to avoid SSE in float
+    /// operations, casts, and other FP codegen paths. Currently only the
+    /// variadic ABI path is gated, which is sufficient for the Linux kernel.
+    pub no_sse: bool,
 }
 
 /// Target architecture.
@@ -114,6 +121,7 @@ impl Target {
                 cg.set_indirect_branch_thunk(opts.indirect_branch_thunk);
                 cg.set_patchable_function_entry(opts.patchable_function_entry);
                 cg.set_cf_protection_branch(opts.cf_protection_branch);
+                cg.set_no_sse(opts.no_sse);
                 cg.generate(module)
             }
             Target::Aarch64 => arm::ArmCodegen::new().generate(module),

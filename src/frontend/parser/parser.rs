@@ -10,6 +10,7 @@
 // Each module adds methods to the Parser struct via `impl Parser` blocks.
 // Methods are pub(super) so they can be called across modules within the parser.
 
+use crate::common::fx_hash::FxHashMap;
 use crate::common::source::Span;
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::{Token, TokenKind};
@@ -110,6 +111,10 @@ pub struct Parser {
     /// Set to the address space when __seg_gs or __seg_fs qualifier is encountered.
     /// Reset after being consumed by pointer type construction.
     pub(super) parsing_address_space: AddressSpace,
+    /// Map of enum constant names to their integer values.
+    /// Populated as enum definitions are parsed, so that later constant expressions
+    /// (e.g., in __attribute__((aligned(1 << ENUM_CONST)))) can resolve them.
+    pub(super) enum_constants: FxHashMap<String, i64>,
 }
 
 impl Parser {
@@ -143,6 +148,7 @@ impl Parser {
             pragma_default_visibility: None,
             error_count: 0,
             parsing_address_space: AddressSpace::Default,
+            enum_constants: FxHashMap::default(),
         }
     }
 
@@ -777,7 +783,8 @@ impl Parser {
         if matches!(self.peek(), TokenKind::RParen) {
             self.advance();
         }
-        Self::eval_const_int_expr(&expr).map(|v| v as usize)
+        let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
+        Self::eval_const_int_expr_with_enums(&expr, enums).map(|v| v as usize)
     }
 
     /// Parse the parenthesized argument of `_Alignas(...)`.
@@ -811,7 +818,8 @@ impl Parser {
         if matches!(self.peek(), TokenKind::RParen) {
             self.advance();
         }
-        Self::eval_const_int_expr(&expr).map(|v| v as usize)
+        let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
+        Self::eval_const_int_expr_with_enums(&expr, enums).map(|v| v as usize)
     }
 
     /// Compute sizeof (in bytes) for a type specifier.

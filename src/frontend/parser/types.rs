@@ -418,7 +418,11 @@ impl Parser {
         let (packed2, _, _, _) = self.parse_gcc_attributes();
         is_packed = is_packed || packed2;
         let variants = if matches!(self.peek(), TokenKind::LBrace) {
-            Some(self.parse_enum_variants())
+            let v = self.parse_enum_variants();
+            // Register enum constant values so that later constant expressions
+            // (e.g., in __attribute__((aligned(1 << ENUM_CONST)))) can resolve them.
+            self.register_enum_constants(&v);
+            Some(v)
         } else {
             None
         };
@@ -693,6 +697,26 @@ impl Parser {
         }
         self.expect(&TokenKind::RBrace);
         variants
+    }
+
+    /// Register enum constant values from parsed variants into the parser's
+    /// enum_constants map. This allows later constant expressions (e.g., in
+    /// __attribute__((aligned(1 << ENUM_CONST)))) to resolve these identifiers.
+    pub(super) fn register_enum_constants(&mut self, variants: &[super::ast::EnumVariant]) {
+        let mut next_value: i64 = 0;
+        for variant in variants {
+            let val = if let Some(ref expr) = variant.value {
+                // Evaluate the explicit value expression.
+                // Use eval_const_int_expr_with_enums so references to previously
+                // defined enum constants are resolved.
+                let evaluated = Self::eval_const_int_expr_with_enums(expr, Some(&self.enum_constants));
+                evaluated.unwrap_or(next_value)
+            } else {
+                next_value
+            };
+            self.enum_constants.insert(variant.name.clone(), val);
+            next_value = val + 1;
+        }
     }
 
     /// Parse a type-name for __builtin_va_arg: type-specifier + abstract declarator.

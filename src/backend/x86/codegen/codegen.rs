@@ -160,6 +160,9 @@ pub struct X86Codegen {
     reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are used and need save/restore.
     used_callee_saved: Vec<PhysReg>,
+    /// Whether SSE is disabled (-mno-sse). When true, variadic prologues skip
+    /// XMM saves and va_start sets fp_offset to overflow immediately.
+    no_sse: bool,
 }
 
 impl X86Codegen {
@@ -176,6 +179,7 @@ impl X86Codegen {
             asm_xmm_scratch_idx: 0,
             reg_assignments: FxHashMap::default(),
             used_callee_saved: Vec::new(),
+            no_sse: false,
         }
     }
 
@@ -208,6 +212,11 @@ impl X86Codegen {
     /// Enable CF protection branch (-fcf-protection=branch) to emit endbr64.
     pub fn set_cf_protection_branch(&mut self, enabled: bool) {
         self.state.cf_protection_branch = enabled;
+    }
+
+    /// Disable SSE (-mno-sse). Prevents emission of any SSE/XMM instructions.
+    pub fn set_no_sse(&mut self, enabled: bool) {
+        self.no_sse = enabled;
     }
 
     pub fn generate(mut self, module: &IrModule) -> String {
@@ -1426,11 +1435,15 @@ impl ArchCodegen for X86Codegen {
             (-new_space, new_space)
         }, &reg_assigned);
 
-        // For variadic functions, reserve 176 bytes for the register save area:
+        // For variadic functions, reserve space for the register save area:
         // 48 bytes for 6 integer registers (rdi, rsi, rdx, rcx, r8, r9)
-        // 128 bytes for 8 XMM registers (xmm0-xmm7, 16 bytes each)
+        // +128 bytes for 8 XMM registers (xmm0-xmm7, 16 bytes each) when SSE is enabled
         if func.is_variadic {
-            space += 176;
+            if self.no_sse {
+                space += 48; // Only GP registers, no XMM saves
+            } else {
+                space += 176; // GP + XMM registers
+            }
             self.reg_save_area_offset = -space;
         }
 
@@ -1488,7 +1501,7 @@ impl ArchCodegen for X86Codegen {
 
         // For variadic functions, save all arg registers to the register save area.
         // This allows va_arg to retrieve register-passed arguments.
-        // Layout: [0..47] = integer regs, [48..175] = XMM regs (16 bytes each)
+        // Layout: [0..47] = integer regs, [48..175] = XMM regs (16 bytes each, only when SSE enabled)
         if func.is_variadic {
             let base = self.reg_save_area_offset;
             // Save 6 integer argument registers
@@ -1498,9 +1511,12 @@ impl ArchCodegen for X86Codegen {
             self.state.emit_fmt(format_args!("    movq %rcx, {}(%rbp)", base + 24));
             self.state.emit_fmt(format_args!("    movq %r8, {}(%rbp)", base + 32));
             self.state.emit_fmt(format_args!("    movq %r9, {}(%rbp)", base + 40));
-            // Save 8 XMM argument registers (16 bytes each)
-            for i in 0..8i64 {
-                self.state.emit_fmt(format_args!("    movdqu %xmm{}, {}(%rbp)", i, base + 48 + i * 16));
+            // Save 8 XMM argument registers (16 bytes each) — only when SSE is enabled.
+            // With -mno-sse, XMM registers are not used for argument passing.
+            if !self.no_sse {
+                for i in 0..8i64 {
+                    self.state.emit_fmt(format_args!("    movdqu %xmm{}, {}(%rbp)", i, base + 48 + i * 16));
+                }
             }
         }
     }
@@ -3078,10 +3094,14 @@ impl ArchCodegen for X86Codegen {
         // Cap at 48 (6 registers * 8 bytes) since only 6 GP regs are saved
         let gp_offset = self.num_named_int_params.min(6) * 8;
         self.state.emit_fmt(format_args!("    movl ${}, (%rax)", gp_offset));
-        // fp_offset = 48 + min(num_named_fp_params, 8) * 16 (skip named FP params in XMM save area)
-        // Each XMM register occupies 16 bytes in the register save area
-        // Note: long double (F128) is NOT included here - it's always stack-passed via x87
-        let fp_offset = 48 + self.num_named_fp_params.min(8) * 16;
+        // fp_offset: when SSE is disabled (-mno-sse), set to 176 so va_arg always takes
+        // the overflow (stack) path for FP args, since no XMM registers are saved.
+        // When SSE is enabled: 48 + min(num_named_fp_params, 8) * 16
+        let fp_offset = if self.no_sse {
+            176 // Overflow immediately — no XMM save area exists
+        } else {
+            48 + self.num_named_fp_params.min(8) * 16
+        };
         self.state.emit_fmt(format_args!("    movl ${}, 4(%rax)", fp_offset));
         // overflow_arg_area = rbp + 16 + stack_bytes_for_named_params
         // Stack-passed named params include:
