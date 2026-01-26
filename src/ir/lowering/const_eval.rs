@@ -301,8 +301,26 @@ impl Lowerer {
             // ((type) { value }) -> evaluate the inner initializer's scalar value.
             // This is critical for global/static array initializers where compound
             // literals like ((pgprot_t) { 0x120 }) must be evaluated at compile time.
-            Expr::CompoundLiteral(_type_spec, ref init, _) => {
-                self.eval_const_initializer_scalar(init)
+            // Only treat as scalar if the type is NOT a multi-field aggregate;
+            // multi-field structs must go through the proper struct init path.
+            Expr::CompoundLiteral(ref type_spec, ref init, _) => {
+                let cl_ctype = self.type_spec_to_ctype(type_spec);
+                let is_multi_field_aggregate = match &cl_ctype {
+                    CType::Struct(key) | CType::Union(key) => {
+                        if let Some(layout) = self.types.struct_layouts.get(&**key) {
+                            layout.fields.len() > 1
+                        } else {
+                            false
+                        }
+                    }
+                    CType::Array(..) => true,
+                    _ => false,
+                };
+                if is_multi_field_aggregate {
+                    None
+                } else {
+                    self.eval_const_initializer_scalar(init)
+                }
             }
             _ => None,
         }
@@ -320,6 +338,23 @@ impl Lowerer {
                 // Recurse into the first item.
                 if let Some(first) = items.first() {
                     self.eval_const_initializer_scalar(&first.init)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Try to extract a global address from an initializer.
+    /// Recurses into brace-wrapped lists to find the first pointer/address value.
+    /// This handles compound literals like `((struct Wrap) {inc_global})` where
+    /// the inner initializer contains a function pointer or global address.
+    fn eval_global_addr_from_initializer(&self, init: &Initializer) -> Option<GlobalInit> {
+        match init {
+            Initializer::Expr(expr) => self.eval_global_addr_expr(expr),
+            Initializer::List(items) => {
+                if let Some(first) = items.first() {
+                    self.eval_global_addr_from_initializer(&first.init)
                 } else {
                     None
                 }
@@ -537,6 +572,12 @@ impl Lowerer {
             // (type *)expr -> try evaluating the inner expression
             Expr::Cast(_, inner, _) => {
                 self.eval_global_addr_expr(inner)
+            }
+            // ((struct S) { func_ptr }) -> unwrap compound literal and try inner init
+            // This handles cases like ((struct Wrap) {inc_global}) in global initializers
+            // where the compound literal wraps a struct containing a function pointer.
+            Expr::CompoundLiteral(_, ref init, _) => {
+                self.eval_global_addr_from_initializer(init)
             }
             // &x + n or arr + n -> GlobalAddrOffset with byte offset
             Expr::BinaryOp(BinOp::Add, lhs, rhs, _) => {

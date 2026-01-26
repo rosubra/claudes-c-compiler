@@ -891,6 +891,44 @@ impl Lowerer {
         Self::build_compound_from_bytes_and_ptrs(bytes, ptr_ranges, total_size)
     }
 
+    /// Fill struct fields from an initializer item list into the byte buffer and ptr_ranges.
+    /// Used both for braced init lists `{ field1, field2, ... }` and for unwrapped compound
+    /// literals `((struct S) { field1, field2, ... })` in struct array initializers.
+    fn fill_struct_fields_from_items(
+        &mut self,
+        sub_items: &[InitializerItem],
+        layout: &StructLayout,
+        base_offset: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let mut current_field_idx = 0usize;
+        for sub_item in sub_items {
+            let desig_name = h::first_field_designator(sub_item);
+            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx, &self.types) {
+                Some(idx) => idx,
+                None => break,
+            };
+            let field = &layout.fields[field_idx];
+            let field_offset = base_offset + field.offset;
+
+            if h::has_nested_field_designator(sub_item) {
+                self.fill_nested_designator_with_ptrs(
+                    sub_item, &field.ty, field_offset,
+                    bytes, ptr_ranges,
+                );
+                current_field_idx = field_idx + 1;
+                continue;
+            }
+
+            self.emit_struct_field_init_compound(
+                sub_item, field, field_offset,
+                bytes, ptr_ranges,
+            );
+            current_field_idx = field_idx + 1;
+        }
+    }
+
     /// Emit a single struct field initialization into the byte buffer and ptr_ranges.
     /// Handles pointer fields, pointer array fields, bitfields, nested structs, and scalars.
     fn emit_struct_field_init_compound(
@@ -976,52 +1014,56 @@ impl Lowerer {
 
             match &item.init {
                 Initializer::List(sub_items) => {
-                    let mut current_field_idx = 0usize;
-                    for sub_item in sub_items {
-                        let desig_name = h::first_field_designator(sub_item);
-                        let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx, &self.types) {
-                            Some(idx) => idx,
-                            None => break,
-                        };
-                        let field = &layout.fields[field_idx];
-                        let field_offset = base_offset + field.offset;
-
-                        if h::has_nested_field_designator(sub_item) {
-                            self.fill_nested_designator_with_ptrs(
-                                sub_item, &field.ty, field_offset,
-                                bytes, ptr_ranges,
-                            );
-                            current_field_idx = field_idx + 1;
-                            continue;
-                        }
-
-                        self.emit_struct_field_init_compound(
-                            sub_item, field, field_offset,
-                            bytes, ptr_ranges,
-                        );
-                        current_field_idx = field_idx + 1;
-                    }
+                    self.fill_struct_fields_from_items(
+                        sub_items, layout, base_offset, bytes, ptr_ranges,
+                    );
                     item_idx += 1;
                 }
-                Initializer::Expr(_) => {
-                    // Flat initialization: consume items field-by-field for this struct.
-                    // Each item corresponds to one field, not one struct element.
-                    let mut current_field_idx = 0usize;
-                    while item_idx < items.len() && current_field_idx < layout.fields.len() {
-                        let sub_item = &items[item_idx];
-                        // If this item has an array index designator, it starts a new element
-                        if sub_item.designators.first().is_some() && item_idx != 0 {
-                            break;
+                Initializer::Expr(ref expr) => {
+                    // Compound literal, e.g., ((struct Wrap) {inc_global}):
+                    // unwrap it and process the inner initializer list as struct fields.
+                    if let Expr::CompoundLiteral(_, ref inner_init, _) = expr {
+                        if let Initializer::List(ref sub_items) = **inner_init {
+                            self.fill_struct_fields_from_items(
+                                sub_items, layout, base_offset, bytes, ptr_ranges,
+                            );
+                        } else if let Initializer::Expr(ref inner_expr) = **inner_init {
+                            // Scalar compound literal (e.g., ((type){expr})):
+                            // treat the inner expression as the value for the first field
+                            if !layout.fields.is_empty() {
+                                let field = &layout.fields[0];
+                                let field_offset = base_offset + field.offset;
+                                let synth_item = InitializerItem {
+                                    designators: Vec::new(),
+                                    init: Initializer::Expr(inner_expr.clone()),
+                                };
+                                self.emit_struct_field_init_compound(
+                                    &synth_item, field, field_offset,
+                                    bytes, ptr_ranges,
+                                );
+                            }
                         }
-                        let field = &layout.fields[current_field_idx];
-                        let field_offset = base_offset + field.offset;
-
-                        self.emit_struct_field_init_compound(
-                            sub_item, field, field_offset,
-                            bytes, ptr_ranges,
-                        );
-                        current_field_idx += 1;
                         item_idx += 1;
+                    } else {
+                        // Flat initialization: consume items field-by-field for this struct.
+                        // Each item corresponds to one field, not one struct element.
+                        let mut current_field_idx = 0usize;
+                        while item_idx < items.len() && current_field_idx < layout.fields.len() {
+                            let sub_item = &items[item_idx];
+                            // If this item has an array index designator, it starts a new element
+                            if sub_item.designators.first().is_some() && item_idx != 0 {
+                                break;
+                            }
+                            let field = &layout.fields[current_field_idx];
+                            let field_offset = base_offset + field.offset;
+
+                            self.emit_struct_field_init_compound(
+                                sub_item, field, field_offset,
+                                bytes, ptr_ranges,
+                            );
+                            current_field_idx += 1;
+                            item_idx += 1;
+                        }
                     }
                 }
             }
