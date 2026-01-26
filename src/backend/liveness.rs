@@ -201,6 +201,13 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
         block_id_to_idx.insert(block.label.0, idx);
     }
 
+    // Track block indices containing setjmp/_setjmp/sigsetjmp calls.
+    // These "returns twice" functions require that values live at the call point
+    // have their intervals extended so their stack slots are not reused between
+    // the initial return and the longjmp return.
+    let mut setjmp_block_indices: Vec<usize> = Vec::new();
+    let mut block_idx_counter: usize = 0;
+
     for block in &func.blocks {
         let block_start = point;
         block_start_points.push(block_start);
@@ -208,6 +215,11 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
         let mut kill = BitSet::new(num_values);
 
         for inst in &block.instructions {
+            // Detect calls to setjmp and friends (returns-twice functions).
+            if is_returns_twice_call(inst) {
+                setjmp_block_indices.push(block_idx_counter);
+            }
+
             // Record uses before defs
             record_instruction_uses_dense(inst, point, &alloca_set, &id_to_dense, &mut last_use_points);
 
@@ -237,6 +249,7 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
 
         block_gen.push(gen);
         block_kill.push(kill);
+        block_idx_counter += 1;
     }
 
     let num_points = point;
@@ -338,6 +351,35 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
                 *entry = end;
             }
         });
+    }
+
+    // Phase 4b: Handle setjmp/longjmp — extend intervals for values live at
+    // setjmp call points. When setjmp returns twice (via longjmp), all values
+    // that were live at the setjmp call must still be available. If their stack
+    // slots were reused by code between the initial setjmp return and the
+    // longjmp, the restored values would be stale. To prevent this, extend the
+    // live intervals of all values live-in to a setjmp-containing block so they
+    // span to the end of the function, ensuring their stack slots are never reused.
+    if !setjmp_block_indices.is_empty() {
+        let func_end = num_points.saturating_sub(1);
+        for &sjb in &setjmp_block_indices {
+            // All values that are live-in to the setjmp block are candidates.
+            // (They were defined before setjmp and may be needed after longjmp.)
+            live_in[sjb].for_each_set_bit(|dense_idx| {
+                let entry = &mut last_use_points[dense_idx];
+                if *entry == u32::MAX || func_end > *entry {
+                    *entry = func_end;
+                }
+            });
+            // Also extend values that are live-out of the setjmp block,
+            // as they survive into the successors (including the longjmp path).
+            live_out[sjb].for_each_set_bit(|dense_idx| {
+                let entry = &mut last_use_points[dense_idx];
+                if *entry == u32::MAX || func_end > *entry {
+                    *entry = func_end;
+                }
+            });
+        }
     }
 
     // Phase 5: Build intervals.
@@ -483,6 +525,17 @@ fn terminator_targets(term: &Terminator) -> Vec<u32> {
             targets
         }
         _ => vec![],
+    }
+}
+
+/// Return true if the instruction is a call to setjmp, _setjmp, sigsetjmp, or __sigsetjmp.
+/// These functions "return twice": once normally (returning 0) and again when longjmp is called.
+/// Values live at the call point must have their intervals extended to prevent stack slot reuse.
+fn is_returns_twice_call(inst: &Instruction) -> bool {
+    if let Instruction::Call { func, .. } = inst {
+        matches!(func.as_str(), "setjmp" | "_setjmp" | "sigsetjmp" | "__sigsetjmp")
+    } else {
+        false
     }
 }
 

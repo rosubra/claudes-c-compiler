@@ -72,6 +72,7 @@ See `git log` for full history. Key milestones:
 - Has compiled Lua, zlib, mbedtls, libpng, jq, SQLite, libjpeg-turbo
 - Switch statement jump table optimization: dense switch IR terminator with indexed dispatch (all backends)
 - AArch64 compare-immediate optimization: `cmp Xn, #imm12` instead of loading constants into registers
+- **setjmp/longjmp liveness fix**: Extend live intervals of values live at setjmp call points to span the entire function, preventing stack slot reuse that corrupted callee-saved state after longjmp (fixed mquickjs x86 crash)
 - Phi cost limiting in mem2reg prevents stack overflow from phi explosion in large switch/computed-goto functions
 - GCC-compatible query flags (-dumpmachine, -dumpversion) for autoconf support
 - Assembly file (.S/.s) passthrough to target assembler
