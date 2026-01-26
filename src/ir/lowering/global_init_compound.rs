@@ -892,6 +892,13 @@ impl Lowerer {
         if let Some(addr) = self.eval_string_literal_addr_expr(expr) {
             return Some(addr);
         }
+        // &(compound_literal) at file scope: create anonymous global and return its address.
+        // e.g., .ptr = &(struct in6_addr){ { { 0xfc } } } in a static struct array initializer.
+        if let Expr::AddressOf(inner, _) = expr {
+            if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
+            }
+        }
         // Try as a global address expression (&x, func name, array name, etc.)
         if let Some(addr) = self.eval_global_addr_expr(expr) {
             return Some(addr);

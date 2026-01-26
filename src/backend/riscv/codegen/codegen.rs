@@ -2138,6 +2138,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    add t0, t0, t6");
         self.state.emit_fmt(format_args!("    li t6, -{}", align));
         self.state.emit("    and t0, t0, t6");
+        // t0 now holds an aligned address, not any previous SSA value.
+        self.state.reg_cache.invalidate_acc();
     }
 
     fn emit_acc_to_secondary(&mut self) {

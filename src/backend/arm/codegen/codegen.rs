@@ -2251,6 +2251,8 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    add x0, x0, x17");
         self.load_large_imm("x17", -(align as i64));
         self.state.emit("    and x0, x0, x17");
+        // x0 now holds an aligned address, not any previous SSA value.
+        self.state.reg_cache.invalidate_acc();
     }
 
     fn emit_acc_to_secondary(&mut self) {
