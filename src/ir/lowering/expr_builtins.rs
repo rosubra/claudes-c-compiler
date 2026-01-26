@@ -171,9 +171,15 @@ impl Lowerer {
             BuiltinKind::ConstantI64(val) => Some(Operand::Const(IrConst::I64(*val))),
             BuiltinKind::ConstantF64(val) => {
                 let is_float_variant = name == "__builtin_inff"
-                    || name == "__builtin_huge_valf";
+                    || name == "__builtin_huge_valf"
+                    || name == "__builtin_nanf";
+                let is_long_double_variant = name == "__builtin_infl"
+                    || name == "__builtin_huge_vall"
+                    || name == "__builtin_nanl";
                 if is_float_variant {
                     Some(Operand::Const(IrConst::F32(*val as f32)))
+                } else if is_long_double_variant {
+                    Some(Operand::Const(IrConst::LongDouble(*val)))
                 } else {
                     Some(Operand::Const(IrConst::F64(*val)))
                 }
@@ -865,28 +871,34 @@ impl Lowerer {
     }
 
     /// Bitcast a float/double to its integer bit representation via memory.
-    /// F32 -> I32, F64 -> I64. Uses alloca+store+load for a true bitcast.
+    /// F32 -> I32, F64/F128 -> I64. Uses alloca+store+load for a true bitcast.
+    // TODO: F128 (long double) is currently stored as F64 at the backend level,
+    // so we treat it as F64 for bitcast purposes (8 bytes, I64 result).
+    // When true F128 support is added, this must handle 16-byte bitcast.
     fn bitcast_float_to_int(&mut self, val: Operand, float_ty: IrType) -> (Operand, IrType) {
-        let int_ty = match float_ty {
-            IrType::F32 => IrType::I32,
-            _ => IrType::I64,
+        let (int_ty, store_ty, size) = match float_ty {
+            IrType::F32 => (IrType::I32, IrType::F32, 4),
+            // F128 is stored as F64 at backend level, treat identically
+            _ => (IrType::I64, IrType::F64, 8),
         };
-        let size = if float_ty == IrType::F32 { 4 } else { 8 };
 
         let tmp_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: tmp_alloca, size, ty: float_ty, align: 0, volatile: false });
+        self.emit(Instruction::Alloca { dest: tmp_alloca, size, ty: store_ty, align: 0, volatile: false });
 
         let val_v = self.operand_to_value(val);
-        self.emit(Instruction::Store { val: Operand::Value(val_v), ptr: tmp_alloca, ty: float_ty , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Store { val: Operand::Value(val_v), ptr: tmp_alloca, ty: store_ty, seg_override: AddressSpace::Default });
 
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty: int_ty , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Load { dest: result, ptr: tmp_alloca, ty: int_ty, seg_override: AddressSpace::Default });
 
         (Operand::Value(result), int_ty)
     }
 
     /// Floating-point bit-layout constants for classification.
     /// Returns (abs_mask, exp_only, exp_shift, exp_field_max, mant_mask).
+    // TODO: F128 (long double) is currently stored as F64 at the backend level,
+    // so we use F64 masks for it. When true F128 support is added, this must be
+    // updated with IEEE 754 binary128 masks (15-bit exponent, 112-bit mantissa).
     pub(super) fn fp_masks(float_ty: IrType) -> (i64, i64, i64, i64, i64) {
         match float_ty {
             IrType::F32 => (
@@ -896,6 +908,7 @@ impl Lowerer {
                 0xFF,
                 0x007FFFFF_i64,
             ),
+            // F128 uses F64 masks because the backend stores long double as double
             _ => (
                 0x7FFFFFFFFFFFFFFF_i64,
                 0x7FF0000000000000_u64 as i64,
@@ -962,6 +975,8 @@ impl Lowerer {
     /// Shared setup for FP classification builtins: validates args, lowers the
     /// float argument, bitcasts to integer bits, and retrieves the FP masks.
     /// The closure receives (self, bits, arg_ty, int_ty, masks) and returns the result Value.
+    ///
+    // TODO: F128 is stored as F64 at the backend, so bitcast and masks both use F64 layout.
     fn lower_fp_classify_with<F>(&mut self, args: &[Expr], classify: F) -> Option<Operand>
     where
         F: FnOnce(&mut Self, Operand, IrType, IrType, (i64, i64, i64, i64, i64)) -> Value,

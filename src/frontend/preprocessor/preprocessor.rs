@@ -419,6 +419,21 @@ impl Preprocessor {
                 && (!is_include || pending_line.is_empty());
 
             if process_directive {
+                // When accumulating a multi-line expression (pending_line is non-empty)
+                // and a #define or #undef directive appears, we must expand macros in
+                // the accumulated text BEFORE the directive modifies the macro table.
+                // This ensures tokens like D(0) are expanded using the macro definition
+                // that was active when those tokens were encountered, not the definition
+                // (or lack thereof) after the directive. Per C standard, directives take
+                // effect for tokens that follow them, not tokens that precede them.
+                if !pending_line.is_empty() && !is_include {
+                    let after_hash = trimmed[1..].trim_start();
+                    if after_hash.starts_with("define") || after_hash.starts_with("undef") {
+                        let expanded = self.macros.expand_line(&pending_line);
+                        pending_line.clear();
+                        pending_line.push_str(&expanded);
+                    }
+                }
                 let include_result = self.process_directive(trimmed, source_line_num + 1);
                 if let Some(included_content) = include_result {
                     output.push_str(&included_content);

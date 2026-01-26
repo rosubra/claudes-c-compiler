@@ -61,15 +61,17 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_fmax", BuiltinInfo::simple("fmax"));
     m.insert("__builtin_copysign", BuiltinInfo::simple("copysign"));
     m.insert("__builtin_copysignf", BuiltinInfo::simple("copysignf"));
-    m.insert("__builtin_nan", BuiltinInfo::simple("nan"));
-    m.insert("__builtin_nanf", BuiltinInfo::simple("nanf"));
+    // TODO: __builtin_nan(s) ignores the string payload argument (NaN payload).
+    // For common usage with "" this is correct; full payload support needs custom lowering.
+    m.insert("__builtin_nan", BuiltinInfo::constant_f64(f64::NAN));
+    m.insert("__builtin_nanf", BuiltinInfo::constant_f64(f64::NAN));
     m.insert("__builtin_inf", BuiltinInfo::constant_f64(f64::INFINITY));
     m.insert("__builtin_inff", BuiltinInfo::constant_f64(f64::INFINITY));
     m.insert("__builtin_infl", BuiltinInfo::constant_f64(f64::INFINITY));
     m.insert("__builtin_huge_val", BuiltinInfo::constant_f64(f64::INFINITY));
     m.insert("__builtin_huge_valf", BuiltinInfo::constant_f64(f64::INFINITY));
     m.insert("__builtin_huge_vall", BuiltinInfo::constant_f64(f64::INFINITY));
-    m.insert("__builtin_nanl", BuiltinInfo::simple("nan"));
+    m.insert("__builtin_nanl", BuiltinInfo::constant_f64(f64::NAN));
 
     // I/O
     m.insert("__builtin_printf", BuiltinInfo::simple("printf"));
