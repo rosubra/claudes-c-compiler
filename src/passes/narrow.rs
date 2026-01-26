@@ -14,10 +14,11 @@
 //!   %r = BinOp op %x, narrow(rhs), T  (direct operation in T)
 //!   (the narrowing Cast %n becomes dead, removed by DCE)
 //!
-//! This is safe for bit-preserving ops (Add, Sub, Mul, And, Or, Xor)
-//! because the low bits of the result are the same regardless of the
-//! width of the operation. For example:
-//!   (int32)(((int64)x + (int64)y)) == (int32)(x + y)
+//! Phase 4 (with explicit narrowing Cast) is safe for arithmetic ops
+//! (Add, Sub, Mul, And, Or, Xor, Shl) because the Cast truncates the
+//! result, and the low bits are identical regardless of operation width.
+//! Phase 5 (no Cast) is restricted to bitwise ops (And, Or, Xor) since
+//! arithmetic ops can produce different upper bits due to carries.
 //!
 //! Similarly, comparisons (Cmp) where both operands are widened from
 //! the same type can be narrowed, since sign/zero extension preserves
@@ -211,7 +212,8 @@ fn narrow_function(func: &mut IrFunction) -> usize {
     // operands come from I32 Loads (no explicit widening Cast). Pattern:
     //   %x = Load ptr, I32
     //   %r = BinOp op %x, const, I64   (BinOp type wider than operands)
-    // This is safe for bit-preserving ops since only the low bits matter.
+    // Only safe for bitwise ops (And/Or/Xor) since unlike Phase 4 there is
+    // no explicit narrowing Cast guaranteeing the consumer truncates the result.
     //
     // Build load_type_map: Value -> type for Load instructions
     let mut load_type_map: Vec<Option<IrType>> = vec![None; max_id + 1];
@@ -240,12 +242,12 @@ fn narrow_function(func: &mut IrFunction) -> usize {
                 if dest_id >= use_counts.len() || use_counts[dest_id] != 1 {
                     continue;
                 }
-                // Shl is NOT safe to narrow: signed bitfield extraction uses
-                // Shl+AShr at I64 with shift amounts > 31. Narrowing the Shl to
-                // I32 truncates the shift amount (x86 shll masks to &31), breaking
-                // the sign-extension when the subsequent AShr stays at I64.
+                // Only bitwise ops (And/Or/Xor) are safe: low N bits are always
+                // preserved regardless of operand width. Arithmetic ops (Add/Sub/
+                // Mul/Shl) are NOT safe because carries or shift semantics can
+                // produce different results in the upper bits, and this phase does
+                // not verify the consumer only uses the low bits.
                 let is_safe_op = matches!(op,
-                    IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul |
                     IrBinOp::And | IrBinOp::Or | IrBinOp::Xor
                 );
                 if !is_safe_op {
