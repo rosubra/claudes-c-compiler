@@ -1,4 +1,4 @@
-Fix long double literal precision (in_progress)
+Fix long double literal precision (completed)
 
 Problem: Long double literals are parsed as f64, losing precision.
 The 80-bit x87 extended format has a 64-bit mantissa (vs 52-bit for f64),
