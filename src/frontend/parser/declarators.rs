@@ -648,9 +648,15 @@ impl Parser {
 
         let mut total_ptrs = 0u32;
 
+        // Skip __attribute__ / __extension__ before pointer declarator
+        // e.g. (int(__attribute__((noinline)) *)(void)) function_pointer
+        self.skip_gcc_extensions();
+
         while self.consume_if(&TokenKind::Star) {
             total_ptrs += 1;
             self.skip_cv_qualifiers();
+            // Also skip attributes after each pointer star, e.g. (* __attribute__((unused)))
+            self.skip_gcc_extensions();
         }
 
         // Check for nested: (* (...))

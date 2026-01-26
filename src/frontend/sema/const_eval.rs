@@ -247,6 +247,40 @@ impl<'a> SemaConstEval<'a> {
                 self.eval_offsetof_pattern(inner)
             }
 
+            // Handle compile-time builtin function calls in constant expressions.
+            Expr::FunctionCall(func, args, _) => {
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    match name.as_str() {
+                        "__builtin_choose_expr" if args.len() >= 3 => {
+                            let cond = self.eval_const_expr(&args[0])?;
+                            if cond.is_nonzero() {
+                                self.eval_const_expr(&args[1])
+                            } else {
+                                self.eval_const_expr(&args[2])
+                            }
+                        }
+                        "__builtin_constant_p" => {
+                            let is_const = if let Some(arg) = args.first() {
+                                self.eval_const_expr(arg).is_some()
+                            } else {
+                                false
+                            };
+                            Some(IrConst::I32(if is_const { 1 } else { 0 }))
+                        }
+                        "__builtin_expect" | "__builtin_expect_with_probability" => {
+                            if let Some(arg) = args.first() {
+                                self.eval_const_expr(arg)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+
             _ => None,
         }
     }
