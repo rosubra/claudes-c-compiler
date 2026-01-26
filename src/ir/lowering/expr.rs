@@ -27,7 +27,14 @@ impl Lowerer {
 
     /// Lower a condition expression, ensuring floating-point values are properly
     /// tested for truthiness (masking sign bit so -0.0 is falsy).
+    /// For complex types, tests (real != 0) || (imag != 0) per C11 6.3.1.2.
     pub(super) fn lower_condition_expr(&mut self, expr: &Expr) -> Operand {
+        let expr_ct = self.expr_ctype(expr);
+        if expr_ct.is_complex() {
+            let val = self.lower_expr(expr);
+            let ptr = self.operand_to_value(val);
+            return self.lower_complex_to_bool(ptr, &expr_ct);
+        }
         let expr_ty = self.infer_expr_type(expr);
         let val = self.lower_expr(expr);
         self.mask_float_sign_for_truthiness(val, expr_ty)
@@ -548,11 +555,22 @@ impl Lowerer {
                 self.maybe_narrow(dest, promoted_ty)
             }
             UnaryOp::LogicalNot => {
-                let inner_ty = self.infer_expr_type(inner);
-                let val = self.lower_expr(inner);
-                let cmp_val = self.mask_float_sign_for_truthiness(val, inner_ty);
-                let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(IrConst::I64(0)), IrType::I64);
-                Operand::Value(dest)
+                let inner_ct = self.expr_ctype(inner);
+                if inner_ct.is_complex() {
+                    // !complex_val => (real == 0) && (imag == 0)
+                    let val = self.lower_expr(inner);
+                    let ptr = self.operand_to_value(val);
+                    let bool_val = self.lower_complex_to_bool(ptr, &inner_ct);
+                    // Negate: bool_val is 1 if nonzero, so !complex is (bool_val == 0)
+                    let dest = self.emit_cmp_val(IrCmpOp::Eq, bool_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                    Operand::Value(dest)
+                } else {
+                    let inner_ty = self.infer_expr_type(inner);
+                    let val = self.lower_expr(inner);
+                    let cmp_val = self.mask_float_sign_for_truthiness(val, inner_ty);
+                    let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                    Operand::Value(dest)
+                }
             }
             UnaryOp::PreInc | UnaryOp::PreDec => self.lower_pre_inc_dec(inner, op),
             UnaryOp::RealPart => self.lower_complex_real_part(inner),
@@ -676,21 +694,7 @@ impl Lowerer {
             let ptr = self.operand_to_value(val);
 
             if target_ctype == CType::Bool {
-                let real = self.load_complex_real(ptr, &inner_ctype);
-                let imag = self.load_complex_imag(ptr, &inner_ctype);
-                let comp_ty = Self::complex_component_ir_type(&inner_ctype);
-                let zero = if comp_ty.is_float() {
-                    match comp_ty {
-                        IrType::F32 => Operand::Const(IrConst::F32(0.0)),
-                        _ => Operand::Const(IrConst::F64(0.0)),
-                    }
-                } else {
-                    Operand::Const(IrConst::I64(0))
-                };
-                let real_nz = self.emit_cmp_val(IrCmpOp::Ne, real, zero.clone(), comp_ty);
-                let imag_nz = self.emit_cmp_val(IrCmpOp::Ne, imag, zero, comp_ty);
-                let result = self.emit_binop_val(IrBinOp::Or, Operand::Value(real_nz), Operand::Value(imag_nz), IrType::I64);
-                return Operand::Value(result);
+                return self.lower_complex_to_bool(ptr, &inner_ctype);
             }
 
             let real = self.load_complex_real(ptr, &inner_ctype);

@@ -253,12 +253,12 @@ impl Lowerer {
         if ret_ty != IrType::Ptr {
             let val2 = self.lower_expr(e);
             let ptr = self.operand_to_value(val2);
-            let real_part = self.load_complex_real(ptr, &expr_ct);
-            let from_ty = Self::complex_component_ir_type(&expr_ct);
             let val2 = if self.func_mut().return_is_bool {
-                // For _Bool return, normalize at source type before truncation.
-                self.emit_bool_normalize_typed(real_part, from_ty)
+                // For _Bool return, check both real and imag parts per C11 6.3.1.2
+                self.lower_complex_to_bool(ptr, &expr_ct)
             } else {
+                let real_part = self.load_complex_real(ptr, &expr_ct);
+                let from_ty = Self::complex_component_ir_type(&expr_ct);
                 self.emit_implicit_cast(real_part, from_ty, ret_ty)
             };
             return Some(val2);

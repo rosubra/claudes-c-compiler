@@ -35,6 +35,19 @@ impl Lowerer {
         }
     }
 
+    /// Convert a complex value (given as a pointer to {real, imag}) to _Bool.
+    /// Returns (real != 0) || (imag != 0) per C11 6.3.1.2.
+    pub(super) fn lower_complex_to_bool(&mut self, ptr: Value, ctype: &CType) -> Operand {
+        let real = self.load_complex_real(ptr, ctype);
+        let imag = self.load_complex_imag(ptr, ctype);
+        let comp_ty = Self::complex_component_ir_type(ctype);
+        let zero = Self::complex_zero(comp_ty);
+        let real_nz = self.emit_cmp_val(IrCmpOp::Ne, real, zero.clone(), comp_ty);
+        let imag_nz = self.emit_cmp_val(IrCmpOp::Ne, imag, zero, comp_ty);
+        let result = self.emit_binop_val(IrBinOp::Or, Operand::Value(real_nz), Operand::Value(imag_nz), IrType::I64);
+        Operand::Value(result)
+    }
+
     /// Get the zero constant for a complex component type.
     pub(super) fn complex_zero(comp_ty: IrType) -> Operand {
         match comp_ty {

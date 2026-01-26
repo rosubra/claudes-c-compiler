@@ -341,13 +341,12 @@ impl Lowerer {
         let val = if rhs_ctype.is_complex() {
             let complex_val = self.lower_expr(expr);
             let ptr = self.operand_to_value(complex_val);
-            let real_part = self.load_complex_real(ptr, &rhs_ctype);
-            let from_ty = Self::complex_component_ir_type(&rhs_ctype);
             if da.is_bool {
-                // For _Bool targets, normalize at the source type before any truncation.
-                // C11 6.3.1.2: conversion to _Bool yields (val != 0) ? 1 : 0.
-                self.emit_bool_normalize_typed(real_part, from_ty)
+                // For _Bool targets, check both real and imag parts per C11 6.3.1.2
+                self.lower_complex_to_bool(ptr, &rhs_ctype)
             } else {
+                let real_part = self.load_complex_real(ptr, &rhs_ctype);
+                let from_ty = Self::complex_component_ir_type(&rhs_ctype);
                 self.emit_implicit_cast(real_part, from_ty, da.var_ty)
             }
         } else if da.is_bool {

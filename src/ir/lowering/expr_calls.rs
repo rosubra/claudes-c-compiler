@@ -306,6 +306,15 @@ impl Lowerer {
                     let arg_ct = self.expr_ctype(a);
                     if arg_ct.is_complex() {
                         let ptr = self.operand_to_value(val);
+                        // Check if target param is _Bool: use both real and imag per C11 6.3.1.2
+                        let is_param_bool = param_bool_flags.as_ref()
+                            .and_then(|bf| bf.get(i).copied())
+                            .unwrap_or(false);
+                        if is_param_bool {
+                            let cast_val = self.lower_complex_to_bool(ptr, &arg_ct);
+                            arg_types.push(IrType::I8);
+                            return cast_val;
+                        }
                         let real_part = self.load_complex_real(ptr, &arg_ct);
                         let comp_ir_ty = Self::complex_component_ir_type(&arg_ct);
                         let param_ty = param_types.as_ref()
