@@ -84,7 +84,10 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
                     src: Operand::Const(make_float_const(result, *ty)),
                 });
             }
-            let src_const = as_i64_const(src)?;
+            // Zero-extend sub-int constants (I8/I16) for C11 integer promotion.
+            // Any I8/I16 remaining at this IR stage are unsigned sub-int values
+            // (signed ones were already promoted to I32 by sema/lowerer).
+            let src_const = as_i64_zero_extended(src)?;
             let result = fold_unaryop(*op, src_const, *ty)?;
             Some(Instruction::Copy {
                 dest: *dest,
@@ -146,6 +149,27 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
 /// Extract a constant integer value from an operand.
 fn as_i64_const(op: &Operand) -> Option<i64> {
     match op {
+        Operand::Const(c) => c.to_i64(),
+        Operand::Value(_) => None,
+    }
+}
+
+/// Extract a constant integer value with zero-extension for sub-int types (I8, I16).
+///
+/// C11 integer promotion (6.3.1.1) promotes unsigned char/short to int before
+/// unary operations. In the IR, both signed and unsigned sub-int values are stored
+/// as I8/I16 (e.g., unsigned char 255 is stored as I8(-1)). Zero-extension is
+/// unconditionally correct here because signed sub-int operands that reach this
+/// IR pass have already been sign-extended to I32 by the sema/lowerer const_eval
+/// paths, so any remaining I8/I16 constants represent unsigned sub-int values
+/// that need zero-extension.
+///
+/// Without this, I8(-1) (unsigned byte 255) would be sign-extended to -1,
+/// causing -(unsigned char)(255) to be folded as -(-1) = 1 instead of -(255) = -255.
+fn as_i64_zero_extended(op: &Operand) -> Option<i64> {
+    match op {
+        Operand::Const(IrConst::I8(v)) => Some(*v as u8 as i64),
+        Operand::Const(IrConst::I16(v)) => Some(*v as u16 as i64),
         Operand::Const(c) => c.to_i64(),
         Operand::Value(_) => None,
     }

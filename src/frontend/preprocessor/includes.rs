@@ -6,6 +6,27 @@ use std::path::{Path, PathBuf};
 use super::macro_defs::{MacroDef, parse_define};
 use super::preprocessor::Preprocessor;
 
+/// Normalize a computed include path by collapsing anti-paste spaces around '/'.
+///
+/// During macro expansion, the preprocessor inserts a space between adjacent '/'
+/// characters to prevent "//" from being lexed as a line comment start (see
+/// `would_paste_tokens` in macro_defs.rs). This is correct for general code but
+/// corrupts file paths in computed `#include` directives. For example:
+///
+///   #define PATH asm/
+///   #define INCLUDE(f) __stringify(PATH/f.h)
+///   #include INCLUDE(msr-trace)
+///
+/// produces "asm/ /msr-trace.h" instead of "asm//msr-trace.h". Collapsing
+/// "/ /" back to "//" fixes the path (the filesystem treats "//" as "/").
+fn normalize_include_path(path: String) -> String {
+    if path.contains("/ /") {
+        path.replace("/ /", "//")
+    } else {
+        path
+    }
+}
+
 impl Preprocessor {
     /// Handle #include directive. Returns the preprocessed content of the included file,
     /// or None if the include couldn't be resolved (falls back to old behavior).
@@ -30,6 +51,8 @@ impl Preprocessor {
         } else {
             (path.to_string(), false)
         };
+
+        let include_path = normalize_include_path(include_path);
 
         self.includes.push(include_path.clone());
 
@@ -138,6 +161,8 @@ impl Preprocessor {
                 (expanded, false)
             }
         };
+
+        let include_path = normalize_include_path(include_path);
 
         if !self.resolve_includes {
             return None;

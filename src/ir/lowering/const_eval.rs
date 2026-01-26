@@ -70,7 +70,13 @@ impl Lowerer {
                 self.eval_const_expr(inner)
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                const_arith::negate_const(self.eval_const_expr(inner)?)
+                let val = self.eval_const_expr(inner)?;
+                // C integer promotion: promote sub-int types to int before negation.
+                // For unsigned sub-int types (unsigned char/short), zero-extend to
+                // preserve the unsigned value. Without this, I8(-1) representing
+                // unsigned char 255 would be negated as -(-1) = 1 instead of -(255) = -255.
+                let promoted = self.promote_const_for_unary(inner, val);
+                const_arith::negate_const(promoted)
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
@@ -84,7 +90,9 @@ impl Lowerer {
                 self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                const_arith::bitnot_const(self.eval_const_expr(inner)?)
+                let val = self.eval_const_expr(inner)?;
+                let promoted = self.promote_const_for_unary(inner, val);
+                const_arith::bitnot_const(promoted)
             }
             Expr::Cast(ref target_type, inner, _) => {
                 let target_ir_ty = self.type_spec_to_ir(target_type);
@@ -639,6 +647,41 @@ impl Lowerer {
             (result_size <= 4, is_unsigned)
         };
         const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned)
+    }
+
+    /// Promote a sub-int constant (I8/I16) to I32 for unary arithmetic,
+    /// using unsigned zero-extension when the expression has an unsigned type.
+    /// C11 6.3.1.1: unsigned char/short promote to int by zero-extending.
+    fn promote_const_for_unary(&self, expr: &Expr, val: IrConst) -> IrConst {
+        match &val {
+            IrConst::I8(v) => {
+                let is_unsigned = self.is_expr_unsigned_for_const(expr);
+                if is_unsigned {
+                    IrConst::I32(*v as u8 as i32)
+                } else {
+                    IrConst::I32(*v as i32)
+                }
+            }
+            IrConst::I16(v) => {
+                let is_unsigned = self.is_expr_unsigned_for_const(expr);
+                if is_unsigned {
+                    IrConst::I32(*v as u16 as i32)
+                } else {
+                    IrConst::I32(*v as i32)
+                }
+            }
+            _ => val,
+        }
+    }
+
+    /// Check if an expression has an unsigned type for constant evaluation.
+    fn is_expr_unsigned_for_const(&self, expr: &Expr) -> bool {
+        if let Expr::Cast(ref target_type, _, _) = expr {
+            let ty = self.type_spec_to_ir(target_type);
+            return ty.is_unsigned();
+        }
+        let ty = self.infer_expr_type(expr);
+        ty.is_unsigned()
     }
 
     /// Try to constant-fold a binary operation from its parts.

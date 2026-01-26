@@ -118,10 +118,20 @@ impl<'a> SemaConstEval<'a> {
                 self.eval_const_expr(inner)
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                const_arith::negate_const(self.eval_const_expr(inner)?)
+                let val = self.eval_const_expr(inner)?;
+                // C integer promotion (C11 6.3.1.1): sub-int types are promoted
+                // to int before arithmetic. For unsigned sub-int types (unsigned
+                // char/short), the I8/I16 bit pattern must be zero-extended to i32
+                // (not sign-extended) before negation. Without this, I16(-1)
+                // representing unsigned short 65535 would be negated as -(-1) = 1
+                // instead of -(65535) = -65535.
+                let promoted = self.promote_sub_int_for_unary(inner, val);
+                const_arith::negate_const(promoted)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                const_arith::bitnot_const(self.eval_const_expr(inner)?)
+                let val = self.eval_const_expr(inner)?;
+                let promoted = self.promote_sub_int_for_unary(inner, val);
+                const_arith::bitnot_const(promoted)
             }
 
             // Logical NOT
@@ -424,6 +434,54 @@ impl<'a> SemaConstEval<'a> {
     /// Get the size in bytes for a CType.
     fn ctype_size(&self, ctype: &CType) -> usize {
         ctype.size_ctx(&self.types.struct_layouts)
+    }
+
+    /// Promote a sub-int IrConst (I8/I16) to I32 for unary arithmetic,
+    /// using unsigned zero-extension when the expression has an unsigned type.
+    ///
+    /// C11 6.3.1.1: Integer promotion converts unsigned char/short to int by
+    /// zero-extending, and signed char/short by sign-extending. Without this,
+    /// negate_const(I16(-1)) for unsigned short 65535 would compute -(-1) = 1
+    /// instead of -(65535) = -65535.
+    fn promote_sub_int_for_unary(&self, expr: &Expr, val: IrConst) -> IrConst {
+        match &val {
+            IrConst::I8(v) => {
+                let is_unsigned = self.is_expr_unsigned(expr);
+                if is_unsigned {
+                    IrConst::I32(*v as u8 as i32)
+                } else {
+                    IrConst::I32(*v as i32)
+                }
+            }
+            IrConst::I16(v) => {
+                let is_unsigned = self.is_expr_unsigned(expr);
+                if is_unsigned {
+                    IrConst::I32(*v as u16 as i32)
+                } else {
+                    IrConst::I32(*v as i32)
+                }
+            }
+            _ => val,
+        }
+    }
+
+    /// Check if an expression has an unsigned type, using the expr_types cache
+    /// or falling back to type inference from the AST structure.
+    fn is_expr_unsigned(&self, expr: &Expr) -> bool {
+        // First try the pre-annotated type from sema
+        if let Some(ctype) = self.lookup_expr_type(expr) {
+            return ctype.is_unsigned();
+        }
+        // For cast expressions, check the target type directly
+        if let Expr::Cast(ref target_type, _, _) = expr {
+            let ctype = self.type_spec_to_ctype(target_type);
+            return ctype.is_unsigned();
+        }
+        // Fall back to type inference
+        if let Some(ctype) = self.infer_expr_ctype(expr) {
+            return ctype.is_unsigned();
+        }
+        false
     }
 
     /// Cast a float value to a target CType.
