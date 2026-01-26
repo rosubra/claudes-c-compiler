@@ -1462,12 +1462,12 @@ impl Lowerer {
             let val = if constraint_has_immediate_alt(&constraint) {
                 if let Some(const_val) = self.eval_const_expr(&inp.expr) {
                     Operand::Const(const_val)
-                } else if let Expr::StringLiteral(ref s, _) = inp.expr {
-                    // String literals have assembly-time-constant addresses (their
-                    // .rodata label), so they are valid "i" constraint immediates.
-                    // Intern the string once and use its label as both the symbol
-                    // name and the GlobalAddr operand.
-                    let label = self.intern_string_literal(s);
+                } else if let Some(s) = Self::peel_to_string_literal(&inp.expr) {
+                    // String literals (possibly wrapped in casts) have assembly-time-
+                    // constant addresses (their .rodata label), so they are valid "i"
+                    // constraint immediates. Intern once and use the label as both the
+                    // symbol name and the GlobalAddr operand.
+                    let label = self.intern_string_literal(&s);
                     sym_name = Some(label.clone());
                     let dest = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest, name: label });
@@ -1554,6 +1554,18 @@ impl Lowerer {
                 }
             }
             Expr::Cast(_, inner, _) => self.extract_symbol_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Peel through casts to find a narrow string literal. Returns the string
+    /// content if the expression is a (possibly cast-wrapped) `StringLiteral`.
+    /// Only handles narrow strings; wide/char16 literals are not expected in
+    /// inline asm "i" constraint operands.
+    fn peel_to_string_literal(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::StringLiteral(s, _) => Some(s.clone()),
+            Expr::Cast(_, inner, _) => Self::peel_to_string_literal(inner),
             _ => None,
         }
     }

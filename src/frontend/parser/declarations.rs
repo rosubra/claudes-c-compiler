@@ -30,6 +30,7 @@ impl Parser {
         self.parsing_visibility = None;
         self.parsing_section = None;
         self.parsing_error_attr = false;
+        self.parsing_noreturn = false;
         self.parsing_cleanup_fn = None;
         self.parsing_gnu_inline = false;
         self.parsing_always_inline = false;
@@ -145,6 +146,7 @@ impl Parser {
             .or_else(|| self.pragma_default_visibility.clone());
         let section = self.parsing_section.take();
         let is_error_attr = self.parsing_error_attr;
+        let is_noreturn = self.parsing_noreturn;
         let cleanup_fn = self.parsing_cleanup_fn.take();
 
         // Apply __attribute__((mode(...))): transform type to specified bit-width
@@ -162,7 +164,7 @@ impl Parser {
         if is_funcdef {
             self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility, is_weak)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, cleanup_fn)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, is_noreturn, cleanup_fn)
         }
     }
 
@@ -416,6 +418,7 @@ impl Parser {
         section: Option<String>,
         first_asm_register: Option<String>,
         is_error_attr: bool,
+        is_noreturn: bool,
         cleanup_fn: Option<String>,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
@@ -436,6 +439,7 @@ impl Parser {
             section: section.clone(),
             asm_register: first_asm_register,
             is_error_attr,
+            is_noreturn,
             cleanup_fn,
             span: start,
         });
@@ -473,6 +477,7 @@ impl Parser {
         self.parsing_visibility = None;
         self.parsing_section = None;
         self.parsing_error_attr = false;
+        self.parsing_noreturn = false;
         self.parsing_cleanup_fn = None;
         is_common = is_common || extra_common;
         if let Some(a) = extra_aligned {
@@ -499,6 +504,7 @@ impl Parser {
                 None
             };
             let d_error_attr = self.parsing_error_attr;
+            let d_noreturn = self.parsing_noreturn;
             declarators.push(InitDeclarator {
                 name: dname.unwrap_or_default(),
                 derived: dderived,
@@ -511,6 +517,7 @@ impl Parser {
                 section: d_section,
                 asm_register: d_asm_reg,
                 is_error_attr: d_error_attr,
+                is_noreturn: d_noreturn,
                 cleanup_fn: d_cleanup_fn,
                 span: start,
             });
@@ -599,6 +606,7 @@ impl Parser {
                 section: None,
                 asm_register: skip_asm_reg,
                 is_error_attr: false,
+                is_noreturn: false,
                 cleanup_fn: local_cleanup_fn,
                 span: start,
             });

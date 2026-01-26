@@ -172,6 +172,18 @@ impl Lowerer {
         // Dispatch: direct call, function pointer call, or indirect call
         let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, call_variadic, num_fixed_args, two_reg_size, sret_size);
 
+        // After call to noreturn function, emit unreachable and start dead block.
+        // Unlike error_functions (which skip the call entirely), noreturn functions
+        // are real functions that get called but never return (e.g., panic, abort).
+        if let Expr::Identifier(name, _) = stripped_func {
+            if self.noreturn_functions.contains(name) {
+                self.terminate(Terminator::Unreachable);
+                let dead_label = self.fresh_label();
+                self.start_block(dead_label);
+                return Operand::Const(IrConst::I64(0));
+            }
+        }
+
         // For sret calls, the struct data is now in the alloca - return its address
         if let Some(alloca) = sret_alloca {
             return Operand::Value(alloca);

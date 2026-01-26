@@ -44,6 +44,9 @@ pub struct Lowerer {
     /// Set of function names declared with __attribute__((error("..."))) or __attribute__((warning("..."))).
     /// Calls to these functions should be treated as unreachable (they are compile-time assertion traps).
     pub(super) error_functions: FxHashSet<String>,
+    /// Set of function names declared with __attribute__((noreturn)) or _Noreturn.
+    /// After calls to these functions, emit Unreachable to avoid generating dead epilogue code.
+    pub(super) noreturn_functions: FxHashSet<String>,
     /// Type-system state (struct layouts, typedefs, enum constants, type caches)
     pub(super) types: TypeContext,
     /// Metadata about known functions (consolidated FuncSig)
@@ -121,6 +124,7 @@ impl Lowerer {
             defined_functions: FxHashSet::default(),
             static_functions: FxHashSet::default(),
             error_functions: FxHashSet::default(),
+            noreturn_functions: FxHashSet::default(),
             types: type_context,
             func_meta: FunctionMeta::default(),
             emitted_global_names: FxHashSet::default(),
@@ -418,6 +422,10 @@ impl Lowerer {
                         // Collect __attribute__((error("..."))) / __attribute__((warning("...")))
                         if declarator.is_error_attr && !declarator.name.is_empty() {
                             self.error_functions.insert(declarator.name.clone());
+                        }
+                        // Collect __attribute__((noreturn)) / _Noreturn
+                        if declarator.is_noreturn && !declarator.name.is_empty() {
+                            self.noreturn_functions.insert(declarator.name.clone());
                         }
                         // Collect weak/visibility attributes on extern declarations (not aliases)
                         if declarator.alias_target.is_none()

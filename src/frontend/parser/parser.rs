@@ -82,6 +82,9 @@ pub struct Parser {
     /// Functions with this attribute are compile-time error traps: calls to them
     /// should be treated as unreachable (they're linker error assertions).
     pub(super) parsing_error_attr: bool,
+    /// Set to true when __attribute__((noreturn)) or _Noreturn is encountered.
+    /// Calls to noreturn functions are followed by unreachable.
+    pub(super) parsing_noreturn: bool,
     /// Set to true when __attribute__((gnu_inline)) is encountered.
     /// Forces GNU89 inline semantics: extern inline = no external definition emitted.
     pub(super) parsing_gnu_inline: bool,
@@ -144,6 +147,7 @@ impl Parser {
             parsing_visibility: None,
             parsing_section: None,
             parsing_error_attr: false,
+            parsing_noreturn: false,
             parsing_gnu_inline: false,
             parsing_always_inline: false,
             parsing_noinline: false,
@@ -502,6 +506,10 @@ impl Parser {
                                                 self.advance();
                                             }
                                         }
+                                    }
+                                    TokenKind::Identifier(name) if name == "noreturn" || name == "__noreturn__" => {
+                                        self.parsing_noreturn = true;
+                                        self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "gnu_inline" || name == "__gnu_inline__" => {
                                         self.parsing_gnu_inline = true;

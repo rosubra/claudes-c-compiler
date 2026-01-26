@@ -53,9 +53,13 @@ impl Parser {
                     self.parsing_volatile = true;
                 }
                 TokenKind::Restrict
-                | TokenKind::Register | TokenKind::Noreturn
+                | TokenKind::Register
                 | TokenKind::Auto => {
                     self.advance();
+                }
+                TokenKind::Noreturn => {
+                    self.advance();
+                    self.parsing_noreturn = true;
                 }
                 // GCC named address space qualifiers (__seg_gs / __seg_fs)
                 TokenKind::SegGs => {
@@ -274,7 +278,8 @@ impl Parser {
                     TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
-                    TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Auto | TokenKind::Register | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Noreturn => { self.advance(); self.parsing_noreturn = true; }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Attribute => {
                         let (_, aligned, mk, _) = self.parse_gcc_attributes();
@@ -297,7 +302,8 @@ impl Parser {
                     TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
-                    TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Auto | TokenKind::Register | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Noreturn => { self.advance(); self.parsing_noreturn = true; }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Extension => { self.advance(); }
                     _ => break,
@@ -314,7 +320,8 @@ impl Parser {
                     TokenKind::SegFs => { self.advance(); self.parsing_address_space = AddressSpace::SegFs; }
                     TokenKind::Static => { self.advance(); self.parsing_static = true; }
                     TokenKind::Extern => { self.advance(); self.parsing_extern = true; }
-                    TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Auto | TokenKind::Register | TokenKind::ThreadLocal => { self.advance(); }
+                    TokenKind::Noreturn => { self.advance(); self.parsing_noreturn = true; }
                     TokenKind::Inline => { self.advance(); self.parsing_inline = true; }
                     TokenKind::Extension => { self.advance(); }
                     _ => break,
@@ -479,8 +486,12 @@ impl Parser {
                     self.advance();
                     self.parsing_extern = true;
                 }
-                TokenKind::Auto | TokenKind::Register | TokenKind::Noreturn | TokenKind::ThreadLocal => {
+                TokenKind::Auto | TokenKind::Register | TokenKind::ThreadLocal => {
                     self.advance();
+                }
+                TokenKind::Noreturn => {
+                    self.advance();
+                    self.parsing_noreturn = true;
                 }
                 TokenKind::Inline => {
                     self.advance();
