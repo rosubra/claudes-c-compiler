@@ -1,0 +1,19 @@
+Task: Fix &(compound_literal) in static/global struct array initializers
+
+Status: in_progress
+
+Problem: When a struct array initializer contains a pointer field initialized with
+&(struct T){ ... } (address-of a compound literal), the pointer was emitted as NULL.
+This happened because resolve_ptr_field_init in global_init_compound.rs didn't handle
+Expr::AddressOf(Expr::CompoundLiteral(...)).
+
+The compound path for struct arrays (lower_struct_array_with_ptrs) correctly identified
+that the struct has pointer fields and used the bytes+ptr_ranges approach, but when
+evaluating the pointer expression, it fell through all checks and returned None.
+
+Example: net/ipv6/addrlabel.c ip6addrlbl_init_table[] has entries like:
+  .prefix = &(struct in6_addr){ { { 0xfc } } }
+which were emitted as NULL pointers, causing kernel boot failures.
+
+Fix: Add handling for &(compound_literal) in resolve_ptr_field_init by calling
+create_compound_literal_global to create an anonymous global and returning its address.

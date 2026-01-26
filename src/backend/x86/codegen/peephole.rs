@@ -1655,6 +1655,14 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
 /// (not %rbp or %rsp). Examples: `(%rcx)`, `8(%rdi)`, `(%rax)`.
 /// These could alias any stack slot when a pointer to a local variable is used.
 fn has_indirect_memory_access(s: &str) -> bool {
+    // rep movsb/movsd/stosb/stosd etc. use implicit memory operands through
+    // %rdi (dest) and %rsi (source) that aren't visible in the instruction text.
+    // They also modify %rdi, %rsi, and %rcx. Treat them as indirect memory access
+    // to ensure store forwarding and dead store elimination are conservative.
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("rep ") || trimmed.starts_with("rep\t") {
+        return true;
+    }
     // Look for patterns like "(%r" where the register is not rbp or rsp
     let bytes = s.as_bytes();
     let len = bytes.len();

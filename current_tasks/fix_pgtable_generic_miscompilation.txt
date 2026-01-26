@@ -1,8 +1,0 @@
-Task: Fix miscompilation of mm/pgtable-generic.c causing kernel boot failure
-Status: in_progress
-Started: 2026-01-26
-
-The kernel file mm/pgtable-generic.c is miscompiled by ccc, causing the kernel
-to fail to boot when this single file is compiled with ccc instead of gcc.
-This file handles generic page table operations. Need to identify root cause
-by comparing ccc and gcc assembly output and fix the compiler bug.
