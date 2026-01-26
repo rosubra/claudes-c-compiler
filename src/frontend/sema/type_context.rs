@@ -126,6 +126,10 @@ pub struct TypeContext {
     /// Set of typedef names that alias enum types.
     /// Used to treat enum-typedef bitfields as unsigned (GCC compat).
     pub enum_typedefs: FxHashSet<String>,
+    /// Packed enum type info, keyed by tag name.
+    /// Stored when a packed enum definition is processed so that forward
+    /// references can look up the correct size.
+    pub packed_enum_types: FxHashMap<String, crate::common::types::EnumType>,
     /// Return CType for known functions
     pub func_return_ctypes: FxHashMap<String, CType>,
     /// Cache for CType of named struct/union types.
@@ -154,6 +158,7 @@ impl TypeContext {
             func_ptr_typedefs: FxHashSet::default(),
             func_ptr_typedef_info: FxHashMap::default(),
             enum_typedefs: FxHashSet::default(),
+            packed_enum_types: FxHashMap::default(),
             func_return_ctypes: FxHashMap::default(),
             ctype_cache: std::cell::RefCell::new(FxHashMap::default()),
             scope_stack: Vec::new(),

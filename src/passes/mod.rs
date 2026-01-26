@@ -15,6 +15,7 @@ pub mod copy_prop;
 pub mod dce;
 pub mod gvn;
 pub mod if_convert;
+pub mod ipcp;
 pub mod licm;
 pub mod narrow;
 pub mod simplify;
@@ -55,11 +56,11 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         return;
     }
 
-    // Always run 2 iterations of the full pipeline. The early-exit check below
-    // will skip the second iteration if the first made no changes.
-    let iterations = 2;
+    // Always run 3 iterations of the full pipeline. The early-exit check below
+    // will skip remaining iterations if no changes were made.
+    let iterations = 3;
 
-    for _ in 0..iterations {
+    for iter in 0..iterations {
         let mut changes = 0usize;
 
         // Phase 1: CFG simplification (remove dead blocks, thread jump chains,
@@ -127,6 +128,18 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         // simplified conditions, creating dead blocks or redundant branches)
         if !disabled.contains("cfg") {
             changes += cfg_simplify::run(module);
+        }
+
+        // Phase 10.5: Interprocedural constant return propagation (IPCP).
+        // After the first iteration of intra-procedural optimizations, static
+        // functions that always return a constant should have been simplified to
+        // `return const`. Now we can replace calls to those functions with the
+        // constant value, enabling subsequent DCE/CFG passes to eliminate dead
+        // branches that reference undefined symbols.
+        // Run after iteration 0 (first pass) so returns have been simplified,
+        // and the result feeds into iteration 1 for cleanup.
+        if iter == 0 && !disabled.contains("ipcp") {
+            changes += ipcp::run(module);
         }
 
         // Early exit: if no passes changed anything, additional iterations are useless

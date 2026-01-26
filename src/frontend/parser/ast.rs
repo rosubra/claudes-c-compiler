@@ -185,7 +185,8 @@ pub enum TypeSpecifier {
     Struct(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>, Option<usize>),
     /// Union: (name, fields, is_packed, max_field_align from #pragma pack, struct-level aligned attribute)
     Union(Option<String>, Option<Vec<StructFieldDecl>>, bool, Option<usize>, Option<usize>),
-    Enum(Option<String>, Option<Vec<EnumVariant>>),
+    /// Enum: (name, variants, is_packed)
+    Enum(Option<String>, Option<Vec<EnumVariant>>, bool),
     TypedefName(String),
     Pointer(Box<TypeSpecifier>, AddressSpace),
     Array(Box<TypeSpecifier>, Option<Box<Expr>>),

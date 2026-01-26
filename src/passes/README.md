@@ -12,6 +12,7 @@ SSA-based optimization passes that improve the IR before code generation.
 - **licm.rs** - Loop-invariant code motion: hoists loop-invariant computations and safe loads to loop preheaders. Includes load hoisting for non-address-taken alloca-based loads that are not modified within the loop (e.g., function parameter loads). Requires single-entry preheaders for soundness
 - **narrow.rs** - Integer narrowing: eliminates widen-operate-narrow patterns from C integer promotion (e.g., `Cast I32->I64, BinOp I64, Cast I64->I32` becomes `BinOp I32`). Also narrows comparisons and BinOps with sub-64-bit Load operands
 - **if_convert.rs** - If-conversion: converts simple diamond-shaped branch+phi patterns to Select instructions, enabling cmov/csel emission
+- **ipcp.rs** - Interprocedural constant return propagation: identifies static functions that always return the same constant on every path (and have no side effects), then replaces calls with the constant value. Critical for Linux kernel static inline config stubs
 - **simplify.rs** - Algebraic simplification: identity removal (`x + 0` -> `x`), strength reduction (`x * 2` -> `x << 1`), boolean simplification, math call optimization (`sqrt`/`fabs` -> hardware intrinsics, `pow(x,2)` -> `x*x`, `pow(x,0.5)` -> `sqrt`). Float-unsafe simplifications (e.g., `x + 0`, `x * 0`, `x - x`) are restricted to integer types to preserve IEEE 754 semantics
 
 ## Pass Pipeline
@@ -19,9 +20,11 @@ SSA-based optimization passes that improve the IR before code generation.
 All optimization levels (`-O0` through `-O3`, `-Os`, `-Oz`) run the same full pipeline.
 While the compiler is maturing, this maximizes test coverage and avoids tier-specific bugs.
 
-The pipeline runs up to 2 iterations, early-exiting if no changes are made:
+The pipeline runs up to 3 iterations, early-exiting if no changes are made:
 
-CFG simplify -> copy prop -> narrow -> simplify -> constant fold -> GVN/CSE -> LICM -> if-convert -> copy prop -> DCE -> CFG simplify
+CFG simplify -> copy prop -> narrow -> simplify -> constant fold -> GVN/CSE -> LICM -> if-convert -> copy prop -> DCE -> CFG simplify -> [IPCP after iter 0]
+
+After the first iteration, IPCP runs to propagate constant returns across function boundaries, then subsequent iterations clean up the resulting dead code.
 
 ## Architecture
 

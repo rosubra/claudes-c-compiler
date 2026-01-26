@@ -407,7 +407,7 @@ impl Parser {
 
     /// Parse an enum definition/reference.
     fn parse_enum_specifier(&mut self) -> TypeSpecifier {
-        self.skip_gcc_extensions();
+        let (mut is_packed, _, _, _) = self.parse_gcc_attributes();
         let name = if let TokenKind::Identifier(n) = self.peek() {
             let n = n.clone();
             self.advance();
@@ -415,12 +415,16 @@ impl Parser {
         } else {
             None
         };
+        let (packed2, _, _, _) = self.parse_gcc_attributes();
+        is_packed = is_packed || packed2;
         let variants = if matches!(self.peek(), TokenKind::LBrace) {
             Some(self.parse_enum_variants())
         } else {
             None
         };
-        TypeSpecifier::Enum(name, variants)
+        let (packed3, _, _, _) = self.parse_gcc_attributes();
+        is_packed = is_packed || packed3;
+        TypeSpecifier::Enum(name, variants, is_packed)
     }
 
     /// Parse typeof(expr) or typeof(type-name).

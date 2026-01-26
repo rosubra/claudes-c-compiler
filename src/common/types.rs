@@ -102,6 +102,38 @@ pub struct StructField {
 pub struct EnumType {
     pub name: Option<String>,
     pub variants: Vec<(String, i64)>,
+    /// When true (__attribute__((packed))), the enum uses the smallest
+    /// integer type that can represent all variant values.
+    pub is_packed: bool,
+}
+
+impl EnumType {
+    /// Returns the size (and alignment) in bytes for this enum.
+    /// Non-packed enums are always 4 bytes (int). Packed enums use the
+    /// smallest integer type that can represent all variant values.
+    pub fn packed_size(&self) -> usize {
+        if !self.is_packed {
+            return 4;
+        }
+        // Find the range of variant values to determine the minimum size
+        if self.variants.is_empty() {
+            // Packed enum with no known variants -- default to 1 byte
+            return 1;
+        }
+        let min_val = self.variants.iter().map(|(_, v)| *v).min().unwrap();
+        let max_val = self.variants.iter().map(|(_, v)| *v).max().unwrap();
+        if min_val >= 0 {
+            // Unsigned range
+            if max_val <= 0xFF { 1 }
+            else if max_val <= 0xFFFF { 2 }
+            else { 4 }
+        } else {
+            // Signed range
+            if min_val >= -128 && max_val <= 127 { 1 }
+            else if min_val >= -32768 && max_val <= 32767 { 2 }
+            else { 4 }
+        }
+    }
 }
 
 /// Computed layout for a struct or union, with field offsets and total size.
@@ -676,7 +708,7 @@ impl CType {
             CType::Struct(key) | CType::Union(key) => {
                 ctx.get_struct_layout(key).map(|l| l.size).unwrap_or(0)
             }
-            CType::Enum(_) => 4,
+            CType::Enum(e) => e.packed_size(),
         }
     }
 
@@ -702,7 +734,7 @@ impl CType {
             CType::Struct(key) | CType::Union(key) => {
                 ctx.get_struct_layout(key).map(|l| l.align).unwrap_or(1)
             }
-            CType::Enum(_) => 4,
+            CType::Enum(e) => e.packed_size(),
         }
     }
 
@@ -806,7 +838,15 @@ impl CType {
             CType::Bool => 0,
             CType::Char | CType::UChar => 1,
             CType::Short | CType::UShort => 2,
-            CType::Int | CType::UInt | CType::Enum(_) => 3,
+            CType::Int | CType::UInt => 3,
+            CType::Enum(e) => {
+                // Packed enums may have a smaller underlying type
+                match e.packed_size() {
+                    1 => 1,
+                    2 => 2,
+                    _ => 3,
+                }
+            }
             CType::Long | CType::ULong => 4,
             CType::LongLong | CType::ULongLong => 5,
             CType::Int128 | CType::UInt128 => 6,
@@ -1093,7 +1133,14 @@ impl IrType {
             CType::Short => IrType::I16,
             CType::UShort => IrType::U16,
             CType::Int => IrType::I32,
-            CType::Enum(_) => IrType::I32, // C enum underlying type is int (signed)
+            CType::Enum(e) => {
+                // Packed enums use the smallest integer type that fits all values
+                match e.packed_size() {
+                    1 => IrType::I8,
+                    2 => IrType::I16,
+                    _ => IrType::I32,
+                }
+            }
             CType::UInt => IrType::U32,
             CType::Long | CType::LongLong => IrType::I64,
             CType::ULong | CType::ULongLong => IrType::U64,

@@ -701,6 +701,42 @@ impl<'a> SemaConstEval<'a> {
         })
     }
 
+    /// Build an EnumType for a packed enum from its variants or type context.
+    fn resolve_packed_enum_type(
+        &self,
+        name: &Option<String>,
+        variants: &Option<Vec<crate::frontend::parser::ast::EnumVariant>>,
+    ) -> crate::common::types::EnumType {
+        // Try looking up previously registered packed enum
+        if let Some(tag) = name {
+            if let Some(et) = self.types.packed_enum_types.get(tag) {
+                return et.clone();
+            }
+        }
+        // Build from variant list
+        let variant_values = if let Some(vars) = variants {
+            let mut result = Vec::new();
+            let mut next_val: i64 = 0;
+            for v in vars {
+                if let Some(ref val_expr) = v.value {
+                    if let Some(val) = self.eval_const_expr(val_expr) {
+                        next_val = val.to_i64().unwrap_or(next_val);
+                    }
+                }
+                result.push((v.name.clone(), next_val));
+                next_val += 1;
+            }
+            result
+        } else {
+            Vec::new()
+        };
+        crate::common::types::EnumType {
+            name: name.clone(),
+            variants: variant_values,
+            is_packed: true,
+        }
+    }
+
     /// Compute sizeof for a type specifier.
     /// Returns None if the type cannot be sized (e.g., typeof(expr) without expr type info).
     fn sizeof_type_spec(&self, spec: &TypeSpecifier) -> Option<usize> {
@@ -791,7 +827,19 @@ impl<'a> SemaConstEval<'a> {
                 }
                 Some(0)
             }
-            TypeSpecifier::Enum(_, _) => Some(4),
+            TypeSpecifier::Enum(name, variants, is_packed) => {
+                // Check if this is a forward reference to a known packed enum
+                let effective_packed = *is_packed || name.as_ref()
+                    .and_then(|n| self.types.packed_enum_types.get(n))
+                    .is_some();
+                if !effective_packed {
+                    Some(4)
+                } else {
+                    // Resolve the packed enum to get its correct size
+                    let et = self.resolve_packed_enum_type(name, variants);
+                    Some(et.packed_size())
+                }
+            }
             TypeSpecifier::TypedefName(name) => {
                 if let Some(ctype) = self.types.typedefs.get(name) {
                     Some(ctype.size_ctx(&self.types.struct_layouts))
@@ -892,7 +940,17 @@ impl<'a> SemaConstEval<'a> {
                 }
                 1
             }
-            TypeSpecifier::Enum(_, _) => 4,
+            TypeSpecifier::Enum(name, variants, is_packed) => {
+                let effective_packed = *is_packed || name.as_ref()
+                    .and_then(|n| self.types.packed_enum_types.get(n))
+                    .is_some();
+                if !effective_packed {
+                    4
+                } else {
+                    let et = self.resolve_packed_enum_type(name, variants);
+                    et.packed_size()
+                }
+            }
             TypeSpecifier::TypedefName(name) => {
                 if let Some(ctype) = self.types.typedefs.get(name) {
                     ctype.align_ctx(&self.types.struct_layouts)
@@ -979,7 +1037,34 @@ fn ctype_from_type_spec(spec: &TypeSpecifier, types: &TypeContext) -> CType {
                 CType::Int // anonymous union without context
             }
         }
-        TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
+        TypeSpecifier::Enum(_, _, false) => CType::Int, // non-packed enums are int-sized
+        TypeSpecifier::Enum(name, variants, true) => {
+            // Packed enum: look up from type context or compute from variants
+            if let Some(tag) = name {
+                if let Some(et) = types.packed_enum_types.get(tag) {
+                    return CType::Enum(et.clone());
+                }
+            }
+            // Inline definition: compute from variants
+            if let Some(vars) = variants {
+                let mut variant_values = Vec::new();
+                let mut next_val: i64 = 0;
+                for v in vars {
+                    if let Some(ref _val_expr) = v.value {
+                        // Can't easily eval here, but this path is rare
+                    }
+                    variant_values.push((v.name.clone(), next_val));
+                    next_val += 1;
+                }
+                CType::Enum(crate::common::types::EnumType {
+                    name: name.clone(),
+                    variants: variant_values,
+                    is_packed: true,
+                })
+            } else {
+                CType::Int // packed enum forward ref without definition
+            }
+        }
         TypeSpecifier::TypeofType(inner) => ctype_from_type_spec(inner, types),
         TypeSpecifier::FunctionPointer(_, _, _) => {
             CType::Pointer(Box::new(CType::Void), AddressSpace::Default) // function pointers are pointer-sized

@@ -389,9 +389,20 @@ impl Lowerer {
         // Build struct_arg_sizes: for each arg, check if it's a struct/union by value
         let func_name = if let Expr::Identifier(name, _) = func { Some(name.as_str()) } else { None };
         let struct_arg_sizes: Vec<Option<usize>> = if let Some(ref sizes) = func_name.and_then(|n| self.func_meta.sigs.get(n).map(|s| s.param_struct_sizes.clone())) {
-            // Use pre-registered struct sizes from function metadata
-            args.iter().enumerate().map(|(i, _)| {
-                sizes.get(i).copied().flatten()
+            // Use pre-registered struct sizes from function metadata.
+            // For variadic _Complex long double args beyond fixed params, infer size
+            // (param_struct_sizes only covers declared parameters).
+            let decomposes_cld = self.decomposes_complex_long_double();
+            args.iter().enumerate().map(|(i, a)| {
+                if i < sizes.len() {
+                    sizes[i]
+                } else if !decomposes_cld && matches!(self.get_expr_ctype(a), Some(CType::ComplexLongDouble)) {
+                    Some(32)
+                } else {
+                    // TODO: also infer struct_arg_sizes for variadic Struct/Union args
+                    // (currently they pass as pointers which works but is ABI-incorrect)
+                    None
+                }
             }).collect()
         } else {
             // Infer from argument expressions

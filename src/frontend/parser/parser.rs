@@ -790,7 +790,7 @@ impl Parser {
                 elem_size * count
             }
             TypeSpecifier::Array(_, None) => 0,
-            TypeSpecifier::Enum(_, _) => 4,
+            TypeSpecifier::Enum(_, _, _) => 4,
             _ => 8, // conservative default for struct/union/typedef
         }
     }
@@ -834,7 +834,8 @@ impl Parser {
                 // Fallback for empty struct/union or tag-only (no fields available)
                 if align == 0 { 8 } else { align }
             }
-            TypeSpecifier::Enum(_, _) => 4,
+            TypeSpecifier::Union(..) => 8,
+            TypeSpecifier::Enum(_, _, _) => 4,
             TypeSpecifier::TypedefName(_) => 8, // conservative default
             _ => 8,
         }

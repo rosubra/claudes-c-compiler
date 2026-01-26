@@ -196,7 +196,7 @@ impl Lowerer {
                 }
             }
             CType::Enum(et) => {
-                TypeSpecifier::Enum(et.name.clone(), None)
+                TypeSpecifier::Enum(et.name.clone(), None, et.is_packed)
             }
             CType::Function { .. } => TypeSpecifier::Int, // function type fallback
         }
@@ -447,7 +447,12 @@ impl Lowerer {
             TypeSpecifier::Pointer(_, _) => IrType::Ptr,
             TypeSpecifier::Array(_, _) => IrType::Ptr,
             TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => IrType::Ptr,
-            TypeSpecifier::Enum(_, _) => IrType::I32,
+            TypeSpecifier::Enum(_, _, false) => IrType::I32,
+            TypeSpecifier::Enum(_, _, true) => {
+                // Packed enum: resolve to CType to get the correct IR type
+                let ctype = self.type_spec_to_ctype(ts);
+                IrType::from_ctype(&ctype)
+            }
             TypeSpecifier::TypedefName(name) => {
                 // Resolve typedef through CType
                 if let Some(ctype) = self.types.typedefs.get(name) {
@@ -490,7 +495,11 @@ impl Lowerer {
             TypeSpecifier::ComplexDouble => Some((16, 8)),
             TypeSpecifier::ComplexLongDouble => Some((32, 16)),
             TypeSpecifier::Pointer(_, _) => Some((8, 8)),
-            TypeSpecifier::Enum(_, _) => Some((4, 4)),
+            TypeSpecifier::Enum(_, _, false) => Some((4, 4)),
+            TypeSpecifier::Enum(_, _, true) => {
+                // Packed enums need type context to resolve; let caller handle via CType path
+                None
+            }
             TypeSpecifier::TypedefName(_) => Some((8, 8)), // fallback for unresolved typedefs
             _ => None,
         }
@@ -571,6 +580,16 @@ impl Lowerer {
                 return ctype.size_ctx(&self.types.struct_layouts);
             }
             return 8; // fallback
+        }
+        // Handle packed enums (explicit or forward-reference to packed) via CType resolution
+        if let TypeSpecifier::Enum(name, _, is_packed) = ts {
+            let effective_packed = *is_packed || name.as_ref()
+                .and_then(|n| self.types.packed_enum_types.get(n))
+                .is_some();
+            if effective_packed {
+                let ctype = self.type_spec_to_ctype(ts);
+                return ctype.size_ctx(&self.types);
+            }
         }
         let ts = self.resolve_type_spec(ts);
         if let Some((size, _)) = Self::scalar_type_size_align(ts) {
@@ -1250,8 +1269,55 @@ impl type_builder::TypeConvertContext for Lowerer {
         self.struct_or_union_to_ctype(name, fields, is_union, is_packed, pragma_pack, struct_aligned)
     }
 
-    fn resolve_enum(&self, _name: &Option<String>, _variants: &Option<Vec<EnumVariant>>) -> CType {
-        CType::Int
+    fn resolve_enum(&self, name: &Option<String>, variants: &Option<Vec<EnumVariant>>, is_packed: bool) -> CType {
+        // Check if this is a forward reference to a known packed enum
+        let effective_packed = is_packed || name.as_ref()
+            .and_then(|n| self.types.packed_enum_types.get(n))
+            .is_some();
+        if !effective_packed {
+            return CType::Int;
+        }
+        // For packed enums, compute the minimum integer type from variant values
+        let variant_values: Vec<i64> = if let Some(vars) = variants {
+            let mut values = Vec::new();
+            let mut next_val: i64 = 0;
+            for v in vars {
+                if let Some(ref expr) = v.value {
+                    if let Some(val) = self.eval_const_expr(expr) {
+                        if let Some(v) = self.const_to_i64(&val) {
+                            next_val = v;
+                        }
+                    }
+                }
+                values.push(next_val);
+                next_val += 1;
+            }
+            values
+        } else if let Some(n) = name {
+            // Forward reference: look up stored packed enum info
+            if let Some(et) = self.types.packed_enum_types.get(n) {
+                et.variants.iter().map(|(_, v)| *v).collect()
+            } else {
+                return CType::Char; // packed enum with no known variants, default 1 byte
+            }
+        } else {
+            return CType::Char; // anonymous packed enum with no body
+        };
+
+        if variant_values.is_empty() {
+            return CType::Char;
+        }
+        let min_val = *variant_values.iter().min().unwrap();
+        let max_val = *variant_values.iter().max().unwrap();
+        if min_val >= 0 {
+            if max_val <= 0xFF { CType::UChar }
+            else if max_val <= 0xFFFF { CType::UShort }
+            else { CType::UInt }
+        } else {
+            if min_val >= -128 && max_val <= 127 { CType::Char }
+            else if min_val >= -32768 && max_val <= 32767 { CType::Short }
+            else { CType::Int }
+        }
     }
 
     fn resolve_typeof_expr(&self, expr: &Expr) -> CType {

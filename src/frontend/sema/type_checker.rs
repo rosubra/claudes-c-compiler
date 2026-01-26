@@ -498,7 +498,7 @@ impl<'a> ExprTypeChecker<'a> {
                     CType::Int // fallback for unknown typedef
                 }
             }
-            TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
+            TypeSpecifier::Enum(_, _, _) => CType::Int, // default enum underlying type
             TypeSpecifier::Struct(tag, _, _, _, _) => {
                 if let Some(tag) = tag {
                     CType::Struct(format!("struct.{}", tag).into())

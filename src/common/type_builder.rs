@@ -41,7 +41,7 @@ pub trait TypeConvertContext {
     /// Resolve an enum type to its CType.
     /// Sema: returns CType::Enum with name info.
     /// Lowering: returns CType::Int (enums are ints at IR level).
-    fn resolve_enum(&self, name: &Option<String>, variants: &Option<Vec<EnumVariant>>) -> CType;
+    fn resolve_enum(&self, name: &Option<String>, variants: &Option<Vec<EnumVariant>>, is_packed: bool) -> CType;
 
     /// Resolve typeof(expr) to a CType.
     /// Sema: returns CType::Int (doesn't have full expr type resolution yet).
@@ -113,7 +113,7 @@ pub trait TypeConvertContext {
             TypeSpecifier::Union(name, fields, is_packed, pragma_pack, struct_aligned) => {
                 self.resolve_struct_or_union(name, fields, true, *is_packed, *pragma_pack, *struct_aligned)
             }
-            TypeSpecifier::Enum(name, variants) => self.resolve_enum(name, variants),
+            TypeSpecifier::Enum(name, variants, is_packed) => self.resolve_enum(name, variants, *is_packed),
             TypeSpecifier::Typeof(expr) => self.resolve_typeof_expr(expr),
         }
     }

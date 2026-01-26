@@ -549,8 +549,32 @@ impl SemanticAnalyzer {
     /// constants registered in the enclosing scope, matching GCC/Clang behavior.
     fn collect_enum_constants_from_type_spec(&mut self, ts: &TypeSpecifier) {
         match ts {
-            TypeSpecifier::Enum(_, Some(variants)) => {
+            TypeSpecifier::Enum(name, Some(variants), is_packed) => {
                 self.process_enum_variants(variants);
+                // Store packed enum info for forward-reference lookups
+                if *is_packed {
+                    if let Some(tag) = name {
+                        let mut variant_values = Vec::new();
+                        let mut next_val: i64 = 0;
+                        for v in variants {
+                            if let Some(ref val_expr) = v.value {
+                                if let Some(val) = self.eval_const_expr(val_expr) {
+                                    next_val = val;
+                                }
+                            }
+                            variant_values.push((v.name.clone(), next_val));
+                            next_val += 1;
+                        }
+                        self.result.type_context.packed_enum_types.insert(
+                            tag.clone(),
+                            crate::common::types::EnumType {
+                                name: Some(tag.clone()),
+                                variants: variant_values,
+                                is_packed: true,
+                            },
+                        );
+                    }
+                }
             }
             TypeSpecifier::Struct(_, Some(fields), _, _, _)
             | TypeSpecifier::Union(_, Some(fields), _, _, _) => {
@@ -1044,12 +1068,41 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
         if is_union { CType::Union(key.into()) } else { CType::Struct(key.into()) }
     }
 
-    fn resolve_enum(&self, name: &Option<String>, _variants: &Option<Vec<EnumVariant>>) -> CType {
+    fn resolve_enum(&self, name: &Option<String>, variants: &Option<Vec<EnumVariant>>, is_packed: bool) -> CType {
+        // Check if this is a forward reference to a previously-defined packed enum
+        let effective_packed = is_packed || name.as_ref()
+            .and_then(|n| self.result.type_context.packed_enum_types.get(n))
+            .is_some();
         // Sema preserves enum identity for diagnostics. Variant processing is
         // done separately via process_enum_variants (requires &mut self).
+        // We carry variant values so packed_size() can compute the correct size.
+        let variant_values = if let Some(vars) = variants {
+            let mut result = Vec::new();
+            let mut next_val: i64 = 0;
+            for v in vars {
+                if let Some(ref val_expr) = v.value {
+                    if let Some(val) = self.eval_const_expr(val_expr) {
+                        next_val = val;
+                    }
+                }
+                result.push((v.name.clone(), next_val));
+                next_val += 1;
+            }
+            result
+        } else if let Some(n) = name {
+            // Forward reference: look up previously stored packed enum info
+            if let Some(et) = self.result.type_context.packed_enum_types.get(n) {
+                et.variants.clone()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         CType::Enum(crate::common::types::EnumType {
             name: name.clone(),
-            variants: Vec::new(), // TODO: carry variant info
+            variants: variant_values,
+            is_packed: effective_packed,
         })
     }
 

@@ -1433,8 +1433,9 @@ impl Lowerer {
     /// Collect enum constants from a type specifier.
     fn collect_enum_constants_impl(&mut self, ts: &TypeSpecifier, scoped: bool) {
         match ts {
-            TypeSpecifier::Enum(_, Some(variants)) => {
+            TypeSpecifier::Enum(name, Some(variants), is_packed) => {
                 let mut next_val: i64 = 0;
+                let mut variant_values = Vec::new();
                 for variant in variants {
                     if let Some(ref expr) = variant.value {
                         if let Some(val) = self.eval_const_expr(expr) {
@@ -1448,7 +1449,21 @@ impl Lowerer {
                     } else {
                         self.types.enum_constants.insert(variant.name.clone(), next_val);
                     }
+                    variant_values.push((variant.name.clone(), next_val));
                     next_val += 1;
+                }
+                // Store packed enum info for forward-reference lookups
+                if *is_packed {
+                    if let Some(tag) = name {
+                        self.types.packed_enum_types.insert(
+                            tag.clone(),
+                            crate::common::types::EnumType {
+                                name: Some(tag.clone()),
+                                variants: variant_values,
+                                is_packed: true,
+                            },
+                        );
+                    }
                 }
             }
             TypeSpecifier::Struct(_, Some(fields), _, _, _) | TypeSpecifier::Union(_, Some(fields), _, _, _) => {
@@ -1476,7 +1491,7 @@ impl Lowerer {
     /// Check if a TypeSpecifier refers to an enum type (directly or via typedef).
     pub(super) fn is_enum_type_spec(&self, ts: &TypeSpecifier) -> bool {
         match ts {
-            TypeSpecifier::Enum(_, _) => true,
+            TypeSpecifier::Enum(..) => true,
             TypeSpecifier::TypedefName(name) => self.types.enum_typedefs.contains(name),
             TypeSpecifier::TypeofType(inner) => self.is_enum_type_spec(inner),
             _ => false,
