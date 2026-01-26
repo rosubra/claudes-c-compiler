@@ -1,0 +1,60 @@
+Fix IrConst Unsigned Sub-Int Type Representation
+=================================================
+Date: 2026-01-26
+Priority: LOW (latent issue, partially mitigated)
+
+PROBLEM
+-------
+IrConst::from_i64() stores U8/U16 values in signed I8/I16 containers:
+  IrType::U8  -> IrConst::I8(val as i8)    -- 200 stored as I8(-56)
+  IrType::U16 -> IrConst::I16(val as i16)  -- 65535 stored as I16(-1)
+
+When these values are later extracted via to_i64(), they sign-extend:
+  I8(-56).to_i64() = -56 (should be 200 for unsigned char)
+  I16(-1).to_i64() = -1 (should be 65535 for unsigned short)
+
+This affects optimization passes (constant_fold.rs, simplify.rs) where a sequence
+like: cast U8->I32 followed by binop may fold the cast to IrConst::I8 then the
+binop reads the wrong value via to_i64().
+
+CURRENT MITIGATION
+------------------
+The sema layer was fixed (2026-01-26) to store unsigned sub-int cast results as
+IrConst::I32 with zero-extension. This prevents the frontend from producing
+incorrect constants. However, optimization passes that create new constants for
+U8/U16 types via from_i64() still use signed containers.
+
+The issue is LATENT because:
+1. Sema correctly promotes unsigned sub-int casts to I32 at the source
+2. Optimization passes that fold casts (constant_fold.rs fold_cast, simplify.rs
+   fold_const_cast) compute correct numeric values but store them in signed
+   containers. If a subsequent pass re-reads the folded constant without the
+   IrType context, it may sign-extend incorrectly.
+3. The codegen backend uses IrType annotations on instructions (not just the
+   IrConst variant) to determine signedness, which mostly avoids the issue.
+
+FAILED ATTEMPT
+--------------
+Changing from_i64() to store U8 as I32 and U16 as I32 (like U32 uses I64) caused
+119 test regressions on the type-casting tag (up from 14). This indicates the
+entire IR pipeline and codegen backends assume that sub-int IrConst values match
+the IrType width (I8 for U8, I16 for U16). Many codegen paths likely use the
+IrConst variant to determine the operand width.
+
+PROPER FIX (WHEN NEEDED)
+-------------------------
+Option A: Add U8(u8) and U16(u16) variants to IrConst. This is the cleanest
+fix but requires updating every match on IrConst throughout the codebase (~100+
+locations). Would also need from_i64, to_i64, to_u64, zero, one, etc.
+
+Option B: Keep the current I8/I16 containers but add a to_i64_with_type(ty: IrType)
+method that zero-extends when the type is unsigned. Update all callers that need
+unsigned semantics to use this method instead of to_i64().
+
+Option C: Always store sub-int constants as I32 (matching C's integer promotion)
+and update all codegen/IR paths that expect I8/I16 for sub-int operations.
+This is what was attempted and failed due to widespread assumptions.
+
+RECOMMENDATION: Option A is the cleanest but high effort. Option B is practical
+and minimally invasive. Do this only when a concrete bug is triggered by the
+optimization passes (not just the sema layer which is now fixed).
