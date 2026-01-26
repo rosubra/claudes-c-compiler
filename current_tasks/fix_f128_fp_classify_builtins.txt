@@ -1,0 +1,12 @@
+Fix __builtin_isnan, __builtin_isinf, __builtin_isfinite, __builtin_fpclassify,
+__builtin_signbit, __builtin_isnormal for long double (F128) arguments on x86-64.
+
+Bug: These builtins truncate F128 to F64 and use F64 bit-masks to classify,
+which gives wrong results (e.g., __builtin_isnan(nanl) returns 0,
+__builtin_fpclassify returns 1/INFINITE for NaN).
+
+Fix: For F128 arguments, emit calls to libc classification functions:
+- __isnanl, __isinfl, __finitel, __signbitl, __fpclassifyl
+instead of the inline bitcast+mask approach.
+
+Status: in_progress
