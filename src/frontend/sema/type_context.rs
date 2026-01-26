@@ -123,6 +123,9 @@ pub struct TypeContext {
     pub func_ptr_typedefs: FxHashSet<String>,
     /// Function pointer typedef info (return type, params, variadic)
     pub func_ptr_typedef_info: FxHashMap<String, FunctionTypedefInfo>,
+    /// Set of typedef names that alias enum types.
+    /// Used to treat enum-typedef bitfields as unsigned (GCC compat).
+    pub enum_typedefs: FxHashSet<String>,
     /// Return CType for known functions
     pub func_return_ctypes: FxHashMap<String, CType>,
     /// Cache for CType of named struct/union types.
@@ -150,6 +153,7 @@ impl TypeContext {
             function_typedefs: FxHashMap::default(),
             func_ptr_typedefs: FxHashSet::default(),
             func_ptr_typedef_info: FxHashMap::default(),
+            enum_typedefs: FxHashSet::default(),
             func_return_ctypes: FxHashMap::default(),
             ctype_cache: std::cell::RefCell::new(FxHashMap::default()),
             scope_stack: Vec::new(),

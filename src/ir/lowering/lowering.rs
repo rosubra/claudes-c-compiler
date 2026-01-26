@@ -1271,10 +1271,16 @@ impl Lowerer {
 
         // If this is a typedef, register the mapping and skip variable emission
         if decl.is_typedef {
+            // Check if this typedef aliases an enum type (directly or transitively).
+            // Used to treat enum-typedef bitfields as unsigned (GCC compat).
+            let is_enum_type = self.is_enum_type_spec(&decl.type_spec);
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
                     self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
+                    if is_enum_type && declarator.derived.is_empty() {
+                        self.types.enum_typedefs.insert(declarator.name.clone());
+                    }
                 }
             }
             // Mark transparent_union on the union's StructLayout
@@ -1457,6 +1463,16 @@ impl Lowerer {
     /// Collect enum constants from a type specifier, using scoped insertion.
     pub(super) fn collect_enum_constants_scoped(&mut self, ts: &TypeSpecifier) {
         self.collect_enum_constants_impl(ts, true);
+    }
+
+    /// Check if a TypeSpecifier refers to an enum type (directly or via typedef).
+    pub(super) fn is_enum_type_spec(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::Enum(_, _) => true,
+            TypeSpecifier::TypedefName(name) => self.types.enum_typedefs.contains(name),
+            TypeSpecifier::TypeofType(inner) => self.is_enum_type_spec(inner),
+            _ => false,
+        }
     }
 
     /// Get or create a unique IR label for a user-defined goto label.

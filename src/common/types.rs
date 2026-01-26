@@ -302,40 +302,80 @@ impl StructLayout {
 
                     bf_bit_pos += bw;
                 } else {
-                    // Standard (non-packed) bitfield layout
-                    if !in_bitfield || bf_bit_pos + bw > unit_bits || bf_unit_size != field_size {
-                        // Start a new storage unit
+                    // Standard (non-packed) bitfield layout -- SysV ABI compatible.
+                    //
+                    // SysV ABI rule: a bitfield at absolute bit position P with width W
+                    // and underlying type T must not straddle a sizeof(T)*8-bit boundary.
+                    // i.e., floor(P / (sizeof(T)*8)) == floor((P+W-1) / (sizeof(T)*8))
+                    //
+                    // Each bitfield gets its own storage unit of its declared type's size,
+                    // located at the type-aligned boundary that contains its bits.
+                    // Adjacent bitfields pack contiguously as long as they don't straddle.
+
+                    // Compute absolute bit position of the cursor
+                    let abs_bit_pos: u64 = if in_bitfield {
+                        (bf_unit_offset as u64) * 8 + bf_bit_pos as u64
+                    } else {
+                        (offset as u64) * 8
+                    };
+
+                    // Check if the bitfield would straddle a boundary of its own type
+                    let type_bits = unit_bits as u64;
+                    let straddles = if type_bits > 0 && bw > 0 {
+                        abs_bit_pos / type_bits != (abs_bit_pos + bw as u64 - 1) / type_bits
+                    } else {
+                        true
+                    };
+
+                    let placed_abs_bit: u64;
+                    if !in_bitfield || straddles {
+                        // Start a new storage unit: advance past previous bitfield region
                         if in_bitfield {
                             offset = bf_unit_offset + bf_unit_size;
                         }
-                        // GCC-compatible bitfield placement: try to fit the bitfield
-                        // within the naturally-aligned storage unit that contains the
-                        // current offset. Only advance to a new aligned unit if the
-                        // bitfield bits would overflow the current aligned unit.
-                        let aligned_start = offset & !(field_align - 1); // align_down
-                        let bit_pos_in_unit = ((offset - aligned_start) * 8) as u32;
-                        if bit_pos_in_unit + bw <= unit_bits {
-                            // Bitfield fits in the current aligned storage unit
-                            bf_unit_offset = aligned_start;
-                            bf_bit_pos = bit_pos_in_unit;
-                        } else {
-                            // Doesn't fit; start a new aligned storage unit
-                            bf_unit_offset = align_up(offset, field_align);
-                            bf_bit_pos = 0;
-                        }
-                        bf_unit_size = field_size;
-                        in_bitfield = true;
+                        // Align to the field's natural alignment and advance to the
+                        // next type-aligned boundary
+                        let aligned_offset = align_up(offset, field_align);
+                        placed_abs_bit = (aligned_offset as u64) * 8;
+                    } else {
+                        // Continue at the current absolute bit position
+                        placed_abs_bit = abs_bit_pos;
                     }
+
+                    // Compute this field's storage unit: the type-aligned byte offset
+                    // that contains this field's bits
+                    let field_storage_offset = if field_align > 0 {
+                        ((placed_abs_bit / 8) as usize) & !(field_align - 1)
+                    } else {
+                        (placed_abs_bit / 8) as usize
+                    };
+                    let field_bit_in_storage = (placed_abs_bit - (field_storage_offset as u64) * 8) as u32;
 
                     field_layouts.push(StructFieldLayout {
                         name: field.name.clone(),
-                        offset: bf_unit_offset,
+                        offset: field_storage_offset,
                         ty: field.ty.clone(),
-                        bit_offset: Some(bf_bit_pos),
+                        bit_offset: Some(field_bit_in_storage),
                         bit_width: Some(bw),
                     });
 
-                    bf_bit_pos += bw;
+                    // Update the bitfield tracking state:
+                    // bf_unit_offset/bf_unit_size track the overall extent of the
+                    // bitfield region so we know where the next non-bitfield field starts.
+                    let field_end_byte = field_storage_offset + field_size;
+                    if !in_bitfield || straddles {
+                        bf_unit_offset = field_storage_offset;
+                        bf_unit_size = field_size;
+                    } else {
+                        // Extend the tracked region to cover the new field's storage unit
+                        if field_end_byte > bf_unit_offset + bf_unit_size {
+                            bf_unit_size = field_end_byte - bf_unit_offset;
+                        }
+                    }
+                    let new_bf_bit_pos = placed_abs_bit + bw as u64 - (bf_unit_offset as u64) * 8;
+                    debug_assert!(new_bf_bit_pos <= u32::MAX as u64, "bitfield bit position overflow");
+                    bf_bit_pos = new_bf_bit_pos as u32;
+                    in_bitfield = true;
                 }
             } else {
                 // Regular (non-bitfield) field
