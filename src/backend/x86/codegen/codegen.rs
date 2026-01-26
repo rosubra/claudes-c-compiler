@@ -2577,6 +2577,26 @@ impl ArchCodegen for X86Codegen {
     /// avoiding the accumulator roundtrip (movq %rbx, %rax; movq %rax, %r12
     /// becomes movq %rbx, %r12).
     fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
+        // For F128 values with full x87 data in their slots, copy the full x87
+        // extended precision value via fldt/fstpt to preserve 80-bit precision.
+        if let Operand::Value(v) = src {
+            if self.state.f128_direct_slots.contains(&v.0) {
+                if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
+                    // Full-precision F128 copy: fldt from source, fstpt to dest
+                    self.state.emit_fmt(format_args!("    fldt {}(%rbp)", src_slot.0));
+                    self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", dest_slot.0));
+                    // Store f64 approximation in rax for consumers that read via operand_to_rax
+                    self.state.emit_fmt(format_args!("    fldt {}(%rbp)", dest_slot.0));
+                    self.state.emit("    subq $8, %rsp");
+                    self.state.emit("    fstpl (%rsp)");
+                    self.state.emit("    popq %rax");
+                    self.state.reg_cache.set_acc(dest.0, false);
+                    self.state.f128_direct_slots.insert(dest.0);
+                    return;
+                }
+            }
+        }
+
         let dest_phys = self.dest_reg(dest);
         let src_phys = self.operand_reg(src);
 
@@ -2867,6 +2887,55 @@ impl ArchCodegen for X86Codegen {
             self.emit_i128_cmp(dest, op, lhs, rhs);
             return;
         }
+        if ty == IrType::F128 {
+            // F128 (long double) comparison using x87 fucomip for full 80-bit precision.
+            // fucomip compares ST(0) with ST(1) and sets EFLAGS (CF, ZF, PF) just like ucomisd,
+            // then pops ST(0). We then fstp to clean the remaining ST(0).
+            //
+            // fucomip flag semantics (same as ucomisd):
+            //   ST(0) > ST(1): CF=0, ZF=0, PF=0
+            //   ST(0) < ST(1): CF=1, ZF=0, PF=0
+            //   ST(0) = ST(1): CF=0, ZF=1, PF=0
+            //   Unordered (NaN): CF=1, ZF=1, PF=1
+            //
+            // For Gt/Ge: load rhs first (→ST1), then lhs (→ST0).
+            //   fucomip compares ST(0)=lhs vs ST(1)=rhs. seta = lhs > rhs. ✓
+            // For Lt/Le: load lhs first (→ST1), then rhs (→ST0).
+            //   fucomip compares ST(0)=rhs vs ST(1)=lhs. seta = rhs > lhs = lhs < rhs. ✓
+            // For Eq/Ne: order doesn't matter, load lhs first then rhs.
+            let swap_x87 = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
+            let (first_x87, second_x87) = if swap_x87 { (lhs, rhs) } else { (rhs, lhs) };
+            // Load first operand → ST(0), then second → ST(0) (pushes first to ST(1))
+            self.emit_f128_load_to_x87(first_x87);
+            self.emit_f128_load_to_x87(second_x87);
+            // ST(0) = second, ST(1) = first
+            // fucomip compares ST(0) with ST(1), pops ST(0)
+            self.state.emit("    fucomip %st(1), %st");
+            // Clean up remaining x87 stack entry
+            self.state.emit("    fstp %st(0)");
+            match op {
+                IrCmpOp::Eq => {
+                    self.state.emit("    setnp %al");
+                    self.state.emit("    sete %cl");
+                    self.state.emit("    andb %cl, %al");
+                }
+                IrCmpOp::Ne => {
+                    self.state.emit("    setp %al");
+                    self.state.emit("    setne %cl");
+                    self.state.emit("    orb %cl, %al");
+                }
+                IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                    self.state.emit("    seta %al");
+                }
+                IrCmpOp::Sle | IrCmpOp::Ule | IrCmpOp::Sge | IrCmpOp::Uge => {
+                    self.state.emit("    setae %al");
+                }
+            }
+            self.state.emit("    movzbq %al, %rax");
+            self.state.reg_cache.invalidate_acc();
+            self.store_rax_to(dest);
+            return;
+        }
         if ty.is_float() {
             // Float comparison using SSE ucomisd/ucomiss.
             // NaN handling: ucomisd sets CF=1, ZF=1, PF=1 for unordered (NaN) operands.
@@ -2889,11 +2958,8 @@ impl ArchCodegen for X86Codegen {
             self.state.emit_fmt(format_args!("    {}", mov_to_xmm0));
             self.operand_to_rcx(second);
             self.state.emit_fmt(format_args!("    {}", mov_to_xmm1_from_rcx));
-            // F128 comparisons still use SSE ucomisd on the f64 register values.
-            // TODO: For full 80-bit precision, F128 compares should use x87 fcomip on
-            // memory-stored 80-bit values. This requires changing the F128 register protocol.
             // ucomisd %xmm1, %xmm0 compares xmm0 vs xmm1 (AT&T: src, dst → compares dst to src)
-            if ty == IrType::F64 || ty == IrType::F128 {
+            if ty == IrType::F64 {
                 self.state.emit("    ucomisd %xmm1, %xmm0");
             } else {
                 self.state.emit("    ucomiss %xmm1, %xmm0");
@@ -3348,13 +3414,101 @@ impl ArchCodegen for X86Codegen {
         self.emit_cast_instrs_x86(from_ty, to_ty);
     }
 
-    /// Override emit_cast to handle F128 -> integer with full x87 80-bit precision.
-    /// When the source is an F128 value that was loaded from a known memory slot,
+    /// Override emit_cast to handle F128 conversions with full x87 80-bit precision.
+    ///
+    /// F128 -> integer: When the source is an F128 value with a known memory slot,
     /// we use `fldt` directly from that slot instead of the f64 intermediate in %rax,
     /// preserving the full 64-bit mantissa for conversions like
     /// `(unsigned long long)922337203685477580.7L`.
+    ///
+    /// any -> F128: When casting to F128, we load the source into x87 via the
+    /// appropriate fld instruction and store with fstpt to produce a full 80-bit
+    /// value in the destination slot. This ensures subsequent F128 operations
+    /// (arithmetic, comparison) that use fldt get correct data.
     fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
         use crate::backend::state::SlotAddr;
+
+        // Intercept casts TO F128: produce full 80-bit x87 value in dest slot.
+        // classify_cast treats F64->F128 as Noop and F32->F128 as F32->F64,
+        // but we need to ensure the dest slot has a proper 80-bit x87 value
+        // so that subsequent fldt loads get correct data.
+        if to_ty == IrType::F128 && from_ty != IrType::F128 && !is_i128_type(from_ty) {
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                // Load source into x87 ST(0) via appropriate conversion
+                if from_ty == IrType::F64 {
+                    self.operand_to_rax(src);
+                    self.state.emit("    subq $8, %rsp");
+                    self.state.emit("    movq %rax, (%rsp)");
+                    self.state.emit("    fldl (%rsp)");
+                    self.state.emit("    addq $8, %rsp");
+                } else if from_ty == IrType::F32 {
+                    self.operand_to_rax(src);
+                    self.state.emit("    subq $4, %rsp");
+                    self.state.emit("    movl %eax, (%rsp)");
+                    self.state.emit("    flds (%rsp)");
+                    self.state.emit("    addq $4, %rsp");
+                } else if from_ty.is_signed() || (!from_ty.is_float() && !from_ty.is_unsigned()) {
+                    // Signed integer to F128: load operand, sign-extend, push as i64, fild
+                    self.operand_to_rax(src);
+                    // Ensure proper sign extension for sub-64-bit types
+                    if from_ty.size() < 8 {
+                        self.emit_cast_instrs_x86(from_ty, IrType::I64);
+                    }
+                    self.state.emit("    subq $8, %rsp");
+                    self.state.emit("    movq %rax, (%rsp)");
+                    self.state.emit("    fildq (%rsp)");
+                    self.state.emit("    addq $8, %rsp");
+                } else {
+                    // Unsigned integer to F128: load operand, convert to f64 first via
+                    // the standard cast path, then fldl
+                    self.operand_to_rax(src);
+                    self.emit_cast_instrs_x86(from_ty, IrType::F64);
+                    self.state.emit("    movq %rax, %xmm0");
+                    self.state.emit("    subq $8, %rsp");
+                    self.state.emit("    movsd %xmm0, (%rsp)");
+                    self.state.emit("    fldl (%rsp)");
+                    self.state.emit("    addq $8, %rsp");
+                }
+                // ST(0) now has the value in 80-bit extended precision.
+                // Store full 80-bit to dest slot
+                self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", dest_slot.0));
+                // Also keep f64 copy in rax for backward compat
+                self.state.emit_fmt(format_args!("    fldt {}(%rbp)", dest_slot.0));
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    popq %rax");
+                self.state.reg_cache.set_acc(dest.0, false);
+                self.state.f128_direct_slots.insert(dest.0);
+                return;
+            }
+            // TODO: Handle F128 cast without dest slot - currently loses precision by falling back to f64
+        }
+
+        // Intercept F128 -> F64/F32 casts: load the full 80-bit value via fldt and
+        // convert to f64/f32 using fstpl/fstps. This is necessary because when a value
+        // is in f128_direct_slots, its stack slot contains raw x87 bytes (not f64),
+        // so reading it via movq would get garbage.
+        if from_ty == IrType::F128 && (to_ty == IrType::F64 || to_ty == IrType::F32) {
+            // Load the F128 source into x87 ST(0)
+            self.emit_f128_load_to_x87(src);
+            if to_ty == IrType::F64 {
+                // Convert x87 80-bit to f64 in rax
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    movq (%rsp), %rax");
+                self.state.emit("    addq $8, %rsp");
+            } else {
+                // Convert x87 80-bit to f32 in eax
+                self.state.emit("    subq $4, %rsp");
+                self.state.emit("    fstps (%rsp)");
+                self.state.emit("    movl (%rsp), %eax");
+                self.state.emit("    addq $4, %rsp");
+            }
+            self.state.reg_cache.invalidate_acc();
+            self.emit_store_result(dest);
+            return;
+        }
+
         // Intercept F128 -> integer casts when we know the source's memory location
         if from_ty == IrType::F128 && !to_ty.is_float() && !is_i128_type(to_ty) {
             if let Operand::Value(v) = src {
@@ -4581,7 +4735,4 @@ impl InlineAsmEmitter for X86Codegen {
         self.asm_xmm_scratch_idx = 0;
     }
 
-    fn emit_jump_to_block(&mut self, block_id: BlockId) {
-        self.state.out.emit_jmp_block(block_id.0);
-    }
 }

@@ -301,8 +301,13 @@ pub fn generate_module(cg: &mut dyn ArchCodegen, module: &IrModule) -> String {
     common::emit_data_sections(&mut cg.state().out, module, ptr_dir);
 
     // Emit top-level asm("...") directives verbatim (e.g., musl's _start definition)
-    for asm_str in &module.toplevel_asm {
-        cg.state().emit(asm_str);
+    // Switch to .text first so that labels/code in the asm land in the correct section
+    // (after emit_data_sections we may be in .bss or .data).
+    if !module.toplevel_asm.is_empty() {
+        cg.state().emit(".text");
+        for asm_str in &module.toplevel_asm {
+            cg.state().emit(asm_str);
+        }
     }
 
     // Emit visibility directives for declaration-only (extern) functions with non-default
