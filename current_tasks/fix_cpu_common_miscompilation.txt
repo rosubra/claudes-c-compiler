@@ -1,7 +1,0 @@
-Task: Fix miscompilation of arch/x86/kernel/cpu/common.c causing kernel boot failure
-Status: in_progress
-Started: 2026-01-26
-
-The kernel file arch/x86/kernel/cpu/common.c is miscompiled by ccc, causing a boot failure.
-This file handles CPU detection, feature flags, and initialization - critical for early boot.
-Need to identify the root cause by comparing ccc and gcc output and fix the compiler bug.

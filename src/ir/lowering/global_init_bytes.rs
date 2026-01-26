@@ -816,6 +816,13 @@ impl Lowerer {
         let mut sub_idx = 0usize;
         let mut ai = 0usize;
         while ai < arr_size && sub_idx < sub_items.len() {
+            // Handle designated array index initializers (e.g., [3] = { ... })
+            if let Some(Designator::Index(ref idx_expr)) = sub_items[sub_idx].designators.first() {
+                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                    ai = idx;
+                }
+            }
+            if ai >= arr_size { break; }
             let elem_offset = field_offset + ai * elem_size;
             match &sub_items[sub_idx].init {
                 Initializer::List(inner_items) => {
