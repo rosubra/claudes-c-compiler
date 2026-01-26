@@ -1,8 +1,0 @@
-Task: Fix miscompilation of arch/x86/kernel/process_64.c
-Status: in_progress
-
-The file arch/x86/kernel/process_64.c is being miscompiled by ccc, causing
-kernel boot failure. This file handles x86-64 process management including
-context switching, thread creation, and stack switching.
-
-Investigating root cause of miscompilation.
