@@ -1373,7 +1373,9 @@ impl ArchCodegen for RiscvCodegen {
             let target_label = target.as_label();
             self.state.emit_fmt(format_args!("    .dword {}", target_label));
         }
-        self.state.emit(".section .text");
+        // Restore the function's text section (may be custom, e.g. .init.text)
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 
         self.state.reg_cache.invalidate_all();
     }
@@ -3442,12 +3444,24 @@ impl InlineAsmEmitter for RiscvCodegen {
         }
         // Each memory operand gets its own unique register via assign_scratch_reg,
         // so multiple "=m" outputs don't overwrite each other's addresses.
-        if let Operand::Value(v) = val {
-            if let Some(slot) = self.state.get_slot(v.0) {
-                let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                self.state.emit_fmt(format_args!("    ld {}, {}(s0)", tmp_reg, slot.0));
-                op.mem_addr = format!("0({})", tmp_reg);
-                return true;
+        match val {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                    self.state.emit_fmt(format_args!("    ld {}, {}(s0)", tmp_reg, slot.0));
+                    op.mem_addr = format!("0({})", tmp_reg);
+                    return true;
+                }
+            }
+            Operand::Const(c) => {
+                // Constant address (e.g., from MMIO reads at compile-time constant addresses).
+                // Load the constant into a scratch register for indirect addressing.
+                if let Some(addr) = c.to_i64() {
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                    self.state.emit_fmt(format_args!("    li {}, {}", tmp_reg, addr));
+                    op.mem_addr = format!("0({})", tmp_reg);
+                    return true;
+                }
             }
         }
         false

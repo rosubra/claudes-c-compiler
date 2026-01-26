@@ -351,7 +351,7 @@ impl Lowerer {
             is_static: true,
             is_extern: false,
             is_common: false,
-            section: None,
+            section: declarator.section.clone(),
             is_weak: false,
             visibility: None,
             has_explicit_align,

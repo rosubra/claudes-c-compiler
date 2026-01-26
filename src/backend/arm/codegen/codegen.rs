@@ -1373,7 +1373,9 @@ impl ArchCodegen for ArmCodegen {
             let target_label = target.as_label();
             self.state.emit_fmt(format_args!("    .xword {}", target_label));
         }
-        self.state.emit(".section .text");
+        // Restore the function's text section (may be custom, e.g. .init.text)
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 
         self.state.reg_cache.invalidate_all();
     }
@@ -3683,12 +3685,25 @@ impl InlineAsmEmitter for ArmCodegen {
         }
         // Each memory operand gets its own unique register via assign_scratch_reg,
         // so multiple "=m" outputs don't overwrite each other's addresses.
-        if let Operand::Value(v) = val {
-            if let Some(slot) = self.state.get_slot(v.0) {
-                let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                self.emit_load_from_sp(&tmp_reg, slot.0, "ldr");
-                op.mem_addr = format!("[{}]", tmp_reg);
-                return true;
+        match val {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                    self.emit_load_from_sp(&tmp_reg, slot.0, "ldr");
+                    op.mem_addr = format!("[{}]", tmp_reg);
+                    return true;
+                }
+            }
+            Operand::Const(c) => {
+                // Constant address (e.g., from MMIO reads at compile-time constant addresses).
+                // Copy propagation can replace Value operands with Const in inline asm inputs.
+                // Load the constant into a scratch register for indirect addressing.
+                if let Some(addr) = c.to_i64() {
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                    self.emit_load_imm64(&tmp_reg, addr);
+                    op.mem_addr = format!("[{}]", tmp_reg);
+                    return true;
+                }
             }
         }
         false

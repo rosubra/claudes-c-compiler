@@ -1580,7 +1580,9 @@ impl ArchCodegen for X86Codegen {
             let target_label = target.as_label();
             self.state.emit_fmt(format_args!("    .quad {}", target_label));
         }
-        self.state.emit(".section .text");
+        // Restore the function's text section (may be custom, e.g. .init.text)
+        let sect = self.state.current_text_section.clone();
+        self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
 
         self.state.reg_cache.invalidate_all();
     }
@@ -3197,12 +3199,15 @@ impl ArchCodegen for X86Codegen {
                 }
             }
             Operand::Value(v) => {
-                // Load condition value into %rdx
+                // Load condition value into %rdx. Use value_to_reg which
+                // correctly handles alloca values (LEA for address computation
+                // instead of MOV which would load stack contents) and
+                // over-aligned allocas.
                 if let Some(&reg) = self.reg_assignments.get(&v.0) {
                     let reg_name = callee_saved_name(reg);
                     self.state.emit_fmt(format_args!("    movq %{}, %rdx", reg_name));
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    self.state.emit_fmt(format_args!("    movq {}(%rbp), %rdx", slot.0));
+                } else if self.state.get_slot(v.0).is_some() {
+                    self.value_to_reg(v, "rdx");
                 } else {
                     self.state.emit("    xorq %rdx, %rdx");
                 }
@@ -4486,7 +4491,18 @@ impl InlineAsmEmitter for X86Codegen {
                     return true;
                 }
             }
-            _ => {}
+            Operand::Const(c) => {
+                // Constant address (e.g., from volatile MMIO reads like readl() in the kernel).
+                // Copy propagation can replace Value operands with Const when the address
+                // was originally a compile-time constant (e.g., fix_to_virt(X) + offset).
+                // Load the constant address into a scratch register for indirect addressing.
+                if let Some(addr) = c.to_i64() {
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                    self.state.emit_fmt(format_args!("    movabsq ${}, %{}", addr, tmp_reg));
+                    op.mem_addr = format!("(%{})", tmp_reg);
+                    return true;
+                }
+            }
         }
         false
     }

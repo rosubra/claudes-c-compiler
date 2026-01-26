@@ -124,6 +124,11 @@ pub struct CodegenState {
     /// not a pointer. These are F128 call results or other values where
     /// full precision was preserved directly in the slot.
     pub f128_direct_slots: FxHashSet<u32>,
+    /// The current text section name for this function. Defaults to ".text" but
+    /// may be a custom section (e.g., ".init.text") for functions with
+    /// __attribute__((section("..."))). Used to restore the correct section
+    /// after emitting data (e.g., jump tables) in other sections.
+    pub current_text_section: String,
 }
 
 impl CodegenState {
@@ -147,6 +152,7 @@ impl CodegenState {
             cf_protection_branch: false,
             f128_load_sources: FxHashMap::default(),
             f128_direct_slots: FxHashSet::default(),
+            current_text_section: ".text".to_string(),
         }
     }
 

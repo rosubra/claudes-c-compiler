@@ -332,10 +332,14 @@ pub fn generate_module(cg: &mut dyn ArchCodegen, module: &IrModule) -> String {
         if !func.is_declaration {
             if let Some(ref sect) = func.section {
                 cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
+                cg.state().current_text_section = sect.clone();
                 in_custom_section = true;
             } else if in_custom_section {
                 cg.state().emit(".section .text");
+                cg.state().current_text_section = ".text".to_string();
                 in_custom_section = false;
+            } else {
+                cg.state().current_text_section = ".text".to_string();
             }
             generate_function(cg, func);
         }

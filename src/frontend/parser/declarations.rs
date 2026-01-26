@@ -584,6 +584,7 @@ impl Parser {
             let (name, derived, decl_mode, _, decl_aligned) = self.parse_declarator_with_attrs();
             let (skip_mode, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
             let local_cleanup_fn = self.parsing_cleanup_fn.take();
+            let local_section = self.parsing_section.take();
             mode_kind = mode_kind.or(decl_mode).or(skip_mode);
             // Merge alignment from declarator and post-declarator attributes
             for a in [decl_aligned, skip_aligned].iter().copied().flatten() {
@@ -603,7 +604,7 @@ impl Parser {
                 is_weak: false,
                 alias_target: None,
                 visibility: None,
-                section: None,
+                section: local_section,
                 asm_register: skip_asm_reg,
                 is_error_attr: false,
                 is_noreturn: false,
