@@ -11,10 +11,12 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     let mut m = FxHashMap::default();
 
     // Abort/exit
+    // Note: __builtin_trap and __builtin_unreachable are handled directly in
+    // expr_builtins.rs as Terminator::Unreachable (emitting ud2/brk/ebreak),
+    // not as calls to abort(). This is critical for kernel code where abort()
+    // doesn't exist.
     m.insert("__builtin_abort", BuiltinInfo::simple("abort"));
     m.insert("__builtin_exit", BuiltinInfo::simple("exit"));
-    m.insert("__builtin_trap", BuiltinInfo::simple("abort"));
-    m.insert("__builtin_unreachable", BuiltinInfo::simple("abort"));
 
     // Memory functions
     m.insert("__builtin_memcpy", BuiltinInfo::simple("memcpy"));
@@ -438,7 +440,7 @@ pub fn is_builtin(name: &str) -> bool {
         return true;
     }
     // Builtins handled by name in try_lower_builtin_call (before map lookup)
-    if name == "__builtin_choose_expr" {
+    if matches!(name, "__builtin_choose_expr" | "__builtin_unreachable" | "__builtin_trap") {
         return true;
     }
     // Atomic builtins handled by pattern matching in expr_atomics.rs

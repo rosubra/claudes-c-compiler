@@ -138,6 +138,27 @@ impl Lowerer {
             return Some(Operand::Const(IrConst::I64(0)));
         }
 
+        // __builtin_unreachable() - marks code path as unreachable. Emit a trap instruction
+        // (ud2 on x86, brk #0 on ARM, ebreak on RISC-V) via Terminator::Unreachable.
+        // This must NOT generate a call to abort() because abort() may not exist
+        // (e.g., in kernel code).
+        if name == "__builtin_unreachable" {
+            self.terminate(Terminator::Unreachable);
+            // Start a new (unreachable) block so subsequent code can still be lowered
+            let dead_label = self.fresh_label();
+            self.start_block(dead_label);
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
+        // __builtin_trap() - generates a trap instruction to intentionally crash.
+        // Like unreachable, this must emit the hardware trap directly, not call abort().
+        if name == "__builtin_trap" {
+            self.terminate(Terminator::Unreachable);
+            let dead_label = self.fresh_label();
+            self.start_block(dead_label);
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
         // Handle atomic builtins (delegated to expr_atomics.rs)
         if let Some(result) = self.try_lower_atomic_builtin(name, args) {
             return Some(result);
