@@ -239,6 +239,24 @@ impl Lowerer {
             _ => {}
         }
 
+        // Fast path: constant-fold pure integer arithmetic at lowering time.
+        // This ensures correct C type semantics (e.g., 32-bit int width for
+        // expressions like (1 << 31) / N) which the IR-level fold pass may lose
+        // since it operates on 64-bit values without C type information.
+        // Only apply to integer-only operations (shifts, bitwise, int arithmetic).
+        // Skip float-involving expressions since eval_const_binop_float doesn't
+        // correctly handle mixed int/float type promotion (e.g., int - float).
+        if matches!(op, BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) {
+            let lhs_ty = self.get_expr_type(lhs);
+            let rhs_ty = self.get_expr_type(rhs);
+            if !lhs_ty.is_float() && !rhs_ty.is_float() {
+                if let Some(val) = self.eval_const_expr_from_parts(op, lhs, rhs) {
+                    return Operand::Const(val);
+                }
+            }
+        }
+
         // Complex arithmetic
         if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
             let lhs_ct = self.expr_ctype(lhs);

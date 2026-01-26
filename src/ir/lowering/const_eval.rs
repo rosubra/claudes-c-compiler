@@ -36,10 +36,22 @@ impl Lowerer {
             }
         }
         match expr {
-            Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => {
+            // Preserve C type width: IntLiteral is `int` (32-bit) when value fits, otherwise `long`.
+            Expr::IntLiteral(val, _) => {
+                if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
+                    Some(IrConst::I32(*val as i32))
+                } else {
+                    Some(IrConst::I64(*val))
+                }
+            }
+            Expr::LongLiteral(val, _) => {
                 Some(IrConst::I64(*val))
             }
-            Expr::UIntLiteral(val, _) | Expr::ULongLiteral(val, _) => {
+            // UIntLiteral stays as I64 to preserve the unsigned value.
+            Expr::UIntLiteral(val, _) => {
+                Some(IrConst::I64(*val as i64))
+            }
+            Expr::ULongLiteral(val, _) => {
                 Some(IrConst::I64(*val as i64))
             }
             Expr::CharLiteral(ch, _) => {
@@ -63,9 +75,12 @@ impl Lowerer {
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 let l = self.eval_const_expr(lhs)?;
                 let r = self.eval_const_expr(rhs)?;
-                // Use both operand types for proper usual arithmetic conversions
-                let lhs_ty = self.get_expr_type(lhs);
-                let rhs_ty = self.get_expr_type(rhs);
+                // Use infer_expr_type (C semantic types) for proper usual arithmetic
+                // conversions. get_expr_type returns IR storage types (IntLiteral → I64)
+                // which loses 32-bit width info needed for correct folding of
+                // expressions like (1 << 31) / N.
+                let lhs_ty = self.infer_expr_type(lhs);
+                let rhs_ty = self.infer_expr_type(rhs);
                 self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
@@ -623,6 +638,24 @@ impl Lowerer {
             (result_size <= 4, is_unsigned)
         };
         const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned)
+    }
+
+    /// Try to constant-fold a binary operation from its parts.
+    /// Used by lower_binary_op to avoid generating IR for constant expressions,
+    /// ensuring correct C type semantics (especially 32-bit vs 64-bit width).
+    pub(super) fn eval_const_expr_from_parts(&self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<IrConst> {
+        let l = self.eval_const_expr(lhs)?;
+        let r = self.eval_const_expr(rhs)?;
+        let lhs_ty = self.infer_expr_type(lhs);
+        let rhs_ty = self.infer_expr_type(rhs);
+        let result = self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)?;
+        // Convert to I64 for IR operand compatibility (IR uses I64 for all int operations).
+        Some(match result {
+            IrConst::I32(v) => IrConst::I64(v as i64),
+            IrConst::I8(v) => IrConst::I64(v as i64),
+            IrConst::I16(v) => IrConst::I64(v as i64),
+            other => other,
+        })
     }
 
     /// Compute the effective array size from an initializer list with potential designators.

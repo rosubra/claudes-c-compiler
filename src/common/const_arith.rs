@@ -106,7 +106,15 @@ pub fn eval_const_binop_int(op: &BinOp, l: i64, r: i64, is_32bit: bool, is_unsig
         BinOp::LogicalAnd => bool_to_i64(l != 0 && r != 0),
         BinOp::LogicalOr => bool_to_i64(l != 0 || r != 0),
     };
-    Some(IrConst::I64(result))
+    // Preserve the result width so that downstream operations (e.g., division
+    // using the result of a shift) can correctly infer the C type. This is
+    // critical for expressions like (1 << 31) / N where the shift result must
+    // be recognized as 32-bit (INT_MIN = -2147483648) not 64-bit (positive).
+    if is_32bit {
+        Some(IrConst::I32(result as i32))
+    } else {
+        Some(IrConst::I64(result))
+    }
 }
 
 /// Evaluate a constant floating-point binary operation.

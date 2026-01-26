@@ -73,11 +73,30 @@ impl<'a> SemaConstEval<'a> {
         }
 
         match expr {
-            // Integer literals
-            Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => {
+            // Integer literals: preserve the C type width so that
+            // ctype_from_ir_const can infer the correct CType.
+            // IntLiteral has C type `int` (32-bit) when the value fits, otherwise `long`.
+            // This matters for operations like (1 << 31) / N where 32-bit vs 64-bit
+            // determines whether the shift result is negative (INT_MIN) or positive.
+            // Note: the lexer may produce IntLiteral for values > i32::MAX (decimal
+            // literals without suffix), so we must range-check before using I32.
+            Expr::IntLiteral(val, _) => {
+                if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
+                    Some(IrConst::I32(*val as i32))
+                } else {
+                    Some(IrConst::I64(*val))
+                }
+            }
+            Expr::LongLiteral(val, _) => {
                 Some(IrConst::I64(*val))
             }
-            Expr::UIntLiteral(val, _) | Expr::ULongLiteral(val, _) => {
+            // UIntLiteral must stay as I64 to preserve the unsigned value.
+            // IrConst::I32 is signed and would misrepresent values > i32::MAX
+            // (e.g., 0xFFFFFFFA as uint = 4294967290, not -6).
+            Expr::UIntLiteral(val, _) => {
+                Some(IrConst::I64(*val as i64))
+            }
+            Expr::ULongLiteral(val, _) => {
                 Some(IrConst::I64(*val as i64))
             }
             Expr::CharLiteral(ch, _) => {
