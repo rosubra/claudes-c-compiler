@@ -1,0 +1,18 @@
+Task: Fix va_arg for _Complex long double variadic arguments on x86-64
+Status: in_progress
+Agent: fix_va_arg_complex_long_double
+
+Problem:
+When passing _Complex long double as a variadic argument on x86-64,
+struct_arg_sizes is not set for arguments beyond fixed params when
+using pre-registered function metadata. This causes the 32-byte complex
+value to be passed as a pointer in an integer register instead of by
+value on the stack.
+
+Root cause:
+In expr_calls.rs lower_call_arguments(), the struct_arg_sizes path that
+uses func_meta.sigs[name].param_struct_sizes only has entries for fixed
+params. Variadic args get sizes.get(i) = None, so classify_call_args
+treats them as a scalar pointer.
+
+Fix: Fall back to expression-based inference for args beyond fixed params.
