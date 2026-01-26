@@ -969,6 +969,12 @@ impl IrBinOp {
     pub fn is_commutative(self) -> bool {
         matches!(self, IrBinOp::Add | IrBinOp::Mul | IrBinOp::And | IrBinOp::Or | IrBinOp::Xor)
     }
+
+    /// Returns true if this operation can trap at runtime (e.g., divide by zero causes SIGFPE).
+    /// Such operations must not be speculatively executed by if-conversion.
+    pub fn can_trap(self) -> bool {
+        matches!(self, IrBinOp::SDiv | IrBinOp::UDiv | IrBinOp::SRem | IrBinOp::URem)
+    }
 }
 
 /// Unary operations.

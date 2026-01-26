@@ -153,6 +153,9 @@ struct DiamondInfo {
 fn is_side_effect_free(block: &BasicBlock) -> bool {
     for inst in &block.instructions {
         match inst {
+            // Division and remainder can trap with SIGFPE on divide-by-zero.
+            // They must not be speculatively executed past a guard condition.
+            Instruction::BinOp { op, .. } if op.can_trap() => return false,
             Instruction::BinOp { .. }
             | Instruction::UnaryOp { .. }
             | Instruction::Cmp { .. }
