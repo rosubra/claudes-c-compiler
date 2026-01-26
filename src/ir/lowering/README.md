@@ -116,7 +116,8 @@ designator chains. These are extracted into free functions to avoid duplication:
   the sub-layout lookup + synthetic item construction pattern
 - `has_array_field_designators(items)` — Detects `[N].field` designated init patterns
 - `expr_contains_string_literal(expr)` — Recursive check for string literals in expressions
-- `init_contains_string_literal/addr_expr(item)` — Recursive init-level checks
+- `init_contains_string_literal/addr_expr(item, enum_constants)` — Recursive init-level checks
+  (`addr_expr` takes an enum_constants map to exclude enum identifiers from address detection)
 - `type_has_pointer_elements(ty, ctx)` — Recursive pointer content check
 - `push_zero_bytes(elements, count)` — Zero-fill for compound element lists
 

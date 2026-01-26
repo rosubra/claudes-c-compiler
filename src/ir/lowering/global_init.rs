@@ -324,12 +324,18 @@ impl Lowerer {
                             if Self::expr_contains_label_addr(expr) {
                                 return true;
                             }
-                            if self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some() {
+                            let is_const = self.eval_const_expr(expr).is_some();
+                            if !is_const && self.eval_global_addr_expr(expr).is_some() {
                                 return true;
+                            }
+                            // Compile-time constants (enum values, integer literals) don't
+                            // require address relocations, so they can use the Array path.
+                            if is_const {
+                                return false;
                             }
                         }
                         // Also recurse into nested lists for string literals (double-brace init)
-                        h::init_contains_addr_expr(item, is_multidim_char_array)
+                        h::init_contains_addr_expr(item, is_multidim_char_array, &self.types.enum_constants)
                     }) || (is_ptr_array && !is_multidim_char_array && items.iter().any(|item| {
                         h::init_contains_string_literal(item)
                     }));

@@ -421,6 +421,11 @@ impl Lowerer {
                     if inner_ty.is_complex() {
                         let elem_size = self.resolve_ctype_size(inner_ty);
                         self.fill_array_of_complex(nested_items, inner_ty, arr_size, elem_size, &mut bytes, 0);
+                    } else if matches!(inner_ty.as_ref(), CType::Struct(_) | CType::Union(_)) {
+                        // Array of structs/unions without pointer fields: use composite
+                        // array filler which handles Initializer::List sub-items correctly.
+                        let elem_size = self.resolve_ctype_size(inner_ty);
+                        self.fill_array_of_composites(nested_items, inner_ty, arr_size, elem_size, &mut bytes, 0);
                     } else {
                         self.fill_scalar_list_to_bytes(nested_items, inner_ty, field_size, &mut bytes);
                     }

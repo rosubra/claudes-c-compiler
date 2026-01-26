@@ -90,7 +90,7 @@ See `git log` for full history. Key milestones:
 |---------|--------|-------|
 | zlib | PASS | Build + self-test + minigzip roundtrip all pass |
 | lua | PASS | All 6 tests pass (version, math, strings, tables, functions, bytecode) |
-| libsodium | PASS | All 7 tests pass (init, random, sha256, secretbox, sign, box, generichash) |
+| libsodium | PASS | All 7 tests pass on all architectures (init, random, sha256, secretbox, sign, box, generichash) |
 | mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | libpng | PASS | pngtest passes |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |

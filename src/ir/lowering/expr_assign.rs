@@ -526,23 +526,40 @@ impl Lowerer {
             Operand::Value(self.emit_cast_val(loaded, cast_from, op_ty))
         } else if val_ty != op_ty && val_ty.is_float() && op_ty.is_float() {
             Operand::Value(self.emit_cast_val(loaded, val_ty, op_ty))
-        } else if !op_ty.is_float() && ir_ty.size() < 8 {
-            let extend_unsigned = if is_shift {
-                ir_ty.is_unsigned()
+        } else if !op_ty.is_float() && ir_ty.size() < op_ty.size() {
+            // Widen the LHS to the operation type (handles both sub-int to I64
+            // and I64/U64 to I128/U128 promotions).
+            if op_ty == IrType::I128 || op_ty == IrType::U128 {
+                // Widen to 128-bit: first promote to I64/U64, then cast to 128-bit
+                let from_64 = if ir_ty.is_unsigned() || common_ty.is_unsigned() {
+                    IrType::U64
+                } else {
+                    IrType::I64
+                };
+                let loaded_64 = if ir_ty.size() < 8 {
+                    Operand::Value(self.emit_cast_val(loaded, ir_ty, from_64))
+                } else {
+                    loaded
+                };
+                Operand::Value(self.emit_cast_val(loaded_64, from_64, op_ty))
             } else {
-                common_ty.is_unsigned() || ir_ty.is_unsigned()
-            };
-            let from_ty = if extend_unsigned {
-                match ir_ty {
-                    IrType::I32 => IrType::U32,
-                    IrType::I16 => IrType::U16,
-                    IrType::I8 => IrType::U8,
-                    _ => ir_ty,
-                }
-            } else {
-                ir_ty
-            };
-            Operand::Value(self.emit_cast_val(loaded, from_ty, IrType::I64))
+                let extend_unsigned = if is_shift {
+                    ir_ty.is_unsigned()
+                } else {
+                    common_ty.is_unsigned() || ir_ty.is_unsigned()
+                };
+                let from_ty = if extend_unsigned {
+                    match ir_ty {
+                        IrType::I32 => IrType::U32,
+                        IrType::I16 => IrType::U16,
+                        IrType::I8 => IrType::U8,
+                        _ => ir_ty,
+                    }
+                } else {
+                    ir_ty
+                };
+                Operand::Value(self.emit_cast_val(loaded, from_ty, IrType::I64))
+            }
         } else {
             loaded
         }
@@ -560,8 +577,21 @@ impl Lowerer {
             }
         } else if op_ty.is_float() && target_ty.is_float() && op_ty != target_ty {
             Operand::Value(self.emit_cast_val(result, op_ty, target_ty))
-        } else if !op_ty.is_float() && target_ir_ty.size() < 8 {
-            Operand::Value(self.emit_cast_val(result, IrType::I64, target_ir_ty))
+        } else if !op_ty.is_float() && target_ir_ty.size() < op_ty.size() {
+            // Narrow from operation type to target type (handles both I64 to sub-int
+            // and I128/U128 to I64/U64 narrowing).
+            if op_ty == IrType::I128 || op_ty == IrType::U128 {
+                // Truncate from 128-bit to the target type
+                let to_64 = if target_ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
+                let narrowed = self.emit_cast_val(result, op_ty, to_64);
+                if target_ir_ty.size() < 8 {
+                    Operand::Value(self.emit_cast_val(Operand::Value(narrowed), to_64, target_ir_ty))
+                } else {
+                    Operand::Value(narrowed)
+                }
+            } else {
+                Operand::Value(self.emit_cast_val(result, IrType::I64, target_ir_ty))
+            }
         } else {
             result
         }

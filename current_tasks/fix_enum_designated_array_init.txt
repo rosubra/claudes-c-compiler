@@ -1,5 +1,5 @@
 Task: Fix enum constant values in designated array initializers
-Status: in_progress
+Status: completed
 
 Problem: expr_might_be_addr() in global_init_helpers.rs treats ALL identifiers as
 potential address expressions, including enum constants. This causes arrays with

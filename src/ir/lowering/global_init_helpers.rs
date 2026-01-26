@@ -7,6 +7,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::common::types::{CType, StructLayout, StructLayoutProvider, RcLayout};
+use crate::common::fx_hash::FxHashMap;
 
 /// Extract the field name from the first designator of an initializer item.
 /// Returns `None` if the item has no designators or the first is not a Field.
@@ -76,17 +77,23 @@ pub(super) fn init_contains_string_literal(item: &InitializerItem) -> bool {
 /// Check if an initializer item contains an address expression or string literal.
 /// Used when `is_multidim_char_array` is true to suppress treating string
 /// literals as address expressions for multi-dim char arrays.
-pub(super) fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_array: bool) -> bool {
+/// `enum_constants` is used to distinguish enum constant identifiers (which are
+/// compile-time integer values) from variable/function identifiers (which are addresses).
+pub(super) fn init_contains_addr_expr(
+    item: &InitializerItem,
+    is_multidim_char_array: bool,
+    enum_constants: &FxHashMap<String, i64>,
+) -> bool {
     match &item.init {
         Initializer::Expr(expr) => {
             if matches!(expr, Expr::StringLiteral(_, _)) {
                 !is_multidim_char_array
             } else {
-                expr_might_be_addr(expr)
+                expr_might_be_addr(expr, enum_constants)
             }
         }
         Initializer::List(sub_items) => {
-            sub_items.iter().any(|sub| init_contains_addr_expr(sub, is_multidim_char_array))
+            sub_items.iter().any(|sub| init_contains_addr_expr(sub, is_multidim_char_array, enum_constants))
         }
     }
 }
@@ -94,16 +101,19 @@ pub(super) fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_a
 /// Check if an expression might produce an address that requires a relocation.
 /// This is used to determine whether a global initializer needs the Compound path.
 /// Conservative: false positives are safe (just use the slower Compound path).
-fn expr_might_be_addr(expr: &Expr) -> bool {
+/// `enum_constants` is used to exclude known enum constant identifiers, which are
+/// compile-time integer values and not addresses.
+fn expr_might_be_addr(expr: &Expr, enum_constants: &FxHashMap<String, i64>) -> bool {
     match expr {
         Expr::AddressOf(_, _) => true,
         Expr::LabelAddr(_, _) => true,
-        // Identifiers in global pointer array context are addresses (array/function names)
-        Expr::Identifier(_, _) => true,
+        // Identifiers that are enum constants are compile-time integer values, not addresses.
+        // Only treat non-enum identifiers as potential addresses (array/function names).
+        Expr::Identifier(name, _) => !enum_constants.contains_key(name),
         // Cast of an address expression
-        Expr::Cast(_, inner, _) => expr_might_be_addr(inner),
+        Expr::Cast(_, inner, _) => expr_might_be_addr(inner, enum_constants),
         // Binary ops on addresses (e.g., &x + offset, arr + n)
-        Expr::BinaryOp(_, lhs, rhs, _) => expr_might_be_addr(lhs) || expr_might_be_addr(rhs),
+        Expr::BinaryOp(_, lhs, rhs, _) => expr_might_be_addr(lhs, enum_constants) || expr_might_be_addr(rhs, enum_constants),
         // Compound literals may contain addresses
         Expr::CompoundLiteral(_, _, _) => true,
         _ => false,
