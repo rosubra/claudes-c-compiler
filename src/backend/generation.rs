@@ -15,7 +15,7 @@ use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use super::common;
 use super::traits::ArchCodegen;
 use super::state::StackSlot;
-use super::liveness::{for_each_operand_in_instruction, for_each_value_use_in_instruction, for_each_operand_in_terminator};
+use super::liveness::{for_each_operand_in_instruction, for_each_value_use_in_instruction, for_each_operand_in_terminator, compute_live_intervals};
 
 /// Information about a GEP with a constant offset that can be folded into
 /// Load/Store addressing modes. Instead of computing `base + offset` as a
@@ -858,11 +858,20 @@ pub fn calculate_stack_space_common(
     };
 
     // Map from value ID -> the block where it's defined.
+    // After phi elimination, a single-phi destination can be defined via Copy
+    // in multiple predecessor blocks. Track these multi-definition values so
+    // they are never misclassified as block-local (Tier 3).
     let mut def_block: FxHashMap<u32, usize> = FxHashMap::default();
+    let mut multi_def_values: FxHashSet<u32> = FxHashSet::default();
     if coalesce {
         for (block_idx, block) in func.blocks.iter().enumerate() {
             for inst in &block.instructions {
                 if let Some(dest) = inst.dest() {
+                    if let Some(&prev_blk) = def_block.get(&dest.0) {
+                        if prev_blk != block_idx {
+                            multi_def_values.insert(dest.0);
+                        }
+                    }
                     def_block.insert(dest.0, block_idx);
                 }
             }
@@ -872,12 +881,16 @@ pub fn calculate_stack_space_common(
     // Determine if a non-alloca value can be assigned to a block-local pool slot.
     // Returns Some(def_block_idx) if the value is defined and used only within a
     // single non-entry block, making it safe to share stack space with values
-    // from other blocks.
-    let single_use_block = |val_id: u32| -> Option<usize> {
+    // from other blocks (since only one block's values are live at a time).
+    let coalescable_group = |val_id: u32| -> Option<usize> {
         if !coalesce {
             return None;
         }
-        // Non-alloca value: coalescable if defined and used in the same single non-entry block.
+        // Values defined in multiple blocks (from phi elimination) must use
+        // liveness-based packing (Tier 2), never block-local coalescing (Tier 3).
+        if multi_def_values.contains(&val_id) {
+            return None;
+        }
         if let Some(&def_blk) = def_block.get(&val_id) {
             if def_blk == 0 {
                 return None; // Entry block values are never coalesced.
@@ -886,13 +899,16 @@ pub fn calculate_stack_space_common(
                 let mut unique: Vec<usize> = blocks.clone();
                 unique.sort_unstable();
                 unique.dedup();
-                // Must only be used in its defining block.
-                if unique.len() == 1 && unique[0] == def_blk {
-                    return Some(def_blk);
-                }
+
                 if unique.is_empty() {
                     return Some(def_blk); // Dead value, safe to coalesce.
                 }
+
+                // Check 1: Single-block value (defined and used in the same block).
+                if unique.len() == 1 && unique[0] == def_blk {
+                    return Some(def_blk);
+                }
+
             } else {
                 return Some(def_blk); // No uses - dead value.
             }
@@ -900,11 +916,11 @@ pub fn calculate_stack_space_common(
         None
     };
 
-    // Two-pass allocation:
-    // Pass 1: Assign non-coalescable values to permanent slots.
-    //         Record coalescable values with their target block index.
-    // Pass 2: For each target block, assign coalescable values into a shared pool.
-    //         The pool is sized to the maximum of any single block's needs.
+    // Three-tier allocation:
+    // Tier 1: Allocas get permanent slots (addressable memory).
+    // Tier 2: Multi-block non-alloca values use liveness-based packing: values
+    //         with non-overlapping live intervals share the same stack slot.
+    // Tier 3: Single-block non-alloca values use block-local coalescing (as before).
 
     struct DeferredSlot {
         dest_id: u32,
@@ -913,8 +929,15 @@ pub fn calculate_stack_space_common(
         block_offset: i64,
     }
 
+    // Multi-block value pending liveness-based packing.
+    struct MultiBlockValue {
+        dest_id: u32,
+        slot_size: i64,
+    }
+
     let mut non_local_space = initial_offset;
     let mut deferred_slots: Vec<DeferredSlot> = Vec::new();
+    let mut multi_block_values: Vec<MultiBlockValue> = Vec::new();
 
     // Per-block running space counter for block-local values.
     // Indexed by block index, holds the current accumulated space for that block.
@@ -956,7 +979,7 @@ pub fn calculate_stack_space_common(
                     continue;
                 }
 
-                if let Some(target_blk) = single_use_block(dest.0) {
+                if let Some(target_blk) = coalescable_group(dest.0) {
                     let bs = block_space.entry(target_blk).or_insert(0);
                     let before = *bs;
                     let (_, new_space) = assign_slot(*bs, slot_size, 0);
@@ -969,11 +992,112 @@ pub fn calculate_stack_space_common(
                         block_offset: before,
                     });
                 } else {
-                    let (slot, new_space) = assign_slot(non_local_space, slot_size, 0);
-                    state.value_locations.insert(dest.0, StackSlot(slot));
-                    non_local_space = new_space;
+                    // Collect multi-block values for liveness-based packing.
+                    multi_block_values.push(MultiBlockValue {
+                        dest_id: dest.0,
+                        slot_size,
+                    });
                 }
             }
+        }
+    }
+
+    // Tier 2: Liveness-based stack slot packing for multi-block values.
+    // Use live intervals to identify non-overlapping values that can share
+    // the same stack slot, reducing frame size significantly.
+    if !multi_block_values.is_empty() && coalesce {
+        // Compute live intervals (reuses the same analysis as register allocation).
+        let liveness = compute_live_intervals(func);
+
+        // Build map from value ID -> live interval.
+        let mut interval_map: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
+        for iv in &liveness.intervals {
+            interval_map.insert(iv.value_id, (iv.start, iv.end));
+        }
+
+        // Separate values by slot size for packing (8-byte and 16-byte pools).
+        // Values of different sizes should not share slots to avoid alignment issues.
+        let mut values_8: Vec<(u32, u32, u32)> = Vec::new(); // (dest_id, start, end)
+        let mut values_16: Vec<(u32, u32, u32)> = Vec::new();
+        let mut no_interval: Vec<(u32, i64)> = Vec::new(); // (dest_id, size) - fallback
+
+        for mbv in &multi_block_values {
+            if let Some(&(start, end)) = interval_map.get(&mbv.dest_id) {
+                if mbv.slot_size == 16 {
+                    values_16.push((mbv.dest_id, start, end));
+                } else {
+                    values_8.push((mbv.dest_id, start, end));
+                }
+            } else {
+                // No interval info (e.g., dead value) - assign permanent slot.
+                no_interval.push((mbv.dest_id, mbv.slot_size));
+            }
+        }
+
+        // Pack values using a greedy interval coloring algorithm:
+        // Sort by start point, then greedily assign to the first slot whose
+        // previous occupant's interval has ended. This is optimal for interval
+        // graphs (chromatic number equals clique number).
+        fn pack_values_into_slots(
+            values: &mut Vec<(u32, u32, u32)>,
+            state: &mut super::state::CodegenState,
+            non_local_space: &mut i64,
+            slot_size: i64,
+            assign_slot: &impl Fn(i64, i64, i64) -> (i64, i64),
+        ) {
+            if values.is_empty() {
+                return;
+            }
+
+            // Sort by interval start point (ascending).
+            values.sort_by_key(|&(_, start, _)| start);
+
+            // Each slot tracks: (stack_slot_offset, end_point_of_current_occupant).
+            // When a new value starts after the current occupant ends, it can reuse the slot.
+            let mut slots: Vec<(i64, u32)> = Vec::new();
+
+            for &(dest_id, start, end) in values.iter() {
+                // Find a slot whose current occupant has ended (end_point < start).
+                // Pick the one with the latest end point (best-fit: minimize fragmentation).
+                let mut best_slot: Option<usize> = None;
+                let mut best_end: u32 = 0;
+                for (i, &(_, slot_end)) in slots.iter().enumerate() {
+                    if slot_end < start && (best_slot.is_none() || slot_end > best_end) {
+                        best_slot = Some(i);
+                        best_end = slot_end;
+                    }
+                }
+
+                if let Some(idx) = best_slot {
+                    // Reuse existing slot.
+                    let slot_offset = slots[idx].0;
+                    slots[idx].1 = end; // Update end point.
+                    state.value_locations.insert(dest_id, StackSlot(slot_offset));
+                } else {
+                    // Allocate a new slot.
+                    let (slot, new_space) = assign_slot(*non_local_space, slot_size, 0);
+                    state.value_locations.insert(dest_id, StackSlot(slot));
+                    *non_local_space = new_space;
+                    slots.push((slot, end));
+                }
+            }
+        }
+
+        pack_values_into_slots(&mut values_8, state, &mut non_local_space, 8, &assign_slot);
+        pack_values_into_slots(&mut values_16, state, &mut non_local_space, 16, &assign_slot);
+
+        // Assign permanent slots for values without interval info.
+        for (dest_id, size) in no_interval {
+            let (slot, new_space) = assign_slot(non_local_space, size, 0);
+            state.value_locations.insert(dest_id, StackSlot(slot));
+            non_local_space = new_space;
+        }
+    } else {
+        // Fallback: assign permanent slots for all multi-block values (no coalescing).
+        for mbv in &multi_block_values {
+            let (slot, new_space) = assign_slot(non_local_space, mbv.slot_size, 0);
+            state.value_locations.insert(mbv.dest_id, StackSlot(slot));
+            non_local_space = new_space;
         }
     }
 
@@ -981,81 +1105,6 @@ pub fn calculate_stack_space_common(
     // All deferred values share a pool starting at non_local_space.
     // Each value's final slot is computed by calling assign_slot with
     // the global base plus the value's block-local offset.
-
-    // Debug: report stack space breakdown for large functions
-    if std::env::var("CCC_DEBUG_STACK").is_ok() && non_local_space > 100000 {
-        let func_name = &func.name;
-        eprintln!("[STACK DEBUG] {}: non_local_space={}, max_block_local_space={}, deferred={}, blocks={}, instructions={}, coalesce={}",
-            func_name, non_local_space, max_block_local_space, deferred_slots.len(), num_blocks, total_instructions, coalesce);
-        // Count alloca vs non-alloca
-        let alloca_count = state.alloca_values.len();
-        let nonlocal_count = state.value_locations.len() - alloca_count;
-        eprintln!("[STACK DEBUG] {}: allocas={}, non-coalescable values={}", func_name, alloca_count, nonlocal_count);
-        // Show allocation details
-        let mut alloca_sizes: Vec<(u32, i64)> = Vec::new();
-        let mut total_non_coal_size: i64 = 0;
-        let mut total_coal_count: usize = 0;
-        let mut total_non_coal_count: usize = 0;
-        for (_block_idx, block) in func.blocks.iter().enumerate() {
-            for inst in &block.instructions {
-                if let Instruction::Alloca { dest, size, .. } = inst {
-                    alloca_sizes.push((dest.0, if *size == 0 { 8 } else { *size as i64 }));
-                } else if let Some(dest) = inst.dest() {
-                    let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
-                    let is_f128 = matches!(inst.result_type(), Some(IrType::F128));
-                    let slot_size: i64 = if is_i128 || is_f128 { 16 } else { 8 };
-                    if single_use_block(dest.0).is_some() {
-                        total_coal_count += 1;
-                    } else {
-                        total_non_coal_count += 1;
-                        total_non_coal_size += slot_size;
-                    }
-                }
-            }
-        }
-        alloca_sizes.sort_by(|a, b| b.1.cmp(&a.1));
-        let total_alloca_size: i64 = alloca_sizes.iter().map(|(_, s)| *s).sum();
-        eprintln!("[STACK DEBUG] {}: total alloca size={}, num_allocas={}", func_name, total_alloca_size, alloca_sizes.len());
-        eprintln!("[STACK DEBUG] {}: coalescable={}, non-coalescable={}, non_coal_size={}",
-            func_name, total_coal_count, total_non_coal_count, total_non_coal_size);
-        eprintln!("[STACK DEBUG] {}: expected total={}, actual non_local_space={}",
-            func_name, total_alloca_size + total_non_coal_size, non_local_space);
-        for (id, sz) in alloca_sizes.iter().take(10) {
-            eprintln!("[STACK DEBUG]   alloca v{}: {} bytes", id, sz);
-        }
-        // Analyze WHY values are non-coalescable
-        let mut entry_block_vals = 0usize;
-        let mut multi_block_vals = 0usize;
-        let mut no_use_info_vals = 0usize;
-        for (_block_idx, block) in func.blocks.iter().enumerate() {
-            for inst in &block.instructions {
-                if matches!(inst, Instruction::Alloca { .. }) { continue; }
-                if let Some(dest) = inst.dest() {
-                    if single_use_block(dest.0).is_none() {
-                        // Why is it non-coalescable?
-                        if let Some(&def_blk) = def_block.get(&dest.0) {
-                            if def_blk == 0 {
-                                entry_block_vals += 1;
-                            } else if let Some(blocks) = use_blocks_map.get(&dest.0) {
-                                let mut unique: Vec<usize> = blocks.clone();
-                                unique.sort_unstable();
-                                unique.dedup();
-                                if unique.len() > 1 || (unique.len() == 1 && unique[0] != def_blk) {
-                                    multi_block_vals += 1;
-                                }
-                            } else {
-                                no_use_info_vals += 1;
-                            }
-                        } else {
-                            no_use_info_vals += 1;
-                        }
-                    }
-                }
-            }
-        }
-        eprintln!("[STACK DEBUG] {}: non-coal reasons: entry_block={}, multi_block={}, no_use_info={}",
-            func_name, entry_block_vals, multi_block_vals, no_use_info_vals);
-    }
 
     if !deferred_slots.is_empty() && max_block_local_space > 0 {
         for ds in &deferred_slots {
