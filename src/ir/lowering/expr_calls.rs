@@ -344,8 +344,9 @@ impl Lowerer {
                         let struct_size = self.struct_value_size(a).unwrap_or(8);
                         let alloc_size = if struct_size > 0 { struct_size } else { 8 };
                         let alloca = self.fresh_value();
-                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                        self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+                        let store_ty = Self::packed_store_type(alloc_size);
+                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
                         val = Operand::Value(alloca);
                     }
                 }

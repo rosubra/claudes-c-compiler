@@ -73,7 +73,7 @@ impl Lowerer {
             let rhs_val = self.lower_expr(rhs);
             if let Some(lv) = self.lower_lvalue(lhs) {
                 let dest_addr = self.lvalue_addr(&lv);
-                self.emit(Instruction::Store { val: rhs_val, ptr: dest_addr, ty: IrType::I64 , seg_override: AddressSpace::Default });
+                self.emit(Instruction::Store { val: rhs_val, ptr: dest_addr, ty: Self::packed_store_type(struct_size) , seg_override: AddressSpace::Default });
                 return Operand::Value(dest_addr);
             }
             return rhs_val;

@@ -341,8 +341,9 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+                    let store_ty = Self::packed_store_type(alloc_size);
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
                     alloca
                 }
             }
@@ -354,8 +355,9 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0, volatile: false });
-                    self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+                    let store_ty = Self::packed_store_type(alloc_size);
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
+                    self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty , seg_override: AddressSpace::Default });
                     alloca
                 } else {
                     let val = self.lower_expr(expr);

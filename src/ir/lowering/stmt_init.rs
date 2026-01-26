@@ -300,7 +300,7 @@ impl Lowerer {
         // IS the struct data, not an address. Store directly.
         if self.expr_produces_packed_struct_data(expr) && da.actual_alloc_size <= 8 {
             let val = self.lower_expr(expr);
-            self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+            self.emit(Instruction::Store { val, ptr: alloca, ty: Self::packed_store_type(da.actual_alloc_size) , seg_override: AddressSpace::Default });
         } else {
             let src_addr = self.get_struct_base_addr(expr);
             self.emit(Instruction::Memcpy {

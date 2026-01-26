@@ -78,6 +78,21 @@ impl Lowerer {
         if ty == IrType::Void { IrConst::Zero } else { IrConst::zero(ty) }
     }
 
+    /// Return the appropriate IrType for storing packed struct/union data of the given size.
+    /// Small structs (≤8 bytes) passed in registers are packed into the low bytes of a
+    /// 64-bit register. We must store with the correct width to avoid overwriting memory
+    /// adjacent to the struct allocation (e.g. globals placed contiguously).
+    /// Sizes 5-7 use I64 since SysV ABI alignment ensures at least 8 bytes are allocated.
+    pub(super) fn packed_store_type(size: usize) -> IrType {
+        match size {
+            1 => IrType::I8,
+            2 => IrType::I16,
+            3..=4 => IrType::I32,
+            // 0 and 5-8: use I64. Call sites guard size==0 to 8.
+            _ => IrType::I64,
+        }
+    }
+
     /// Check if an expression refers to a struct/union value (not pointer-to-struct).
     /// Returns the struct/union size if the expression produces a struct/union value,
     /// or None if it's not a struct/union. Unifies the old expr_is_struct_value (check)
