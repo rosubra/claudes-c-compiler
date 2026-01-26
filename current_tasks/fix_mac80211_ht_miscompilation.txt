@@ -1,0 +1,6 @@
+Task: Fix mac80211/ht.c miscompilation
+Status: in_progress
+Started: 2026-01-26
+
+The kernel file net/mac80211/ht.c is miscompiled by ccc, causing boot failure.
+Investigating root cause and fixing the compiler bug.

@@ -2033,6 +2033,37 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    add t0, t1, t0");
     }
 
+    /// Optimized GEP for alloca base + constant offset.
+    /// Computes s0 + (slot_offset + gep_offset) directly into t0 (accumulator).
+    fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) {
+        let folded = slot.0 + offset;
+        // Reuse emit_addi_s0 which handles large offsets via li+add
+        self.emit_addi_s0("t0", folded);
+    }
+
+    /// Optimized GEP for pointer-in-slot + constant offset.
+    /// Loads the pointer, then adds the constant offset using addi when possible.
+    fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) {
+        // Load the base pointer into t0
+        if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+        } else {
+            self.emit_load_from_s0("t0", slot.0, "ld");
+        }
+        // Add constant offset using addi (skip if zero)
+        if offset != 0 {
+            self.emit_add_imm_to_acc(offset);
+        }
+    }
+
+    /// Add a constant offset to the accumulator (t0) using addi.
+    fn emit_gep_add_const_to_acc(&mut self, offset: i64) {
+        if offset != 0 {
+            self.emit_add_imm_to_acc(offset);
+        }
+    }
+
     fn emit_add_imm_to_acc(&mut self, imm: i64) {
         if imm >= -2048 && imm <= 2047 {
             self.state.emit_fmt(format_args!("    addi t0, t0, {}", imm));

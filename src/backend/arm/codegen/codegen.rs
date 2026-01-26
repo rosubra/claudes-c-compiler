@@ -2144,6 +2144,37 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    add x0, x1, x0");
     }
 
+    /// Optimized GEP for alloca base + constant offset.
+    /// Computes sp/x29 + (slot_offset + gep_offset) directly into x0 (accumulator).
+    fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) {
+        let folded = slot.0 + offset;
+        // Reuse emit_add_sp_offset which handles large offsets via x19 frame base or x17 scratch
+        self.emit_add_sp_offset("x0", folded);
+    }
+
+    /// Optimized GEP for pointer-in-slot + constant offset.
+    /// Loads the pointer, then adds the constant offset using immediate add when possible.
+    fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) {
+        // Load the base pointer into x0
+        if let Some(&reg) = self.reg_assignments.get(&val_id) {
+            let reg_name = callee_saved_name(reg);
+            self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
+        } else {
+            self.emit_load_from_sp("x0", slot.0, "ldr");
+        }
+        // Add constant offset using immediate add (skip if zero)
+        if offset != 0 {
+            self.emit_add_imm_to_acc(offset);
+        }
+    }
+
+    /// Add a constant offset to the accumulator (x0) using immediate add.
+    fn emit_gep_add_const_to_acc(&mut self, offset: i64) {
+        if offset != 0 {
+            self.emit_add_imm_to_acc(offset);
+        }
+    }
+
     fn emit_add_imm_to_acc(&mut self, imm: i64) {
         if imm >= 0 && imm <= 4095 {
             self.state.emit_fmt(format_args!("    add x0, x0, #{}", imm));
