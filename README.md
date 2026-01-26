@@ -78,6 +78,11 @@ See `git log` for full history. Key milestones:
 - AArch64 inline asm: `"Q"` memory constraint (single base register, `[Xn]` syntax) and `"w"` FP/SIMD register constraint with `%d`/`%s`/`%q` modifiers (needed for musl atomic ops and math functions)
 - libffi fixes: `__builtin___clear_cache` support, tied FP register constraint propagation (RISC-V), alloca+indirect call frame addressing (ARM)
 - Fix typedef pointer cast arithmetic: `((TypedefPtr) p) - 1` now correctly scales by pointee size (fixes 132 postgres test failures)
+- Stdin input support (`-` filename): read source from stdin, needed by kernel cc-version.sh
+- `-x` language flag: specify input language (`-x c`, `-x assembler-with-cpp`, `-x none`)
+- `-Wa,` assembler pass-through: forward flags to assembler (needed by kernel as-version.sh)
+- `-Wp,-MMD,path` and `-MD`/`-MF` dependency file generation: needed by kernel build system
+- Bumped `__GNUC__` from 4.8 to 6.5 (satisfies kernel ≥5.1 minimum, stays <7 for glibc compat)
 
 ### Project Build Status
 
@@ -97,7 +102,7 @@ See `git log` for full history. Key milestones:
 | tcc | PASS | All 78 tests pass (version, hello world, tests2 suite) |
 | mbedtls | PASS | All 7 tests pass (md5, sha256, sha512, aes, rsa, ecp, selftest including ARIA) |
 | jq | PASS | All 12 tests pass on x86/RISC-V; ARM 11/12 (regex crash in oniguruma regexec.c) |
-| kernel | PASS (x86, ARM) | Linux kernel boots on x86 and ARM; RISC-V boot not yet working |
+| kernel | PASS (x86, ARM) | Linux 6.9 kernel builds and boots on x86 and ARM; RISC-V build fails (vDSO) |
 | mquickjs-clang | PASS | All architectures pass |
 | liburing | FAIL | Builds but all 5 runtime tests fail (io_uring init returns -1) |
 | postgres | PARTIAL | 211/216 tests pass (5 remaining: strerror, stats, stack depth) |
@@ -126,7 +131,8 @@ target/release/ccc -o output input.c       # x86-64
 target/release/ccc-arm -o output input.c   # AArch64
 target/release/ccc-riscv -o output input.c # RISC-V 64
 
-# GCC-compatible flags: -S, -c, -E, -O0..3, -g, -D, -I
+# GCC-compatible flags: -S, -c, -E, -O0..3, -g, -D, -I, -x, -MD, -MF
+# Read from stdin: echo 'int main(){}' | ccc -E -x c -
 ```
 
 ## Architecture

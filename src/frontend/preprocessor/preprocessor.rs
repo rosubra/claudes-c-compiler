@@ -156,8 +156,11 @@ impl Preprocessor {
             // Default arch: x86_64 (overridden by set_target)
             ("__x86_64__", "1"), ("__x86_64", "1"),
             ("__amd64__", "1"), ("__amd64", "1"),
-            // GCC compat: claim GCC 4.8 (we support bswap16/32/64, clz, ctz, etc.)
-            ("__GNUC__", "4"), ("__GNUC_MINOR__", "8"), ("__GNUC_PATCHLEVEL__", "0"),
+            // GCC compat: claim GCC 6.5.0. This is:
+            //  - >= 5.1 (Linux kernel minimum requirement)
+            //  - < 7.0 (avoids glibc expecting native _Float32/_Float64/_Float128
+            //    types which we don't support; glibc typedefs them for GCC < 7)
+            ("__GNUC__", "6"), ("__GNUC_MINOR__", "5"), ("__GNUC_PATCHLEVEL__", "0"),
             // sizeof macros
             ("__SIZEOF_POINTER__", "8"), ("__SIZEOF_INT__", "4"),
             ("__SIZEOF_LONG__", "8"), ("__SIZEOF_LONG_LONG__", "8"),

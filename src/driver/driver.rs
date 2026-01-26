@@ -68,6 +68,20 @@ pub struct Driver {
     /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
     /// Required by the Linux kernel for Intel CET/IBT (Indirect Branch Tracking).
     pub cf_protection_branch: bool,
+    /// Explicit language override from -x flag.
+    /// When set, overrides file extension detection for input language.
+    /// Values: "c", "assembler", "assembler-with-cpp", "none" (reset).
+    /// Used for stdin input ("-") and also for files like /dev/null where
+    /// the extension doesn't indicate the language.
+    pub explicit_language: Option<String>,
+    /// Extra arguments to pass to the assembler (from -Wa, flags).
+    /// Used by kernel build to query assembler version via -Wa,--version.
+    pub assembler_extra_args: Vec<String>,
+    /// Path to write dependency file (from -MF or -Wp,-MMD,path or -Wp,-MD,path).
+    /// When set, the compiler writes a Make-compatible dependency file listing
+    /// the input source as a dependency of the output object. Used by the Linux
+    /// kernel build system (fixdep) to track header dependencies.
+    pub dep_file: Option<String>,
 }
 
 impl Driver {
@@ -95,7 +109,32 @@ impl Driver {
             indirect_branch_thunk: false,
             patchable_function_entry: None,
             cf_protection_branch: false,
+            explicit_language: None,
+            assembler_extra_args: Vec::new(),
+            dep_file: None,
         }
+    }
+
+    /// Read source from an input file. If the file is "-", reads from stdin.
+    fn read_source(input_file: &str) -> Result<String, String> {
+        if input_file == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)
+                .map_err(|e| format!("Cannot read from stdin: {}", e))?;
+            Ok(buf)
+        } else {
+            std::fs::read_to_string(input_file)
+                .map_err(|e| format!("Cannot read {}: {}", input_file, e))
+        }
+    }
+
+    /// Check if an input file should be treated as assembly source based on
+    /// the -x language override. This is used for stdin ("-") and for files
+    /// like /dev/null where the extension doesn't indicate assembly.
+    fn is_explicit_assembly(&self) -> bool {
+        matches!(self.explicit_language.as_deref(),
+            Some("assembler") | Some("assembler-with-cpp"))
     }
 
     /// Add a -D define from command line.
@@ -123,10 +162,14 @@ impl Driver {
         if self.output_path_set {
             return self.output_path.clone();
         }
-        let stem = std::path::Path::new(input_file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("a");
+        let stem = if input_file == "-" {
+            "stdin"
+        } else {
+            std::path::Path::new(input_file)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("a")
+        };
         match self.mode {
             CompileMode::AssemblyOnly => format!("{}.s", stem),
             CompileMode::ObjectOnly => format!("{}.o", stem),
@@ -191,7 +234,7 @@ impl Driver {
 
     fn run_preprocess_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
-            if Self::is_assembly_source(input_file) {
+            if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
                 // For .S files, delegate preprocessing to gcc which understands
                 // assembly-specific preprocessor behavior
                 let config = self.target.assembler_config();
@@ -223,12 +266,12 @@ impl Driver {
                 continue;
             }
 
-            let source = std::fs::read_to_string(input_file)
-                .map_err(|e| format!("Cannot read {}: {}", input_file, e))?;
+            let source = Self::read_source(input_file)?;
 
             let mut preprocessor = Preprocessor::new();
             self.configure_preprocessor(&mut preprocessor);
-            preprocessor.set_filename(input_file);
+            let filename = if input_file == "-" { "<stdin>" } else { input_file };
+            preprocessor.set_filename(filename);
             self.process_force_includes(&mut preprocessor)?;
             let preprocessed = preprocessor.preprocess(&source);
 
@@ -248,6 +291,7 @@ impl Driver {
             let out_path = self.output_for_input(input_file);
             std::fs::write(&out_path, &asm)
                 .map_err(|e| format!("Cannot write {}: {}", out_path, e))?;
+            self.write_dep_file(input_file, &out_path);
             if self.verbose {
                 eprintln!("Assembly output: {}", out_path);
             }
@@ -258,18 +302,31 @@ impl Driver {
     fn run_object_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
             let out_path = self.output_for_input(input_file);
-            if Self::is_assembly_source(input_file) {
-                // .s/.S files: pass directly to the assembler (gcc)
+            if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
+                // .s/.S files (or -x assembler): pass directly to the assembler (gcc)
                 self.assemble_source_file(input_file, &out_path)?;
             } else {
                 let asm = self.compile_to_assembly(input_file)?;
                 self.target.assemble(&asm, &out_path)?;
             }
+            self.write_dep_file(input_file, &out_path);
             if self.verbose {
                 eprintln!("Object output: {}", out_path);
             }
         }
         Ok(())
+    }
+
+    /// Get a short stem name for an input file (for temp file naming).
+    fn input_stem(input_file: &str) -> &str {
+        if input_file == "-" {
+            "stdin"
+        } else {
+            std::path::Path::new(input_file)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("out")
+        }
     }
 
     fn run_full(&self) -> Result<(), String> {
@@ -280,14 +337,10 @@ impl Driver {
             if Self::is_object_or_archive(input_file) {
                 // Pass .o and .a files directly to the linker
                 passthrough_objects.push(input_file.clone());
-            } else if Self::is_assembly_source(input_file) {
-                // .s/.S files: pass to assembler, then link
+            } else if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
+                // .s/.S files (or -x assembler): pass to assembler, then link
                 let obj_path = format!("/tmp/ccc_{}_{}.o",
-                    std::process::id(),
-                    std::path::Path::new(input_file)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("asm_out"));
+                    std::process::id(), Self::input_stem(input_file));
                 self.assemble_source_file(input_file, &obj_path)?;
                 compiled_object_files.push(obj_path);
             } else {
@@ -295,11 +348,7 @@ impl Driver {
                 let asm = self.compile_to_assembly(input_file)?;
 
                 let obj_path = format!("/tmp/ccc_{}_{}.o",
-                    std::process::id(),
-                    std::path::Path::new(input_file)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("out"));
+                    std::process::id(), Self::input_stem(input_file));
                 self.target.assemble(&asm, &obj_path)?;
                 compiled_object_files.push(obj_path);
             }
@@ -363,7 +412,24 @@ impl Driver {
             }
         }
 
+        // Pass through -Wa, assembler flags
+        for flag in &self.assembler_extra_args {
+            cmd.arg(format!("-Wa,{}", flag));
+        }
+
+        // When explicit language is set (from -x flag), tell gcc too
+        if let Some(ref lang) = self.explicit_language {
+            cmd.arg("-x").arg(lang);
+        }
+
         cmd.args(["-c", "-o", output_path, input_file]);
+
+        // If assembler extra args are present (e.g., -Wa,--version), inherit
+        // stdout so the assembler's output flows through to the caller.
+        // This is needed by kernel's as-version.sh which captures the output.
+        if !self.assembler_extra_args.is_empty() {
+            cmd.stdout(std::process::Stdio::inherit());
+        }
 
         let result = cmd.output()
             .map_err(|e| format!("Failed to run assembler for {}: {}", input_file, e))?;
@@ -398,12 +464,30 @@ impl Driver {
         args
     }
 
+    /// Write a Make-compatible dependency file for the given input/output.
+    /// Format: "output: input\n"
+    /// This is a minimal dependency file that tells make the object depends
+    /// on its source file. A full implementation would also list included headers.
+    fn write_dep_file(&self, input_file: &str, output_file: &str) {
+        if let Some(ref dep_path) = self.dep_file {
+            let dep_path = if dep_path.is_empty() {
+                // Derive from output: replace extension with .d
+                let p = std::path::Path::new(output_file);
+                p.with_extension("d").to_string_lossy().into_owned()
+            } else {
+                dep_path.clone()
+            };
+            let input_name = if input_file == "-" { "<stdin>" } else { input_file };
+            let content = format!("{}: {}\n", output_file, input_name);
+            let _ = std::fs::write(&dep_path, content);
+        }
+    }
+
     /// Core pipeline: preprocess, lex, parse, sema, lower, optimize, codegen.
     ///
     /// Set `CCC_TIME_PHASES=1` in the environment to print per-phase timing to stderr.
     fn compile_to_assembly(&self, input_file: &str) -> Result<String, String> {
-        let source = std::fs::read_to_string(input_file)
-            .map_err(|e| format!("Cannot read {}: {}", input_file, e))?;
+        let source = Self::read_source(input_file)?;
 
         let time_phases = std::env::var("CCC_TIME_PHASES").is_ok();
         let t0 = std::time::Instant::now();
@@ -411,7 +495,8 @@ impl Driver {
         // Preprocess
         let mut preprocessor = Preprocessor::new();
         self.configure_preprocessor(&mut preprocessor);
-        preprocessor.set_filename(input_file);
+        let filename = if input_file == "-" { "<stdin>" } else { input_file };
+        preprocessor.set_filename(filename);
         self.process_force_includes(&mut preprocessor)?;
         let preprocessed = preprocessor.preprocess(&source);
         if time_phases { eprintln!("[TIME] preprocess: {:.3}s", t0.elapsed().as_secs_f64()); }

@@ -39,9 +39,9 @@ fn real_main() {
                 return;
             }
             "-dumpversion" => {
-                // Report GCC 13 to satisfy configure scripts that check compiler version.
-                // This matches the system GCC version in our build environment.
-                println!("13");
+                // Report GCC 6.5 to match __GNUC__/__GNUC_MINOR__ macros.
+                // Must be >= 5.1 for Linux kernel, < 7 for glibc _Float* compat.
+                println!("6");
                 return;
             }
             "--version" | "-v" if args.len() == 2 => {
@@ -62,6 +62,11 @@ fn real_main() {
 
     let mut driver = Driver::new();
     driver.target = target;
+
+    // Track -x language setting. When set, the next "-" argument is
+    // treated as stdin input rather than as an unknown flag.
+    // GCC semantics: "-x none" resets to auto-detect from extension.
+    let mut explicit_language: Option<String> = None;
 
     // Parse command-line arguments (GCC-compatible)
     let mut i = 1;
@@ -126,6 +131,28 @@ fn real_main() {
                         driver.linker_extra_args.push(format!("-Wl,{}", flag));
                     }
                 }
+            }
+
+            // Assembler pass-through: -Wa,flag1,flag2,...
+            // Passes flags to the assembler. Used by kernel's as-version.sh to
+            // query the assembler version via -Wa,--version.
+            arg if arg.starts_with("-Wa,") => {
+                for flag in arg[4..].split(',') {
+                    if !flag.is_empty() {
+                        driver.assembler_extra_args.push(flag.to_string());
+                    }
+                }
+            }
+
+            // Preprocessor pass-through: -Wp,-MMD,path or -Wp,-MD,path
+            // Used by the Linux kernel build to generate dependency files.
+            // Format: -Wp,-MMD,<depfile> or -Wp,-MD,<depfile>
+            arg if arg.starts_with("-Wp,") => {
+                let flags: Vec<&str> = arg[4..].splitn(2, ',').collect();
+                if flags.len() == 2 && (flags[0] == "-MMD" || flags[0] == "-MD") {
+                    driver.dep_file = Some(flags[1].to_string());
+                }
+                // Other -Wp, flags are silently ignored
             }
 
             // Warning flags (ignored for now)
@@ -249,17 +276,45 @@ fn real_main() {
                 // Silently accepted for GCC compatibility
             }
 
-            // Language selection
+            // Language selection: -x c, -x assembler, -x assembler-with-cpp, -x none
+            // Sets the language for subsequent input files. "-x none" resets to
+            // auto-detect from file extension. This is needed for reading from
+            // stdin (where there is no extension to detect from).
             "-x" => {
                 i += 1;
-                // TODO: handle -x c, -x assembler, etc.
+                if i < args.len() {
+                    let lang = args[i].as_str();
+                    if lang == "none" {
+                        explicit_language = None;
+                    } else {
+                        explicit_language = Some(args[i].clone());
+                    }
+                } else {
+                    eprintln!("error: -x requires an argument");
+                    std::process::exit(1);
+                }
             }
 
-            // Dependency generation flags (ignored, but must consume arguments)
-            "-MD" | "-MMD" | "-MP" | "-M" | "-MM" => {
-                // Standalone flags, no argument to consume
+            // Dependency generation flags
+            "-MD" | "-MMD" => {
+                // Enable dependency generation. If no -MF is given, the dep file
+                // defaults to the output filename with .d extension.
+                // We'll compute this default later if dep_file is not set explicitly.
+                if driver.dep_file.is_none() {
+                    // Mark that deps were requested; path will be derived from output
+                    driver.dep_file = Some(String::new()); // empty = derive from output
+                }
             }
-            "-MF" | "-MT" | "-MQ" => {
+            "-MP" | "-M" | "-MM" => {
+                // Standalone flags, no argument to consume (ignored for now)
+            }
+            "-MF" => {
+                i += 1;
+                if i < args.len() {
+                    driver.dep_file = Some(args[i].clone());
+                }
+            }
+            "-MT" | "-MQ" => {
                 // These take an argument: skip the next arg
                 i += 1;
             }
@@ -272,6 +327,13 @@ fn real_main() {
             // Miscellaneous ignored flags
             "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
 
+            // Stdin input: "-" means read from stdin.
+            // Used by kernel build's cc-version.sh: echo '...' | $CC -E -P -x c -
+            "-" => {
+                driver.input_files.push("-".to_string());
+                driver.explicit_language = explicit_language.clone();
+            }
+
             // Unknown flags - warn in verbose mode
             arg if arg.starts_with('-') => {
                 if driver.verbose {
@@ -281,6 +343,10 @@ fn real_main() {
 
             // Input file
             _ => {
+                // When -x is active, set the language for the file
+                if explicit_language.is_some() {
+                    driver.explicit_language = explicit_language.clone();
+                }
                 driver.input_files.push(args[i].clone());
             }
         }
