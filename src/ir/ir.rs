@@ -128,6 +128,23 @@ impl GlobalInit {
             GlobalInit::GlobalLabelDiff(_, _, size) => *size,
         }
     }
+
+    /// Returns the total number of bytes that will be emitted for this initializer.
+    /// Unlike `byte_size()`, this correctly accounts for GlobalAddr entries (8 bytes each)
+    /// inside Compound initializers.
+    pub fn emitted_byte_size(&self) -> usize {
+        match self {
+            GlobalInit::Scalar(_) => 1,
+            GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+            GlobalInit::Compound(inner) => inner.iter().map(|e| e.emitted_byte_size()).sum(),
+            GlobalInit::Array(vals) => vals.len(),
+            GlobalInit::Zero => 0,
+            GlobalInit::String(s) => s.len() + 1,
+            GlobalInit::WideString(ws) => (ws.len() + 1) * 4,
+            GlobalInit::Char16String(cs) => (cs.len() + 1) * 2,
+            GlobalInit::GlobalLabelDiff(_, _, size) => *size,
+        }
+    }
 }
 
 /// An IR function.
@@ -409,6 +426,18 @@ pub enum Terminator {
     /// Indirect branch (computed goto): goto *addr
     /// possible_targets lists all labels that could be jumped to (for optimization/validation)
     IndirectBranch { target: Operand, possible_targets: Vec<BlockId> },
+
+    /// Switch dispatch via jump table.
+    /// Implements dense switch statements efficiently: the backend emits a jump table
+    /// instead of a chain of compare-and-branch instructions.
+    /// `val` is the switch expression (must be integer type).
+    /// `cases` maps case values to target block IDs.
+    /// `default` is the fallback block.
+    Switch {
+        val: Operand,
+        cases: Vec<(i64, BlockId)>,
+        default: BlockId,
+    },
 
     /// Unreachable (e.g., after noreturn call)
     Unreachable,

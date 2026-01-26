@@ -398,6 +398,7 @@ fn terminator_used_values(term: &Terminator) -> Vec<u32> {
         Terminator::Return(Some(op)) => add_operand_values(op, &mut used),
         Terminator::CondBranch { cond, .. } => add_operand_values(cond, &mut used),
         Terminator::IndirectBranch { target, .. } => add_operand_values(target, &mut used),
+        Terminator::Switch { val, .. } => add_operand_values(val, &mut used),
         _ => {}
     }
     used
@@ -651,6 +652,15 @@ fn get_successor_labels(term: &Terminator) -> Vec<BlockId> {
             }
         }
         Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
+        Terminator::Switch { cases, default, .. } => {
+            let mut targets = vec![*default];
+            for &(_, label) in cases {
+                if !targets.contains(&label) {
+                    targets.push(label);
+                }
+            }
+            targets
+        }
         Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
     }
 }

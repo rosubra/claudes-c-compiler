@@ -1193,22 +1193,33 @@ impl Lowerer {
             return;
         }
 
-        let mut check_idx = 0usize;
-        // Emit equality checks for individual cases
-        for (case_val, case_label) in cases.iter() {
+        // Use Switch terminator for non-range cases (enables jump table in backend).
+        // Range cases still use the if-else chain since they can't be in a jump table.
+        if !cases.is_empty() && case_ranges.is_empty() {
+            // Load the switch value once and use Switch terminator
             let loaded = self.fresh_value();
-            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
-            let cmp_result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(loaded), Operand::Const(IrConst::I64(*case_val)), IrType::I64);
-
-            check_idx += 1;
-            let next_check = if check_idx < total_checks { self.fresh_label() } else { fallback };
-            self.terminate(Terminator::CondBranch {
-                cond: Operand::Value(cmp_result),
-                true_label: *case_label,
-                false_label: next_check,
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
+            self.terminate(Terminator::Switch {
+                val: Operand::Value(loaded),
+                cases: cases.to_vec(),
+                default: fallback,
             });
-            if check_idx < total_checks {
-                self.start_block(next_check);
+            return;
+        }
+
+        // Mixed case: handle non-range cases with Switch if any, range cases with if-else.
+        if !cases.is_empty() {
+            // Switch terminator for the simple cases, with fallthrough to range checks
+            let range_check_block = if !case_ranges.is_empty() { self.fresh_label() } else { fallback };
+            let loaded = self.fresh_value();
+            self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
+            self.terminate(Terminator::Switch {
+                val: Operand::Value(loaded),
+                cases: cases.to_vec(),
+                default: range_check_block,
+            });
+            if !case_ranges.is_empty() {
+                self.start_block(range_check_block);
             }
         }
 
@@ -1217,7 +1228,8 @@ impl Lowerer {
         let is_unsigned = switch_ty.is_unsigned();
         let ge_op = if is_unsigned { IrCmpOp::Uge } else { IrCmpOp::Sge };
         let le_op = if is_unsigned { IrCmpOp::Ule } else { IrCmpOp::Sle };
-        for (low, high, range_label) in case_ranges.iter() {
+        let range_count = case_ranges.len();
+        for (ri, (low, high, range_label)) in case_ranges.iter().enumerate() {
             let loaded = self.fresh_value();
             self.emit(Instruction::Load { dest: loaded, ptr: switch_alloca, ty: IrType::I64, seg_override: AddressSpace::Default });
             let ge_result = self.emit_cmp_val(ge_op, Operand::Value(loaded), Operand::Const(IrConst::I64(*low)), IrType::I64);
@@ -1231,14 +1243,13 @@ impl Lowerer {
                 ty: IrType::I32,
             });
 
-            check_idx += 1;
-            let next_check = if check_idx < total_checks { self.fresh_label() } else { fallback };
+            let next_check = if ri + 1 < range_count { self.fresh_label() } else { fallback };
             self.terminate(Terminator::CondBranch {
                 cond: Operand::Value(and_result),
                 true_label: *range_label,
                 false_label: next_check,
             });
-            if check_idx < total_checks {
+            if ri + 1 < range_count {
                 self.start_block(next_check);
             }
         }

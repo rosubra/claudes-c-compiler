@@ -1520,6 +1520,55 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
+    fn emit_switch_case_branch(&mut self, case_val: i64, label: &str) {
+        self.state.emit_fmt(format_args!("    cmpq ${}, %rax", case_val));
+        self.state.emit_fmt(format_args!("    je {}", label));
+    }
+
+    fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
+        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+        let range = (max_val - min_val + 1) as usize;
+
+        // Build the table
+        let mut table = vec![*default; range];
+        for &(case_val, target) in cases {
+            let idx = (case_val - min_val) as usize;
+            table[idx] = target;
+        }
+
+        let table_label = self.state.fresh_label("jt");
+        let default_label = default.as_label();
+
+        // Load switch value into %rax
+        self.operand_to_rax(val);
+
+        // Subtract min_val to normalize index
+        if min_val != 0 {
+            self.state.emit_fmt(format_args!("    subq ${}, %rax", min_val));
+        }
+        // Range check (unsigned): if index >= range, jump to default
+        self.state.emit_fmt(format_args!("    cmpq ${}, %rax", range));
+        self.state.emit_fmt(format_args!("    jae {}", default_label));
+
+        // Jump through the table: jmp *table(,%rax,8)
+        self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
+        self.state.emit("    movq (%rcx,%rax,8), %rcx");
+        self.state.emit("    jmp *%rcx");
+
+        // Emit jump table in .rodata
+        self.state.emit(".section .rodata");
+        self.state.emit(".align 8");
+        self.state.emit_fmt(format_args!("{}:", table_label));
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .quad {}", target_label));
+        }
+        self.state.emit(".section .text");
+
+        self.state.reg_cache.invalidate_all();
+    }
+
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // Track variadic function info
         self.is_variadic = func.is_variadic;

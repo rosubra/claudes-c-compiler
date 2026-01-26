@@ -252,6 +252,9 @@ fn replace_operands_in_terminator(term: &mut Terminator, copy_map: &[Option<Oper
         Terminator::IndirectBranch { target, .. } => {
             count += replace_operand(target, copy_map);
         }
+        Terminator::Switch { val, .. } => {
+            count += replace_operand(val, copy_map);
+        }
         Terminator::Unreachable => {}
     }
     count

@@ -475,6 +475,13 @@ fn terminator_targets(term: &Terminator) -> Vec<u32> {
         Terminator::IndirectBranch { possible_targets, .. } => {
             possible_targets.iter().map(|t| t.0).collect()
         }
+        Terminator::Switch { cases, default, .. } => {
+            let mut targets = vec![default.0];
+            for &(_, ref label) in cases {
+                targets.push(label.0);
+            }
+            targets
+        }
         _ => vec![],
     }
 }
@@ -556,6 +563,7 @@ pub(super) fn for_each_operand_in_terminator(term: &Terminator, mut f: impl FnMu
         Terminator::Return(Some(op)) => f(op),
         Terminator::CondBranch { cond, .. } => f(cond),
         Terminator::IndirectBranch { target, .. } => f(target),
+        Terminator::Switch { val, .. } => f(val),
         _ => {}
     }
 }

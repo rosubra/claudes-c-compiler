@@ -720,7 +720,7 @@ impl Lowerer {
 
     /// Compute extra bytes needed for a flexible array member (FAM) at the end of a struct.
     /// Returns 0 if there is no FAM or no initializer data for it.
-    fn compute_fam_extra_size(&self, items: &[InitializerItem], layout: &StructLayout) -> usize {
+    pub(super) fn compute_fam_extra_size(&self, items: &[InitializerItem], layout: &StructLayout) -> usize {
         if let Some(last_field) = layout.fields.last() {
             if let CType::Array(ref elem_ty, None) = last_field.ty {
                 let elem_size = self.resolve_ctype_size(elem_ty);

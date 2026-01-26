@@ -1487,6 +1487,10 @@ impl Lowerer {
 
             let final_size = match &init {
                 GlobalInit::Array(vals) if da.is_struct && vals.len() > da.actual_alloc_size => vals.len(),
+                GlobalInit::Compound(_) if da.is_struct => {
+                    let emitted = init.emitted_byte_size();
+                    emitted.max(da.actual_alloc_size)
+                }
                 _ => da.actual_alloc_size,
             };
 

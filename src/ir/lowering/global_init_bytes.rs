@@ -729,11 +729,27 @@ impl Lowerer {
 
         match &items[item_idx].init {
             Initializer::List(sub_items) => {
+                // Check if FAM element type is a struct/union - if so, fill each element
+                // using struct-aware byte filling instead of treating them as scalars.
+                let elem_layout = self.get_struct_layout_for_ctype(elem_ty);
                 for (ai, sub_item) in sub_items.iter().enumerate() {
                     let elem_offset = field_offset + ai * elem_size;
                     if elem_offset + elem_size > bytes.len() { break; }
-                    let val = self.eval_init_scalar(&sub_item.init);
-                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                    if let Some(ref layout) = elem_layout {
+                        // Struct/union element: recursively fill
+                        match &sub_item.init {
+                            Initializer::List(nested_items) => {
+                                self.fill_struct_global_bytes(nested_items, layout, bytes, elem_offset);
+                            }
+                            Initializer::Expr(_) => {
+                                let val = self.eval_init_scalar(&sub_item.init);
+                                self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                            }
+                        }
+                    } else {
+                        let val = self.eval_init_scalar(&sub_item.init);
+                        self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                    }
                 }
                 ArrayFillResult { new_item_idx: item_idx + 1, skip_update: false }
             }

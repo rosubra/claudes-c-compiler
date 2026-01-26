@@ -47,7 +47,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Short-circuit evaluation for `&&` and `||`
 - Proper `sizeof` for basic types and arrays
 - 32-bit arithmetic operations for `int` type (addl/subl/imull/idivl on x86)
-- **Switch statements**: proper dispatch via if-else comparison chain
+- **Switch statements**: proper dispatch with jump table optimization
+  - Dense switch (≥5 contiguous cases) compiled to indexed jump tables (all backends)
+  - Sparse switch uses compare-and-branch chains
   - Case with break, fallthrough, default
   - Nested switch statements
   - Constant case expressions (integer literals, char literals, arithmetic)
@@ -68,6 +70,8 @@ See `git log` for full history. Key milestones:
 - Inline assembly support for x86, ARM, and RISC-V
 - Transparent union ABI, `__int128`, `_Complex` arithmetic
 - Has compiled Lua, zlib, mbedtls, libpng, jq, SQLite, libjpeg-turbo
+- Switch statement jump table optimization: dense switch IR terminator with indexed dispatch (all backends)
+- AArch64 compare-immediate optimization: `cmp Xn, #imm12` instead of loading constants into registers
 - Phi cost limiting in mem2reg prevents stack overflow from phi explosion in large switch/computed-goto functions
 - GCC-compatible query flags (-dumpmachine, -dumpversion) for autoconf support
 - Assembly file (.S/.s) passthrough to target assembler
@@ -95,7 +99,7 @@ See `git log` for full history. Key milestones:
 | mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | libpng | PASS | pngtest passes |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
-| sqlite | PASS | All 622 sqllogictest tests pass |
+| sqlite | PASS | All 622 sqllogictest tests pass (x86, ARM, RISC-V) |
 | libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
 | redis | PASS | All 3 tests pass (version, cli version, SET/GET roundtrip) |
 | libffi | PASS | All 6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args, closure) |

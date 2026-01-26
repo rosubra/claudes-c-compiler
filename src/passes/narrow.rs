@@ -661,6 +661,9 @@ fn for_each_used_value_terminator(term: &Terminator, f: &mut impl FnMut(Value)) 
         Terminator::IndirectBranch { target, .. } => {
             if let Operand::Value(v) = target { f(*v); }
         }
+        Terminator::Switch { val, .. } => {
+            if let Operand::Value(v) = val { f(*v); }
+        }
         Terminator::Return(None) | Terminator::Branch(_) | Terminator::Unreachable => {}
     }
 }

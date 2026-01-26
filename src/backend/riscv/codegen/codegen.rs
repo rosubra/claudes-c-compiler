@@ -1320,6 +1320,64 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    jr t0");
     }
 
+    fn emit_switch_case_branch(&mut self, case_val: i64, label: &str) {
+        // Load case value into t1, compare, and branch if equal.
+        self.state.emit_fmt(format_args!("    li t1, {}", case_val));
+        self.state.emit_fmt(format_args!("    beq t0, t1, {}", label));
+    }
+
+    fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
+        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+        let range = (max_val - min_val + 1) as usize;
+
+        // Build the table
+        let mut table = vec![*default; range];
+        for &(case_val, target) in cases {
+            let idx = (case_val - min_val) as usize;
+            table[idx] = target;
+        }
+
+        let table_label = self.state.fresh_label("jt");
+        let default_label = default.as_label();
+
+        // Load switch value into t0
+        self.operand_to_t0(val);
+
+        // Subtract min_val
+        if min_val != 0 {
+            let neg_min = -min_val;
+            if neg_min >= -2048 && neg_min <= 2047 {
+                self.state.emit_fmt(format_args!("    addi t0, t0, {}", neg_min));
+            } else {
+                self.state.emit_fmt(format_args!("    li t1, {}", neg_min));
+                self.state.emit("    add t0, t0, t1");
+            }
+        }
+        // Range check: if index >= range, jump to default
+        self.state.emit_fmt(format_args!("    li t1, {}", range));
+        self.state.emit_fmt(format_args!("    bgeu t0, t1, {}", default_label));
+
+        // Compute table address and load target
+        self.state.emit_fmt(format_args!("    la t1, {}", table_label));
+        self.state.emit("    slli t0, t0, 3");  // index * 8
+        self.state.emit("    add t1, t1, t0");
+        self.state.emit("    ld t1, 0(t1)");
+        self.state.emit("    jr t1");
+
+        // Emit jump table in .rodata
+        self.state.emit(".section .rodata");
+        self.state.emit(".align 3");
+        self.state.emit_fmt(format_args!("{}:", table_label));
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .dword {}", target_label));
+        }
+        self.state.emit(".section .text");
+
+        self.state.reg_cache.invalidate_all();
+    }
+
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // For variadic functions, count the actual GP registers used by named
         // parameters. A struct that occupies 2 GP regs counts as 2, not 1.

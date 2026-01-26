@@ -823,6 +823,50 @@ pub trait ArchCodegen {
         self.emit_jump_indirect();
     }
 
+    /// Emit a switch dispatch: jump to the case target matching `val`, or to `default`.
+    ///
+    /// For dense cases (>= 4 cases, density > 40%), emits a jump table:
+    ///   1. Range check: if val < min or val > max, branch to default
+    ///   2. Compute index: index = val - min
+    ///   3. Load target address from jump table: addr = table[index]
+    ///   4. Indirect branch to addr
+    ///
+    /// For sparse cases, falls back to a linear chain of compare-and-branch.
+    fn emit_switch(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
+        // Check density for jump table eligibility
+        let use_jump_table = if cases.len() >= 4 {
+            let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+            let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+            let range = (max_val - min_val + 1) as usize;
+            // Dense enough? (density > 40% and table size reasonable)
+            range <= 4096 && cases.len() * 100 / range >= 40
+        } else {
+            false
+        };
+
+        if use_jump_table {
+            self.emit_switch_jump_table(val, cases, default);
+        } else {
+            // Sparse: linear compare-and-branch chain
+            self.emit_load_operand(val);
+            for &(case_val, target) in cases {
+                let label = target.as_label();
+                self.emit_switch_case_branch(case_val, &label);
+            }
+            self.emit_branch_to_block(*default);
+        }
+    }
+
+    /// Emit a jump table for a dense switch statement.
+    /// This is called by `emit_switch` when the cases are dense enough.
+    /// Backends should override this for architecture-specific jump table emission.
+    fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId);
+
+    /// Emit a compare-and-branch for a single switch case:
+    /// compare the accumulator against `case_val` and branch to `label` if equal.
+    /// The accumulator value must be preserved across the call.
+    fn emit_switch_case_branch(&mut self, case_val: i64, label: &str);
+
     /// Emit a label address load (GCC &&label extension).
     fn emit_label_addr(&mut self, dest: &Value, label: &str) {
         self.emit_global_addr(dest, label);

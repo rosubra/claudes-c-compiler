@@ -26,7 +26,8 @@ impl Lowerer {
         items: &[InitializerItem],
         layout: &StructLayout,
     ) -> GlobalInit {
-        let total_size = layout.size;
+        let fam_extra = self.compute_fam_extra_size(items, layout);
+        let total_size = layout.size + fam_extra;
         let mut elements: Vec<GlobalInit> = Vec::new();
         let mut current_offset = 0usize;
 
@@ -240,6 +241,16 @@ impl Lowerer {
 
             let inits = &field_inits[fi];
 
+            // Flexible array member (FAM): use fam_extra as the actual data size
+            if let CType::Array(ref elem_ty, None) = layout.fields[fi].ty {
+                if fam_extra > 0 && !inits.is_empty() {
+                    self.emit_fam_compound(&mut elements, inits, elem_ty, fam_extra);
+                    current_offset += fam_extra;
+                }
+                fi += 1;
+                continue;
+            }
+
             // Check for synthetic items from anonymous member designated inits
             if inits.is_empty() {
                 let anon_items_for_fi: Vec<InitializerItem> = anon_synth_items.iter()
@@ -272,6 +283,75 @@ impl Lowerer {
         }
 
         GlobalInit::Compound(elements)
+    }
+
+    /// Emit flexible array member (FAM) elements into compound init.
+    /// Each FAM element may be a struct containing pointer fields that need relocations.
+    fn emit_fam_compound(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        inits: &[&InitializerItem],
+        elem_ty: &CType,
+        fam_data_size: usize,
+    ) {
+        let elem_size = self.resolve_ctype_size(elem_ty);
+        if elem_size == 0 { return; }
+
+        // The FAM init should be a single item with a List initializer containing sub-items
+        // (one per FAM element), e.g. .numbers = { { .nr = 0, .ns = &init_pid_ns } }
+        let sub_items = if inits.len() == 1 {
+            if let Initializer::List(ref list) = inits[0].init {
+                list.as_slice()
+            } else {
+                // Single expression init for a FAM element
+                let init_item = inits[0];
+                self.emit_compound_field_init(elements, &init_item.init, elem_ty, elem_size, false);
+                let emitted = elem_size;
+                if emitted < fam_data_size {
+                    push_zero_bytes(elements, fam_data_size - emitted);
+                }
+                return;
+            }
+        } else {
+            // Multiple flat items - shouldn't normally happen for struct FAMs
+            // but handle by emitting each as an element
+            let mut emitted = 0;
+            for item in inits {
+                if emitted + elem_size > fam_data_size { break; }
+                self.emit_compound_field_init(elements, &item.init, elem_ty, elem_size, false);
+                emitted += elem_size;
+            }
+            if emitted < fam_data_size {
+                push_zero_bytes(elements, fam_data_size - emitted);
+            }
+            return;
+        };
+
+        // Emit each FAM element
+        let num_elems = fam_data_size / elem_size;
+        let mut emitted = 0;
+        for (i, sub_item) in sub_items.iter().enumerate() {
+            if i >= num_elems { break; }
+            // Each sub_item is an initializer for one FAM element (e.g., one struct upid)
+            if let Some(sub_layout) = self.get_struct_layout_for_ctype(elem_ty) {
+                // Struct element - use sub-struct compound emission
+                match &sub_item.init {
+                    Initializer::List(nested_items) => {
+                        self.emit_sub_struct_to_compound(elements, nested_items, &sub_layout, elem_size);
+                    }
+                    _ => {
+                        self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, false);
+                    }
+                }
+            } else {
+                self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, false);
+            }
+            emitted += elem_size;
+        }
+        // Zero-fill remaining FAM elements
+        if emitted < fam_data_size {
+            push_zero_bytes(elements, fam_data_size - emitted);
+        }
     }
 
     /// Emit a sub-struct's initialization into compound elements, choosing between

@@ -369,6 +369,7 @@ fn terminator_operand_values(term: &Terminator) -> Vec<u32> {
         Terminator::Return(Some(Operand::Value(v))) => vals.push(v.0),
         Terminator::CondBranch { cond: Operand::Value(v), .. } => vals.push(v.0),
         Terminator::IndirectBranch { target: Operand::Value(v), .. } => vals.push(v.0),
+        Terminator::Switch { val: Operand::Value(v), .. } => vals.push(v.0),
         _ => {}
     }
     vals

@@ -223,6 +223,9 @@ fn collect_terminator_uses(term: &Terminator, used: &mut [bool]) {
         Terminator::IndirectBranch { target, .. } => {
             mark_operand_used(target, used);
         }
+        Terminator::Switch { val, .. } => {
+            mark_operand_used(val, used);
+        }
         Terminator::Unreachable => {}
     }
 }

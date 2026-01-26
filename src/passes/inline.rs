@@ -645,6 +645,9 @@ fn terminator_used_values(term: &Terminator) -> Vec<u32> {
         Terminator::IndirectBranch { target, .. } => {
             if let Operand::Value(v) = target { used.push(v.0); }
         }
+        Terminator::Switch { val, .. } => {
+            if let Operand::Value(v) = val { used.push(v.0); }
+        }
         _ => {}
     }
     used
@@ -1301,6 +1304,11 @@ fn remap_terminator(term: &Terminator, vo: u32, bo: u32) -> Terminator {
             target: remap_operand(target, vo),
             possible_targets: possible_targets.iter().map(|b| remap_block(*b, bo)).collect(),
         },
+        Terminator::Switch { val, cases, default } => Terminator::Switch {
+            val: remap_operand(val, vo),
+            cases: cases.iter().map(|&(v, bid)| (v, remap_block(bid, bo))).collect(),
+            default: remap_block(*default, bo),
+        },
         Terminator::Unreachable => Terminator::Unreachable,
     }
 }
@@ -1392,6 +1400,12 @@ fn format_terminator(term: &Terminator) -> String {
         }
         Terminator::IndirectBranch { target, .. } => {
             format!("indirectbr {}", format_operand(target))
+        }
+        Terminator::Switch { val, cases, default } => {
+            let cases_str: Vec<String> = cases.iter()
+                .map(|(v, bid)| format!("{} => .L{}", v, bid.0))
+                .collect();
+            format!("switch {}, default .L{}, [{}]", format_operand(val), default.0, cases_str.join(", "))
         }
         Terminator::Unreachable => "unreachable".to_string(),
     }

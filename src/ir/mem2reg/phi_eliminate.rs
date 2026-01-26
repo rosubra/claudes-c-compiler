@@ -58,6 +58,17 @@ fn successor_count(term: &Terminator) -> usize {
             if true_label == false_label { 1 } else { 2 }
         }
         Terminator::IndirectBranch { possible_targets, .. } => possible_targets.len(),
+        Terminator::Switch { cases, default, .. } => {
+            let mut count = 1; // default
+            let mut seen = vec![*default];
+            for &(_, label) in cases {
+                if !seen.contains(&label) {
+                    seen.push(label);
+                    count += 1;
+                }
+            }
+            count
+        }
     }
 }
 
@@ -82,6 +93,18 @@ fn retarget_terminator_once(term: &mut Terminator, old_target: BlockId, new_targ
                 if *t == old_target {
                     *t = new_target;
                     break;
+                }
+            }
+        }
+        Terminator::Switch { cases, default, .. } => {
+            if *default == old_target {
+                *default = new_target;
+            } else {
+                for (_, t) in cases.iter_mut() {
+                    if *t == old_target {
+                        *t = new_target;
+                        break;
+                    }
                 }
             }
         }

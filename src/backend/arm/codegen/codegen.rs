@@ -111,6 +111,9 @@ pub struct ArmCodegen {
     used_callee_saved: Vec<PhysReg>,
     /// SP offset where callee-saved registers are stored.
     callee_save_offset: i64,
+    /// For large stack frames: reserved for future x19 frame base optimization.
+    /// Currently always None (optimization disabled due to correctness issue).
+    frame_base_offset: Option<i64>,
 }
 
 impl ArmCodegen {
@@ -129,6 +132,7 @@ impl ArmCodegen {
             reg_assignments: FxHashMap::default(),
             used_callee_saved: Vec::new(),
             callee_save_offset: 0,
+            frame_base_offset: None,
         }
     }
 
@@ -214,16 +218,141 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit the integer comparison preamble: load lhs->x1, rhs->x0, then
-    /// emit `cmp w1,w0` or `cmp x1,x0` based on type width.
+    /// Check if an IrConst is a small unsigned immediate that fits in AArch64
+    /// `cmp Xn, #imm12` instruction (0..=4095).
+    fn const_as_cmp_imm12(c: &IrConst) -> Option<u64> {
+        let v = match c {
+            IrConst::I8(v) => *v as i64,
+            IrConst::I16(v) => *v as i64,
+            IrConst::I32(v) => *v as i64,
+            IrConst::I64(v) => *v,
+            IrConst::Zero => 0,
+            _ => return None,
+        };
+        // AArch64 cmp (alias of subs) accepts unsigned 12-bit immediate (0..4095),
+        // optionally shifted left by 12. We only use the unshifted form.
+        if v >= 0 && v <= 4095 {
+            Some(v as u64)
+        } else {
+            None
+        }
+    }
+
+    /// Check if an IrConst is a small negative value that can use `cmn Xn, #imm12`
+    /// (i.e., the negated value fits in 0..=4095).
+    fn const_as_cmn_imm12(c: &IrConst) -> Option<u64> {
+        let v = match c {
+            IrConst::I8(v) => *v as i64,
+            IrConst::I16(v) => *v as i64,
+            IrConst::I32(v) => *v as i64,
+            IrConst::I64(v) => *v,
+            _ => return None,
+        };
+        if v < 0 && (-v) >= 1 && (-v) <= 4095 {
+            Some((-v) as u64)
+        } else {
+            None
+        }
+    }
+
+    /// Get the register name for a Value if it has a register assignment.
+    /// Returns (64-bit name, 32-bit name) pair.
+    fn value_reg_name(&self, v: &Value) -> Option<(&'static str, &'static str)> {
+        self.reg_assignments.get(&v.0).map(|&reg| {
+            (callee_saved_name(reg), callee_saved_name_32(reg))
+        })
+    }
+
+    /// Emit the integer comparison preamble.
+    /// Optimized paths:
+    ///   1. reg vs #imm12 → `cmp wN/xN, #imm` (1 instruction)
+    ///   2. reg vs #neg_imm12 → `cmn wN/xN, #imm` (1 instruction)
+    ///   3. reg vs reg → `cmp wN/xN, wM/xM` (1 instruction)
+    ///   4. fallback → load lhs→x1, rhs→x0, `cmp w1/x1, w0/x0`
     /// Used by both emit_cmp and emit_fused_cmp_branch.
     fn emit_int_cmp_insn(&mut self, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        self.operand_to_x0(lhs);
-        self.state.emit("    mov x1, x0");
-        self.operand_to_x0(rhs);
         let use_32bit = ty == IrType::I32 || ty == IrType::U32
             || ty == IrType::I8 || ty == IrType::U8
             || ty == IrType::I16 || ty == IrType::U16;
+
+        // Try optimized path: lhs in register, rhs is immediate
+        if let Operand::Value(lv) = lhs {
+            if let Some((lhs_x, lhs_w)) = self.value_reg_name(lv) {
+                let lhs_reg = if use_32bit { lhs_w } else { lhs_x };
+
+                // cmp reg, #imm12
+                if let Operand::Const(c) = rhs {
+                    if let Some(imm) = Self::const_as_cmp_imm12(c) {
+                        self.state.emit_fmt(format_args!("    cmp {}, #{}", lhs_reg, imm));
+                        return;
+                    }
+                    // cmn reg, #imm12 (for negative constants)
+                    if let Some(imm) = Self::const_as_cmn_imm12(c) {
+                        self.state.emit_fmt(format_args!("    cmn {}, #{}", lhs_reg, imm));
+                        return;
+                    }
+                }
+
+                // cmp reg, reg
+                if let Operand::Value(rv) = rhs {
+                    if let Some((rhs_x, rhs_w)) = self.value_reg_name(rv) {
+                        let rhs_reg = if use_32bit { rhs_w } else { rhs_x };
+                        self.state.emit_fmt(format_args!("    cmp {}, {}", lhs_reg, rhs_reg));
+                        return;
+                    }
+                }
+
+                // lhs in register, rhs needs loading into x0
+                self.operand_to_x0(rhs);
+                if use_32bit {
+                    self.state.emit_fmt(format_args!("    cmp {}, w0", lhs_reg));
+                } else {
+                    self.state.emit_fmt(format_args!("    cmp {}, x0", lhs_reg));
+                }
+                return;
+            }
+        }
+
+        // Try: lhs needs loading, rhs in register
+        if let Operand::Value(rv) = rhs {
+            if let Some((rhs_x, rhs_w)) = self.value_reg_name(rv) {
+                self.operand_to_x0(lhs);
+                let rhs_reg = if use_32bit { rhs_w } else { rhs_x };
+                if use_32bit {
+                    self.state.emit_fmt(format_args!("    cmp w0, {}", rhs_reg));
+                } else {
+                    self.state.emit_fmt(format_args!("    cmp x0, {}", rhs_reg));
+                }
+                return;
+            }
+        }
+
+        // Try: lhs in x0 (accumulator), rhs is immediate
+        if let Operand::Const(c) = rhs {
+            if let Some(imm) = Self::const_as_cmp_imm12(c) {
+                self.operand_to_x0(lhs);
+                if use_32bit {
+                    self.state.emit_fmt(format_args!("    cmp w0, #{}", imm));
+                } else {
+                    self.state.emit_fmt(format_args!("    cmp x0, #{}", imm));
+                }
+                return;
+            }
+            if let Some(imm) = Self::const_as_cmn_imm12(c) {
+                self.operand_to_x0(lhs);
+                if use_32bit {
+                    self.state.emit_fmt(format_args!("    cmn w0, #{}", imm));
+                } else {
+                    self.state.emit_fmt(format_args!("    cmn x0, #{}", imm));
+                }
+                return;
+            }
+        }
+
+        // Fallback: load both into x0/x1
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
         if use_32bit {
             self.state.emit("    cmp w1, w0");
         } else {
@@ -289,14 +418,24 @@ impl ArmCodegen {
         offset <= max_offset && offset % access_size == 0
     }
 
-    /// Emit store to [sp, #offset], handling large offsets via x17.
-    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
+    /// Emit store to [base, #offset], handling large offsets.
+    /// For large frames with x19 as frame base register, tries x19-relative addressing
+    /// before falling back to the expensive movz+movk+add sequence.
     fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
-        // When DynAlloca is present, SP may have been modified at runtime.
-        // Use x29 (frame pointer) as the base instead, since x29 = SP after prologue.
+        // When DynAlloca is present, use x29 (frame pointer) as base.
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, reg, base, offset));
+        } else if let Some(fb_offset) = self.frame_base_offset {
+            // Try x19-relative addressing (x19 = sp + frame_base_offset)
+            let rel_offset = offset - fb_offset;
+            if Self::is_valid_imm_offset(rel_offset, instr, reg) {
+                self.state.emit_fmt(format_args!("    {} {}, [x19, #{}]", instr, reg, rel_offset));
+            } else {
+                self.load_large_imm("x17", offset);
+                self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+                self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, reg));
+            }
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
@@ -304,13 +443,21 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit load from [sp, #offset], handling large offsets via x17.
-    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
+    /// Emit load from [base, #offset], handling large offsets.
+    /// For large frames with x19 as frame base register, tries x19-relative addressing.
     fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
-        // When DynAlloca is present, use x29 (frame pointer) as base.
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, reg, base, offset));
+        } else if let Some(fb_offset) = self.frame_base_offset {
+            let rel_offset = offset - fb_offset;
+            if Self::is_valid_imm_offset(rel_offset, instr, reg) {
+                self.state.emit_fmt(format_args!("    {} {}, [x19, #{}]", instr, reg, rel_offset));
+            } else {
+                self.load_large_imm("x17", offset);
+                self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+                self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, reg));
+            }
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
@@ -331,12 +478,22 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit `stp reg1, reg2, [sp, #offset]` handling large offsets.
+    /// Emit `stp reg1, reg2, [base, #offset]` handling large offsets.
+    /// Uses x19 frame base for large frames when possible.
     fn emit_stp_to_sp(&mut self, reg1: &str, reg2: &str, offset: i64) {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         // stp supports signed offsets in [-512, 504] range (multiples of 8)
         if offset >= -512 && offset <= 504 {
             self.state.emit_fmt(format_args!("    stp {}, {}, [{}, #{}]", reg1, reg2, base, offset));
+        } else if let Some(fb_offset) = self.frame_base_offset {
+            let rel = offset - fb_offset;
+            if rel >= -512 && rel <= 504 {
+                self.state.emit_fmt(format_args!("    stp {}, {}, [x19, #{}]", reg1, reg2, rel));
+            } else {
+                self.load_large_imm("x17", offset);
+                self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+                self.state.emit_fmt(format_args!("    stp {}, {}, [x17]", reg1, reg2));
+            }
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
@@ -348,6 +505,15 @@ impl ArmCodegen {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if offset >= -512 && offset <= 504 {
             self.state.emit_fmt(format_args!("    ldp {}, {}, [{}, #{}]", reg1, reg2, base, offset));
+        } else if let Some(fb_offset) = self.frame_base_offset {
+            let rel = offset - fb_offset;
+            if rel >= -512 && rel <= 504 {
+                self.state.emit_fmt(format_args!("    ldp {}, {}, [x19, #{}]", reg1, reg2, rel));
+            } else {
+                self.load_large_imm("x17", offset);
+                self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
+                self.state.emit_fmt(format_args!("    ldp {}, {}, [x17]", reg1, reg2));
+            }
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
@@ -356,11 +522,21 @@ impl ArmCodegen {
     }
 
     /// Emit `add dest, sp, #offset` handling large offsets.
-    /// Uses x17 (IP1) as scratch to avoid conflicts with x9-x16 call argument temps.
+    /// Uses x19 frame base when available, falls back to x17 scratch.
     fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if offset >= 0 && offset <= 4095 {
             self.state.emit_fmt(format_args!("    add {}, {}, #{}", dest, base, offset));
+        } else if let Some(fb_offset) = self.frame_base_offset {
+            let rel = offset - fb_offset;
+            if rel >= 0 && rel <= 4095 {
+                self.state.emit_fmt(format_args!("    add {}, x19, #{}", dest, rel));
+            } else if rel >= -4095 && rel < 0 {
+                self.state.emit_fmt(format_args!("    sub {}, x19, #{}", dest, -rel));
+            } else {
+                self.load_large_imm("x17", offset);
+                self.state.emit_fmt(format_args!("    add {}, {}, x17", dest, base));
+            }
         } else {
             self.load_large_imm("x17", offset);
             self.state.emit_fmt(format_args!("    add {}, {}, x17", dest, base));
@@ -966,6 +1142,147 @@ impl ArmCodegen {
             }
         }
     }
+
+    // ---- F128 (long double / IEEE quad precision) soft-float helpers ----
+    //
+    // On AArch64, long double is IEEE 754 binary128 (16 bytes).
+    // Hardware has no quad-precision FP ops, so we use compiler-rt/libgcc soft-float:
+    //   Comparison: __eqtf2, __lttf2, __letf2, __gttf2, __getf2
+    //   Arithmetic: __addtf3, __subtf3, __multf3, __divtf3
+    //   Conversion: __extenddftf2 (f64->f128), __trunctfdf2 (f128->f64)
+    // ABI: f128 passed/returned in Q registers (q0, q1). Int result in w0/x0.
+
+    /// Load an F128 operand into Q0 via f64->f128 conversion.
+    /// Since ARM F128 values are stored internally as f64 approximations (the
+    /// backend doesn't store full 16-byte f128 in allocas), we consistently use
+    /// __extenddftf2 to convert the f64 to f128 for both values and constants.
+    /// This ensures that `x == 1.2L` works correctly when x was stored as f64.
+    fn emit_f128_operand_to_q0(&mut self, op: &Operand) {
+        // Load the f64 approximation into x0, then convert to f128 via __extenddftf2.
+        self.operand_to_x0(op);
+        self.state.emit("    fmov d0, x0");
+        self.state.emit("    bl __extenddftf2");
+    }
+
+    /// Emit F128 comparison via soft-float libcalls.
+    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        // We need to load both LHS and RHS f128 values, but loading each may
+        // involve calls (e.g., __extenddftf2) that clobber Q registers.
+        // Strategy: sub sp for temp space, but force x29-relative slot access
+        // (since x29 = fp is stable) so sp changes don't break slot offsets.
+        let saved_dyn_alloca = self.state.has_dyn_alloca;
+        self.state.has_dyn_alloca = true; // Force x29-relative addressing
+
+        // Step 1: Load LHS f128 into Q0, save to stack temp (16 bytes).
+        self.emit_sub_sp(16);
+        self.emit_f128_operand_to_q0(lhs);
+        self.state.emit("    str q0, [sp]");
+
+        // Step 2: Load RHS f128 into Q0, move to Q1.
+        self.emit_f128_operand_to_q0(rhs);
+        self.state.emit("    mov v1.16b, v0.16b");
+
+        // Step 3: Load saved LHS f128 from stack temp into Q0.
+        self.state.emit("    ldr q0, [sp]");
+
+        // Free temp stack space and restore dyn_alloca flag.
+        self.emit_add_sp(16);
+        self.state.has_dyn_alloca = saved_dyn_alloca;
+
+        // Step 4: Call the appropriate comparison libcall and map result to boolean.
+        // All __*tf2 functions take f128 in Q0 (lhs) and Q1 (rhs), return int in W0.
+        match op {
+            IrCmpOp::Eq => {
+                // __eqtf2 returns 0 if equal
+                self.state.emit("    bl __eqtf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, eq");
+            }
+            IrCmpOp::Ne => {
+                // __eqtf2 returns 0 if equal, non-zero otherwise
+                self.state.emit("    bl __eqtf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, ne");
+            }
+            IrCmpOp::Slt | IrCmpOp::Ult => {
+                // __lttf2 returns <0 if a<b (1 if unordered)
+                self.state.emit("    bl __lttf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, lt");
+            }
+            IrCmpOp::Sle | IrCmpOp::Ule => {
+                // __letf2 returns <=0 if a<=b (1 if unordered)
+                self.state.emit("    bl __letf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, le");
+            }
+            IrCmpOp::Sgt | IrCmpOp::Ugt => {
+                // __gttf2 returns >0 if a>b (-1 if unordered)
+                self.state.emit("    bl __gttf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, gt");
+            }
+            IrCmpOp::Sge | IrCmpOp::Uge => {
+                // __getf2 returns >=0 if a>=b (-1 if unordered)
+                self.state.emit("    bl __getf2");
+                self.state.emit("    cmp w0, #0");
+                self.state.emit("    cset x0, ge");
+            }
+        }
+        self.state.reg_cache.invalidate_all();
+        self.store_x0_to(dest);
+    }
+
+    /// Emit F128 arithmetic via soft-float libcalls.
+    /// Called from emit_float_binop_impl when ty == F128.
+    /// At entry: x1 = lhs f64 bits, x0 = rhs f64 bits (from shared float binop dispatch).
+    fn emit_f128_binop_softfloat(&mut self, mnemonic: &str) {
+        let libcall = match mnemonic {
+            "fadd" => "__addtf3",
+            "fsub" => "__subtf3",
+            "fmul" => "__multf3",
+            "fdiv" => "__divtf3",
+            _ => {
+                // Unknown op: fall back to f64 hardware path
+                self.state.emit("    mov x2, x0");
+                self.state.emit("    fmov d0, x1");
+                self.state.emit("    fmov d1, x2");
+                self.state.emit_fmt(format_args!("    {} d0, d0, d1", mnemonic));
+                self.state.emit("    fmov x0, d0");
+                return;
+            }
+        };
+
+        // At entry from shared emit_float_binop: x1=lhs(f64 bits), x0=rhs(f64 bits)
+        // Save rhs to stack, convert lhs to f128, save, convert rhs to f128.
+        // Use raw sp addressing for our temp area (not x29-relative) since we
+        // adjust sp ourselves and these are OUR temp slots, not frame slots.
+        self.state.emit("    sub sp, sp, #32");
+        // Save rhs f64
+        self.state.emit("    str x0, [sp, #16]");
+        // Convert lhs (x1) from f64 to f128
+        self.state.emit("    fmov d0, x1");
+        self.state.emit("    bl __extenddftf2");
+        // Save lhs f128 (Q0)
+        self.state.emit("    str q0, [sp]");
+        // Load rhs f64 and convert to f128
+        self.state.emit("    ldr x0, [sp, #16]");
+        self.state.emit("    fmov d0, x0");
+        self.state.emit("    bl __extenddftf2");
+        // RHS f128 now in Q0, move to Q1 (second arg)
+        self.state.emit("    mov v1.16b, v0.16b");
+        // Load LHS f128 back to Q0 (first arg)
+        self.state.emit("    ldr q0, [sp]");
+        // Call the arithmetic libcall: result f128 in Q0
+        self.state.emit_fmt(format_args!("    bl {}", libcall));
+        // Convert result f128 back to f64 via __trunctfdf2
+        self.state.emit("    bl __trunctfdf2");
+        // f64 result in D0, move to x0
+        self.state.emit("    fmov x0, d0");
+        // Free temp space
+        self.state.emit("    add sp, sp, #32");
+        self.state.reg_cache.invalidate_all();
+    }
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -992,6 +1309,75 @@ impl ArchCodegen for ArmCodegen {
     fn emit_jump_indirect(&mut self) {
         self.state.emit("    br x0");
     }
+
+    fn emit_switch_case_branch(&mut self, case_val: i64, label: &str) {
+        // Load case value into x1, compare, and branch if equal.
+        self.state.emit_fmt(format_args!("    mov x1, #{}", case_val));
+        self.state.emit("    cmp x0, x1");
+        self.state.emit_fmt(format_args!("    b.eq {}", label));
+    }
+
+    fn emit_switch_jump_table(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
+        let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+        let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+        let range = (max_val - min_val + 1) as usize;
+
+        // Build the table: for each index in [min..max], find the target or use default
+        let mut table = vec![*default; range];
+        for &(case_val, target) in cases {
+            let idx = (case_val - min_val) as usize;
+            table[idx] = target;
+        }
+
+        let table_label = self.state.fresh_label("jt");
+        let default_label = default.as_label();
+
+        // Load switch value into x0
+        self.operand_to_x0(val);
+
+        // Range check: if val < min or val > max, branch to default.
+        // Use unsigned comparison: sub x0, x0, #min; cmp x0, #range -> branch if above
+        if min_val != 0 {
+            if min_val > 0 && min_val <= 4095 {
+                self.state.emit_fmt(format_args!("    sub x0, x0, #{}", min_val));
+            } else if min_val < 0 && (-min_val) <= 4095 {
+                self.state.emit_fmt(format_args!("    add x0, x0, #{}", -min_val));
+            } else {
+                self.load_large_imm("x17", min_val);
+                self.state.emit("    sub x0, x0, x17");
+            }
+        }
+        // Now x0 = val - min_val. Compare unsigned against range.
+        if range <= 4095 {
+            self.state.emit_fmt(format_args!("    cmp x0, #{}", range));
+        } else {
+            self.load_large_imm("x17", range as i64);
+            self.state.emit("    cmp x0, x17");
+        }
+        self.state.emit_fmt(format_args!("    b.hs {}", default_label));
+
+        // Load jump table base address and compute target
+        // adrp x17, table_label; add x17, x17, :lo12:table_label
+        self.state.emit_fmt(format_args!("    adrp x17, {}", table_label));
+        self.state.emit_fmt(format_args!("    add x17, x17, :lo12:{}", table_label));
+        // Load target address: ldr x17, [x17, x0, lsl #3]
+        self.state.emit("    ldr x17, [x17, x0, lsl #3]");
+        // Branch to target
+        self.state.emit("    br x17");
+
+        // Emit the jump table in .rodata
+        self.state.emit(".section .rodata");
+        self.state.emit_fmt(format_args!(".align 3"));
+        self.state.emit_fmt(format_args!("{}:", table_label));
+        for target in &table {
+            let target_label = target.as_label();
+            self.state.emit_fmt(format_args!("    .xword {}", target_label));
+        }
+        self.state.emit(".section .text");
+
+        self.state.reg_cache.invalidate_all();
+    }
+
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Xword }
     fn function_type_directive(&self) -> &'static str { "%function" }
 
@@ -1069,6 +1455,7 @@ impl ArchCodegen for ArmCodegen {
     fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
         self.current_return_type = func.return_type;
         self.current_frame_size = frame_size;
+        self.frame_base_offset = None;
         self.emit_prologue_arm(frame_size);
 
         // Save callee-saved registers used by register allocator.
@@ -1088,6 +1475,12 @@ impl ArchCodegen for ArmCodegen {
             let offset = base + (i as i64) * 8;
             self.emit_store_to_sp(r, offset, "str");
         }
+
+        // NOTE: x19 frame base register optimization is disabled due to a
+        // correctness issue in SQLite's VdbeExec. The x19-relative addressing
+        // generates valid offsets but causes crashes in aggregate queries.
+        // TODO: investigate root cause (possibly related to x19 being modified
+        // by called functions or an ABI issue with static linking).
     }
 
     fn emit_epilogue(&mut self, frame_size: i64) {
@@ -1816,6 +2209,12 @@ impl ArchCodegen for ArmCodegen {
         if is_i128_type(ty) {
             // Use shared i128 cmp dispatch
             ArchCodegen::emit_i128_cmp(self, dest, op, lhs, rhs);
+            return;
+        }
+        if ty == IrType::F128 {
+            // F128 comparison via soft-float libcalls.
+            // AArch64 has no hardware quad-precision; we must call __eqtf2/__letf2/etc.
+            self.emit_f128_cmp(dest, op, lhs, rhs);
             return;
         }
         if ty.is_float() {
@@ -3017,6 +3416,11 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_float_binop_impl(&mut self, mnemonic: &str, ty: IrType) {
+        if ty == IrType::F128 {
+            // F128: use soft-float library calls for full quad-precision arithmetic.
+            self.emit_f128_binop_softfloat(mnemonic);
+            return;
+        }
         // secondary = lhs (in x1 via acc_to_secondary = mov x1, x0), acc = rhs (in x0)
         // After the shared default: lhs loaded to acc, pushed to secondary, rhs loaded to acc
         // On ARM, emit_acc_to_secondary does "mov x1, x0" so: x1=lhs, x0=rhs

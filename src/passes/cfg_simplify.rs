@@ -592,6 +592,15 @@ fn get_terminator_targets(term: &Terminator) -> Vec<BlockId> {
             vec![*true_label, *false_label]
         }
         Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
+        Terminator::Switch { cases, default, .. } => {
+            let mut targets = vec![*default];
+            for &(_, label) in cases {
+                if !targets.contains(&label) {
+                    targets.push(label);
+                }
+            }
+            targets
+        }
         Terminator::Return(_) | Terminator::Unreachable => vec![],
     }
 }

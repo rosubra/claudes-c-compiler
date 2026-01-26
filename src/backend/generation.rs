@@ -747,6 +747,9 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
         Terminator::IndirectBranch { target, .. } => {
             cg.emit_indirect_branch(target);
         }
+        Terminator::Switch { val, cases, default } => {
+            cg.emit_switch(val, cases, default);
+        }
         Terminator::Unreachable => {
             cg.emit_unreachable();
         }

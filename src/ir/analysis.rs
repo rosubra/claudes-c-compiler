@@ -58,6 +58,20 @@ pub fn build_cfg(
                     }
                 }
             }
+            Terminator::Switch { cases, default, .. } => {
+                if let Some(&d) = label_to_idx.get(default) {
+                    succs[i].push(d);
+                    preds[d].push(i);
+                }
+                for &(_, ref label) in cases {
+                    if let Some(&t) = label_to_idx.get(label) {
+                        if !succs[i].contains(&t) {
+                            succs[i].push(t);
+                        }
+                        preds[t].push(i);
+                    }
+                }
+            }
             Terminator::Return(_) | Terminator::Unreachable => {}
         }
     }

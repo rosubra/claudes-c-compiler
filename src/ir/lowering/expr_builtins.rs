@@ -1066,11 +1066,36 @@ impl Lowerer {
         (arg_ty, arg_val)
     }
 
+    /// Emit a call to a libc FP classification function for F128 (long double) arguments.
+    /// Returns the call result as a Value. The libc functions take a long double and return int.
+    fn emit_f128_classify_libcall(&mut self, func_name: &str, arg_val: Operand) -> Value {
+        let dest = self.fresh_value();
+        self.emit(Instruction::Call {
+            dest: Some(dest),
+            func: func_name.to_string(),
+            args: vec![arg_val],
+            arg_types: vec![IrType::F128],
+            return_type: IrType::I32,
+            is_variadic: false,
+            num_fixed_args: 1,
+            struct_arg_sizes: vec![None],
+        });
+        dest
+    }
+
+    /// Convert a libc classification result to a boolean (non-zero -> 1, zero -> 0).
+    fn classify_result_to_bool(&mut self, result: Value) -> Value {
+        self.emit_cmp_val(
+            IrCmpOp::Ne,
+            Operand::Value(result),
+            Operand::Const(IrConst::I32(0)),
+            IrType::I32,
+        )
+    }
+
     /// Bitcast a float/double to its integer bit representation via memory.
-    /// F32 -> I32, F64/F128 -> I64. Uses alloca+store+load for a true bitcast.
-    // TODO: F128 (long double) is currently stored as F64 at the backend level,
-    // so we treat it as F64 for bitcast purposes (8 bytes, I64 result).
-    // When true F128 support is added, this must handle 16-byte bitcast.
+    /// F32 -> I32, F64 -> I64. Uses alloca+store+load for a true bitcast.
+    /// Note: F128 classification builtins use libc calls instead of this path.
     fn bitcast_float_to_int(&mut self, val: Operand, float_ty: IrType) -> (Operand, IrType) {
         let (int_ty, store_ty, size) = match float_ty {
             IrType::F32 => (IrType::I32, IrType::F32, 4),
@@ -1092,9 +1117,7 @@ impl Lowerer {
 
     /// Floating-point bit-layout constants for classification.
     /// Returns (abs_mask, exp_only, exp_shift, exp_field_max, mant_mask).
-    // TODO: F128 (long double) is currently stored as F64 at the backend level,
-    // so we use F64 masks for it. When true F128 support is added, this must be
-    // updated with IEEE 754 binary128 masks (15-bit exponent, 112-bit mantissa).
+    /// Note: F128 classification builtins use libc calls instead of these masks.
     pub(super) fn fp_masks(float_ty: IrType) -> (i64, i64, i64, i64, i64) {
         match float_ty {
             IrType::F32 => (
@@ -1122,6 +1145,8 @@ impl Lowerer {
 
     /// Lower __builtin_fpclassify(nan_val, inf_val, norm_val, subnorm_val, zero_val, x).
     /// Uses arithmetic select: result = sum of (class_val[i] * is_class[i]).
+    /// For F128 (long double), calls __fpclassifyl from libc and maps the result
+    /// to the user-provided class values via comparisons.
     fn lower_builtin_fpclassify(&mut self, args: &[Expr]) -> Option<Operand> {
         if args.len() < 6 {
             return Some(Operand::Const(IrConst::I64(0)));
@@ -1130,6 +1155,49 @@ impl Lowerer {
         let class_vals: Vec<_> = (0..5).map(|i| self.lower_expr(&args[i])).collect();
         let arg_ty = self.get_expr_type(&args[5]);
         let arg_val = self.lower_expr(&args[5]);
+
+        if arg_ty == IrType::F128 {
+            // TODO: FP_* constants assume glibc/Linux; may differ on musl/BSD
+            // __fpclassifyl returns: FP_NAN=0, FP_INFINITE=1, FP_ZERO=2, FP_SUBNORMAL=3, FP_NORMAL=4
+            let cls = self.emit_f128_classify_libcall("__fpclassifyl", arg_val);
+            // Map libc class to user-provided values:
+            // class_vals[0]=nan, [1]=inf, [2]=normal, [3]=subnormal, [4]=zero
+            // libc: 0=nan, 1=inf, 2=zero, 3=subnormal, 4=normal
+            // So: libc_0->class_vals[0], libc_1->class_vals[1], libc_2->class_vals[4],
+            //     libc_3->class_vals[3], libc_4->class_vals[2]
+            let libc_to_user = [0usize, 1, 4, 3, 2]; // libc class index -> user class_vals index
+            let is_class: Vec<Value> = (0..5).map(|libc_cls| {
+                self.emit_cmp_val(
+                    IrCmpOp::Eq,
+                    Operand::Value(cls),
+                    Operand::Const(IrConst::I32(libc_cls as i32)),
+                    IrType::I32,
+                )
+            }).collect();
+
+            let mut result = self.emit_binop_val(
+                IrBinOp::Mul,
+                class_vals[libc_to_user[0]].clone(),
+                Operand::Value(is_class[0]),
+                IrType::I64,
+            );
+            for libc_cls in 1..5 {
+                let user_idx = libc_to_user[libc_cls];
+                let contrib = self.emit_binop_val(
+                    IrBinOp::Mul,
+                    class_vals[user_idx].clone(),
+                    Operand::Value(is_class[libc_cls]),
+                    IrType::I64,
+                );
+                result = self.emit_binop_val(
+                    IrBinOp::Add,
+                    Operand::Value(result),
+                    Operand::Value(contrib),
+                    IrType::I64,
+                );
+            }
+            return Some(Operand::Value(result));
+        }
 
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
         let (_abs_mask, _exp_only, exp_shift, exp_field_max, mant_mask) = Self::fp_masks(arg_ty);
@@ -1168,79 +1236,129 @@ impl Lowerer {
         Some(Operand::Value(result))
     }
 
-    /// Shared setup for FP classification builtins: validates args, lowers the
-    /// float argument, bitcasts to integer bits, and retrieves the FP masks.
-    /// The closure receives (self, bits, arg_ty, int_ty, masks) and returns the result Value.
-    ///
-    // TODO: F128 is stored as F64 at the backend, so bitcast and masks both use F64 layout.
-    fn lower_fp_classify_with<F>(&mut self, args: &[Expr], classify: F) -> Option<Operand>
-    where
-        F: FnOnce(&mut Self, Operand, IrType, IrType, (i64, i64, i64, i64, i64)) -> Value,
-    {
+    /// __builtin_isnan(x) -> 1 if x is NaN. NaN: abs(bits) > exp_only.
+    /// For F128 (long double), delegates to libc __isnanl for correct 80-bit/128-bit handling.
+    fn lower_builtin_isnan(&mut self, args: &[Expr]) -> Option<Operand> {
         if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
         let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            let result = self.emit_f128_classify_libcall("__isnanl", arg_val);
+            let bool_result = self.classify_result_to_bool(result);
+            return Some(Operand::Value(bool_result));
+        }
         let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
         let masks = Self::fp_masks(arg_ty);
-        let result = classify(self, bits, arg_ty, int_ty, masks);
+        let abs_val = self.fp_abs_bits(&bits, int_ty, masks.0);
+        let result = self.emit_cmp_val(IrCmpOp::Ugt, Operand::Value(abs_val), Operand::Const(IrConst::I64(masks.1)), int_ty);
         Some(Operand::Value(result))
     }
 
-    /// __builtin_isnan(x) -> 1 if x is NaN. NaN: abs(bits) > exp_only.
-    fn lower_builtin_isnan(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (abs_mask, exp_only, _, _, _)| {
-            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
-            s.emit_cmp_val(IrCmpOp::Ugt, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty)
-        })
-    }
-
     /// __builtin_isinf(x) -> nonzero if +/-infinity. Inf: abs(bits) == exp_only.
+    /// For F128 (long double), delegates to libc __isinfl.
     fn lower_builtin_isinf(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (abs_mask, exp_only, _, _, _)| {
-            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
-            s.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty)
-        })
+        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
+        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            let result = self.emit_f128_classify_libcall("__isinfl", arg_val);
+            let bool_result = self.classify_result_to_bool(result);
+            return Some(Operand::Value(bool_result));
+        }
+        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let masks = Self::fp_masks(arg_ty);
+        let abs_val = self.fp_abs_bits(&bits, int_ty, masks.0);
+        let result = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(masks.1)), int_ty);
+        Some(Operand::Value(result))
     }
 
     /// __builtin_isfinite(x) -> 1 if finite. Finite: (bits & exp_only) != exp_only.
+    /// For F128 (long double), delegates to libc __finitel.
     fn lower_builtin_isfinite(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (_, exp_only, _, _, _)| {
-            let exp_bits = s.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
-            s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_only)), int_ty)
-        })
+        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
+        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            let result = self.emit_f128_classify_libcall("__finitel", arg_val);
+            let bool_result = self.classify_result_to_bool(result);
+            return Some(Operand::Value(bool_result));
+        }
+        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let masks = Self::fp_masks(arg_ty);
+        let exp_bits = self.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(masks.1)), int_ty);
+        let result = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exp_bits), Operand::Const(IrConst::I64(masks.1)), int_ty);
+        Some(Operand::Value(result))
     }
 
     /// __builtin_isnormal(x) -> 1 if normal. Normal: exp != 0 AND exp != max.
+    /// For F128 (long double), delegates to libc __fpclassifyl and compares to FP_NORMAL.
     fn lower_builtin_isnormal(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, _, int_ty, (_, exp_only, exp_shift, exp_field_max, _)| {
-            let exp_bits = s.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(exp_only)), int_ty);
-            let exponent = s.emit_binop_val(IrBinOp::LShr, Operand::Value(exp_bits), Operand::Const(IrConst::I64(exp_shift)), int_ty);
-            let exp_nonzero = s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(0)), int_ty);
-            let exp_not_max = s.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(exp_field_max)), int_ty);
-            s.emit_binop_val(IrBinOp::And, Operand::Value(exp_nonzero), Operand::Value(exp_not_max), IrType::I32)
-        })
+        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
+        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            // TODO: FP_NORMAL = 4 assumes glibc/Linux FP_* constants; may differ on musl/BSD
+            let cls = self.emit_f128_classify_libcall("__fpclassifyl", arg_val);
+            let result = self.emit_cmp_val(
+                IrCmpOp::Eq,
+                Operand::Value(cls),
+                Operand::Const(IrConst::I32(4)),
+                IrType::I32,
+            );
+            return Some(Operand::Value(result));
+        }
+        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let masks = Self::fp_masks(arg_ty);
+        let exp_bits = self.emit_binop_val(IrBinOp::And, bits, Operand::Const(IrConst::I64(masks.1)), int_ty);
+        let exponent = self.emit_binop_val(IrBinOp::LShr, Operand::Value(exp_bits), Operand::Const(IrConst::I64(masks.2)), int_ty);
+        let exp_nonzero = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(0)), int_ty);
+        let exp_not_max = self.emit_cmp_val(IrCmpOp::Ne, Operand::Value(exponent), Operand::Const(IrConst::I64(masks.3)), int_ty);
+        let result = self.emit_binop_val(IrBinOp::And, Operand::Value(exp_nonzero), Operand::Value(exp_not_max), IrType::I32);
+        Some(Operand::Value(result))
     }
 
     /// __builtin_signbit(x) -> nonzero if sign bit set.
+    /// For F128 (long double), delegates to libc __signbitl.
     fn lower_builtin_signbit(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, arg_ty, int_ty, _| {
-            let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
-            let shifted = s.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
-            s.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), int_ty)
-        })
+        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
+        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            let result = self.emit_f128_classify_libcall("__signbitl", arg_val);
+            let bool_result = self.classify_result_to_bool(result);
+            return Some(Operand::Value(bool_result));
+        }
+        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
+        let shifted = self.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
+        let result = self.emit_binop_val(IrBinOp::And, Operand::Value(shifted), Operand::Const(IrConst::I64(1)), int_ty);
+        Some(Operand::Value(result))
     }
 
     /// __builtin_isinf_sign(x) -> -1 if -inf, +1 if +inf, 0 otherwise.
+    /// For F128 (long double), delegates to libc __isinfl and __signbitl.
     fn lower_builtin_isinf_sign(&mut self, args: &[Expr]) -> Option<Operand> {
-        self.lower_fp_classify_with(args, |s, bits, arg_ty, int_ty, (abs_mask, exp_only, _, _, _)| {
-            let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
-            let abs_val = s.fp_abs_bits(&bits, int_ty, abs_mask);
-            let is_inf = s.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(exp_only)), int_ty);
-            let sign_shifted = s.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
-            let sign_bit = s.emit_binop_val(IrBinOp::And, Operand::Value(sign_shifted), Operand::Const(IrConst::I64(1)), int_ty);
-            let sign_x2 = s.emit_binop_val(IrBinOp::Mul, Operand::Value(sign_bit), Operand::Const(IrConst::I64(2)), IrType::I64);
-            let direction = s.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(sign_x2), IrType::I64);
-            s.emit_binop_val(IrBinOp::Mul, Operand::Value(is_inf), Operand::Value(direction), IrType::I64)
-        })
+        if args.is_empty() { return Some(Operand::Const(IrConst::I64(0))); }
+        let (arg_ty, arg_val) = self.lower_fp_classify_arg(args);
+        if arg_ty == IrType::F128 {
+            // __isinfl returns nonzero if inf
+            let isinf_result = self.emit_f128_classify_libcall("__isinfl", arg_val.clone());
+            let is_inf = self.classify_result_to_bool(isinf_result);
+            // __signbitl returns nonzero if negative
+            let signbit_result = self.emit_f128_classify_libcall("__signbitl", arg_val);
+            let is_neg = self.classify_result_to_bool(signbit_result);
+            // direction = 1 - 2*is_neg -> +1 if positive, -1 if negative
+            let neg_x2 = self.emit_binop_val(IrBinOp::Mul, Operand::Value(is_neg), Operand::Const(IrConst::I64(2)), IrType::I64);
+            let direction = self.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(neg_x2), IrType::I64);
+            let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(is_inf), Operand::Value(direction), IrType::I64);
+            return Some(Operand::Value(result));
+        }
+        let (bits, int_ty) = self.bitcast_float_to_int(arg_val, arg_ty);
+        let masks = Self::fp_masks(arg_ty);
+        let sign_shift = if arg_ty == IrType::F32 { 31_i64 } else { 63_i64 };
+        let abs_val = self.fp_abs_bits(&bits, int_ty, masks.0);
+        let is_inf = self.emit_cmp_val(IrCmpOp::Eq, Operand::Value(abs_val), Operand::Const(IrConst::I64(masks.1)), int_ty);
+        let sign_shifted = self.emit_binop_val(IrBinOp::LShr, bits, Operand::Const(IrConst::I64(sign_shift)), int_ty);
+        let sign_bit = self.emit_binop_val(IrBinOp::And, Operand::Value(sign_shifted), Operand::Const(IrConst::I64(1)), int_ty);
+        let sign_x2 = self.emit_binop_val(IrBinOp::Mul, Operand::Value(sign_bit), Operand::Const(IrConst::I64(2)), IrType::I64);
+        let direction = self.emit_binop_val(IrBinOp::Sub, Operand::Const(IrConst::I64(1)), Operand::Value(sign_x2), IrType::I64);
+        let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(is_inf), Operand::Value(direction), IrType::I64);
+        Some(Operand::Value(result))
     }
 }
 
