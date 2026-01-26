@@ -124,11 +124,38 @@ impl Lowerer {
                     break;
                 }
             }
+            // Also check anon_synth_items for anonymous member designated inits
+            // (e.g., .name = "x" targeting an anonymous struct inside this union)
+            if init_fi.is_none() {
+                for (idx, _) in &anon_synth_items {
+                    init_fi = Some(*idx);
+                    break;
+                }
+            }
             let union_size = layout.size;
             if let Some(fi) = init_fi {
-                let field_size = self.resolve_ctype_size(&layout.fields[fi].ty);
                 let inits = &field_inits[fi];
-                self.emit_field_inits_compound(&mut elements, inits, &layout.fields[fi], field_size);
+                let field_size = self.resolve_ctype_size(&layout.fields[fi].ty);
+                if !inits.is_empty() {
+                    self.emit_field_inits_compound(&mut elements, inits, &layout.fields[fi], field_size);
+                } else {
+                    // Field has no direct inits but may have anonymous member inits
+                    let anon_items_for_fi: Vec<InitializerItem> = anon_synth_items.iter()
+                        .filter(|(idx, _)| *idx == fi)
+                        .map(|(_, item)| item.clone())
+                        .collect();
+                    if !anon_items_for_fi.is_empty() {
+                        let anon_field_ty = &layout.fields[fi].ty;
+                        if let Some(sub_layout) = self.get_struct_layout_for_ctype(anon_field_ty) {
+                            let sub_init = self.lower_struct_global_init_compound(&anon_items_for_fi, &sub_layout);
+                            Self::append_nested_compound(&mut elements, sub_init, field_size);
+                        } else {
+                            push_zero_bytes(&mut elements, field_size);
+                        }
+                    } else {
+                        push_zero_bytes(&mut elements, field_size);
+                    }
+                }
                 // Pad to full union size
                 if field_size < union_size {
                     push_zero_bytes(&mut elements, union_size - field_size);
@@ -911,8 +938,22 @@ impl Lowerer {
         while item_idx < sub_items.len() {
             let sub_item = &sub_items[item_idx];
             let desig_name = h::first_field_designator(sub_item);
-            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx, &self.types) {
-                Some(idx) => idx,
+            let resolution = layout.resolve_init_field(desig_name, current_field_idx, &self.types);
+            let field_idx = match &resolution {
+                Some(InitFieldResolution::Direct(idx)) => *idx,
+                Some(InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
+                    // Designator targets a field inside an anonymous struct/union member.
+                    // Recursively fill the anonymous member's sub-layout.
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &sub_item.init, &self.types.struct_layouts) {
+                        let anon_offset = base_offset + res.anon_offset;
+                        self.fill_struct_fields_from_items(
+                            &[res.sub_item], &res.sub_layout, anon_offset, bytes, ptr_ranges,
+                        );
+                    }
+                    current_field_idx = *anon_field_idx + 1;
+                    item_idx += 1;
+                    continue;
+                }
                 None => break,
             };
             let field = &layout.fields[field_idx];
@@ -1136,8 +1177,21 @@ impl Lowerer {
             if elem_idx >= num_elems { current_elem_idx = elem_idx + 1; continue; }
 
             let elem_base = array_base_offset + elem_idx * struct_size;
-            let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx, &self.types) {
-                Some(idx) => idx,
+            let resolution = layout.resolve_init_field(field_desig, current_field_idx, &self.types);
+            let field_idx = match &resolution {
+                Some(InitFieldResolution::Direct(idx)) => *idx,
+                Some(InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
+                    // Designator targets a field inside an anonymous struct/union member.
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, &self.types.struct_layouts) {
+                        let anon_offset = elem_base + res.anon_offset;
+                        self.fill_struct_fields_from_items(
+                            &[res.sub_item], &res.sub_layout, anon_offset, bytes, ptr_ranges,
+                        );
+                    }
+                    current_elem_idx = elem_idx;
+                    current_field_idx = *anon_field_idx + 1;
+                    continue;
+                }
                 None => { current_elem_idx = elem_idx; continue; }
             };
             let field = &layout.fields[field_idx];
