@@ -3261,14 +3261,16 @@ impl InlineAsmEmitter for ArmCodegen {
         }
     }
 
-    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand, excluded: &[String]) -> bool {
         if !op.mem_addr.is_empty() || op.mem_offset != 0 {
             return false;
         }
+        // Each memory operand gets its own unique register via assign_scratch_reg,
+        // so multiple "=m" outputs don't overwrite each other's addresses.
         if let Operand::Value(v) = val {
             if let Some(slot) = self.state.get_slot(v.0) {
-                let tmp_reg = "x9";
-                self.emit_load_from_sp(tmp_reg, slot.0, "ldr");
+                let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
+                self.emit_load_from_sp(&tmp_reg, slot.0, "ldr");
                 op.mem_addr = format!("[{}]", tmp_reg);
                 return true;
             }

@@ -3677,18 +3677,18 @@ impl InlineAsmEmitter for X86Codegen {
         }
     }
 
-    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand, excluded: &[String]) -> bool {
         // If mem_addr is already set (alloca case), nothing to do
         if !op.mem_addr.is_empty() {
             return false;
         }
-        // Load the pointer value into a temporary register for indirect addressing
+        // Load the pointer value into a temporary register for indirect addressing.
+        // Each memory operand gets its own unique register via assign_scratch_reg,
+        // so multiple "=m" outputs don't overwrite each other's addresses.
         match val {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    // Use rax as temporary (saved/restored by caller convention for inline asm)
-                    // Actually, use a register that won't conflict - pick from scratch regs
-                    let tmp_reg = "r11"; // r11 is caller-saved and unlikely to conflict
+                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
                     self.state.emit_fmt(format_args!("    movq {}(%rbp), %{}", slot.0, tmp_reg));
                     op.mem_addr = format!("(%{})", tmp_reg);
                     return true;

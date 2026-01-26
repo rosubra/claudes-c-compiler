@@ -2911,15 +2911,16 @@ impl InlineAsmEmitter for RiscvCodegen {
         }
     }
 
-    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand, excluded: &[String]) -> bool {
         // If mem_addr is set or mem_offset is non-zero (alloca case), nothing to do
         if !op.mem_addr.is_empty() || op.mem_offset != 0 {
             return false;
         }
-        // Load the pointer value into a temporary register for indirect addressing
+        // Each memory operand gets its own unique register via assign_scratch_reg,
+        // so multiple "=m" outputs don't overwrite each other's addresses.
         if let Operand::Value(v) = val {
             if let Some(slot) = self.state.get_slot(v.0) {
-                let tmp_reg = "t0";
+                let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
                 self.state.emit_fmt(format_args!("    ld {}, {}(s0)", tmp_reg, slot.0));
                 op.mem_addr = format!("0({})", tmp_reg);
                 return true;

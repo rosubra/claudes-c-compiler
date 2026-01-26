@@ -131,7 +131,9 @@ pub trait InlineAsmEmitter {
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, constraint: &str);
 
     /// Resolve memory operand addresses that require indirection (non-alloca pointers).
-    fn resolve_memory_operand(&mut self, _op: &mut AsmOperand, _val: &Operand) -> bool {
+    /// `excluded` contains registers claimed by specific-register constraints,
+    /// used to avoid conflicts when allocating a temp register for the address.
+    fn resolve_memory_operand(&mut self, _op: &mut AsmOperand, _val: &Operand, _excluded: &[String]) -> bool {
         false
     }
 
@@ -466,7 +468,7 @@ pub fn emit_inline_asm_common_impl(
     for (i, (_, ptr, _)) in outputs.iter().enumerate() {
         if matches!(operands[i].kind, AsmOperandKind::Memory) {
             let val = Operand::Value(*ptr);
-            emitter.resolve_memory_operand(&mut operands[i], &val);
+            emitter.resolve_memory_operand(&mut operands[i], &val, &specific_regs);
         }
     }
 
@@ -501,7 +503,7 @@ pub fn emit_inline_asm_common_impl(
         if i < num_plus { continue; }
         let op_idx = outputs.len() + i;
         if matches!(operands[op_idx].kind, AsmOperandKind::Memory) {
-            emitter.resolve_memory_operand(&mut operands[op_idx], val);
+            emitter.resolve_memory_operand(&mut operands[op_idx], val, &specific_regs);
         }
     }
 
