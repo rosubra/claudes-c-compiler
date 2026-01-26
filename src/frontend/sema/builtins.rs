@@ -213,6 +213,10 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     // Prefetch (no-op, handled separately in lowering)
     m.insert("__builtin_prefetch", BuiltinInfo::intrinsic(BuiltinIntrinsic::Nop));
 
+    // Cache flush - maps to __clear_cache runtime function (provided by libgcc/glibc).
+    // On x86 this is a no-op (cache coherent), on ARM/RISC-V it flushes icache.
+    m.insert("__builtin___clear_cache", BuiltinInfo::simple("__clear_cache"));
+
     // Vector construction builtins used by SSE header wrapper functions.
     // The actual _mm_set1_* calls are intercepted as direct builtins, but the
     // function bodies in emmintrin.h still reference these, so register as Nop

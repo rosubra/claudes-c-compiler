@@ -318,6 +318,19 @@ impl ArmCodegen {
         }
     }
 
+    /// Emit store to [sp, #offset] using the REAL sp register, even when alloca is present.
+    /// Used for storing into dynamically-allocated call stack arg areas that live at the
+    /// current sp, NOT in the frame (x29-relative).
+    fn emit_store_to_raw_sp(&mut self, reg: &str, offset: i64, instr: &str) {
+        if Self::is_valid_imm_offset(offset, instr, reg) {
+            self.state.emit_fmt(format_args!("    {} {}, [sp, #{}]", instr, reg, offset));
+        } else {
+            self.load_large_imm("x17", offset);
+            self.state.emit("    add x17, sp, x17");
+            self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, reg));
+        }
+    }
+
     /// Emit `stp reg1, reg2, [sp, #offset]` handling large offsets.
     fn emit_stp_to_sp(&mut self, reg1: &str, reg2: &str, offset: i64) {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
@@ -1841,6 +1854,9 @@ impl ArchCodegen for ArmCodegen {
                             _arg_types: &[IrType], stack_arg_space: usize, fptr_spill: usize, _f128_temp_space: usize) -> i64 {
         if stack_arg_space > 0 {
             self.emit_sub_sp(stack_arg_space as i64);
+            // When has_dyn_alloca, emit_load_from_sp/emit_add_sp_offset use x29 (fixed frame
+            // pointer) as base — frame slot offsets don't need SP adjustment.
+            let src_adjust = if self.state.has_dyn_alloca { 0 } else { stack_arg_space as i64 + fptr_spill as i64 };
             let mut stack_offset = 0i64;
             for (arg_idx, arg) in args.iter().enumerate() {
                 if !arg_classes[arg_idx].is_stack() { continue; }
@@ -1857,7 +1873,7 @@ impl ArchCodegen for ArmCodegen {
                                     let reg_name = callee_saved_name(reg);
                                     self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
+                                    let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1872,7 +1888,8 @@ impl ArchCodegen for ArmCodegen {
                         for qi in 0..n_dwords {
                             let src_off = (qi * 8) as i64;
                             self.emit_load_from_reg("x1", "x0", src_off, "ldr");
-                            self.emit_store_to_sp("x1", stack_offset + src_off, "str");
+                            // Stack arg destinations are at current sp, use raw sp.
+                            self.emit_store_to_raw_sp("x1", stack_offset + src_off, "str");
                         }
                         stack_offset += (n_dwords as i64) * 8;
                     }
@@ -1881,34 +1898,34 @@ impl ArchCodegen for ArmCodegen {
                             Operand::Const(c) => {
                                 if let IrConst::I128(v) = c {
                                     self.emit_load_imm64("x0", *v as u64 as i64);
-                                    self.emit_store_to_sp("x0", stack_offset, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                     self.emit_load_imm64("x0", (*v >> 64) as u64 as i64);
-                                    self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                                 } else {
                                     self.operand_to_x0(arg);
-                                    self.emit_store_to_sp("x0", stack_offset, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                     self.state.emit("    mov x0, #0");
-                                    self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                                 }
                             }
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
+                                    let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
-                                        self.emit_store_to_sp("x0", stack_offset, "str");
+                                        self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                         self.state.emit("    mov x0, #0");
-                                        self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                        self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                                     } else {
                                         self.emit_load_from_sp("x0", adjusted, "ldr");
-                                        self.emit_store_to_sp("x0", stack_offset, "str");
+                                        self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                         self.emit_load_from_sp("x0", adjusted + 8, "ldr");
-                                        self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                        self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                                     }
                                 } else {
                                     self.state.emit("    mov x0, #0");
-                                    self.emit_store_to_sp("x0", stack_offset, "str");
-                                    self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset, "str");
+                                    self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                                 }
                             }
                         }
@@ -1926,16 +1943,16 @@ impl ArchCodegen for ArmCodegen {
                                 let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
                                 let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
                                 self.emit_load_imm64("x0", lo as i64);
-                                self.emit_store_to_sp("x0", stack_offset, "str");
+                                self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                 self.emit_load_imm64("x0", hi as i64);
-                                self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                             }
                             Operand::Value(v) => {
                                 if let Some(&reg) = self.reg_assignments.get(&v.0) {
                                     let reg_name = callee_saved_name(reg);
                                     self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
+                                    let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1948,7 +1965,7 @@ impl ArchCodegen for ArmCodegen {
                                 self.state.emit("    stp x9, x10, [sp, #-16]!");
                                 self.state.emit("    bl __extenddftf2");
                                 self.state.emit("    ldp x9, x10, [sp], #16");
-                                self.emit_store_to_sp("q0", stack_offset, "str");
+                                self.emit_store_to_raw_sp("q0", stack_offset, "str");
                             }
                         }
                         stack_offset += 16;
@@ -1960,7 +1977,7 @@ impl ArchCodegen for ArmCodegen {
                                     let reg_name = callee_saved_name(reg);
                                     self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill as i64;
+                                    let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
                                         self.emit_add_sp_offset("x0", adjusted);
                                     } else {
@@ -1972,7 +1989,7 @@ impl ArchCodegen for ArmCodegen {
                             }
                             Operand::Const(_) => { self.operand_to_x0(arg); }
                         }
-                        self.emit_store_to_sp("x0", stack_offset, "str");
+                        self.emit_store_to_raw_sp("x0", stack_offset, "str");
                         stack_offset += 8;
                     }
                     _ => {}
@@ -1984,6 +2001,11 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[CallArgClass],
                           arg_types: &[IrType], total_sp_adjust: i64, _f128_temp_space: usize, _stack_arg_space: usize) {
+        // When has_dyn_alloca is true, emit_load_from_sp/emit_add_sp_offset use x29 as base.
+        // Frame slots are at fixed x29-relative offsets, so total_sp_adjust (which accounts
+        // for sp movement from fptr spill + stack args) must NOT be added.
+        let slot_adjust = if self.state.has_dyn_alloca { 0 } else { total_sp_adjust };
+
         // Phase 2a: Load GP integer register args into temp registers (x9-x16).
         let mut gp_tmp_idx = 0usize;
         for (i, arg) in args.iter().enumerate() {
@@ -1996,7 +2018,7 @@ impl ArchCodegen for ArmCodegen {
                             let reg_name = callee_saved_name(reg);
                             self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                         } else if let Some(slot) = self.state.get_slot(v.0) {
-                            let adjusted = slot.0 + total_sp_adjust;
+                            let adjusted = slot.0 + slot_adjust;
                             if self.state.is_alloca(v.0) {
                                 self.emit_add_sp_offset("x0", adjusted);
                             } else {
@@ -2046,7 +2068,7 @@ impl ArchCodegen for ArmCodegen {
                         let reg_name = callee_saved_name(reg);
                         self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                     } else if let Some(slot) = self.state.get_slot(v.0) {
-                        let adjusted = slot.0 + total_sp_adjust + f128_temp_space_aligned as i64;
+                        let adjusted = slot.0 + slot_adjust + f128_temp_space_aligned as i64;
                         self.emit_load_from_sp("x0", adjusted, "ldr");
                     } else {
                         self.state.emit("    mov x0, #0");
@@ -2104,7 +2126,7 @@ impl ArchCodegen for ArmCodegen {
                             let reg_name = callee_saved_name(reg);
                             self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
                         } else if let Some(slot) = self.state.get_slot(v.0) {
-                            self.emit_load_from_sp("x0", slot.0 + total_sp_adjust, "ldr");
+                            self.emit_load_from_sp("x0", slot.0 + slot_adjust, "ldr");
                         } else {
                             self.state.emit("    mov x0, #0");
                         }
@@ -2151,7 +2173,7 @@ impl ArchCodegen for ArmCodegen {
                     match arg {
                         Operand::Value(v) => {
                             if let Some(slot) = self.state.get_slot(v.0) {
-                                let adjusted = slot.0 + total_sp_adjust;
+                                let adjusted = slot.0 + slot_adjust;
                                 if self.state.is_alloca(v.0) {
                                     self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], adjusted, "ldr");
                                     self.state.emit_fmt(format_args!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
@@ -2220,7 +2242,7 @@ impl ArchCodegen for ArmCodegen {
                                 let reg_name = callee_saved_name(reg);
                                 self.state.emit_fmt(format_args!("    mov x17, {}", reg_name));
                             } else if let Some(slot) = self.state.get_slot(v.0) {
-                                let adjusted = slot.0 + total_sp_adjust;
+                                let adjusted = slot.0 + slot_adjust;
                                 if self.state.is_alloca(v.0) {
                                     self.emit_add_sp_offset("x17", adjusted);
                                 } else {
@@ -2272,8 +2294,17 @@ impl ArchCodegen for ArmCodegen {
         } else if indirect {
             // fptr was spilled with "str x0, [sp, #-16]!" before stack args were allocated.
             // After sub_sp(stack_arg_space), the fptr is at sp + stack_arg_space.
+            // IMPORTANT: Always use raw sp here, NOT emit_load_from_sp which switches
+            // to x29 under alloca. The fptr was pushed to the runtime sp (which may be
+            // below x29 after alloca), so we must reload relative to current sp.
             let spill_offset = stack_arg_space as i64;
-            self.emit_load_from_sp("x17", spill_offset, "ldr");
+            if Self::is_valid_imm_offset(spill_offset, "ldr", "x17") {
+                self.state.emit_fmt(format_args!("    ldr x17, [sp, #{}]", spill_offset));
+            } else {
+                self.load_large_imm("x17", spill_offset);
+                self.state.emit("    add x17, sp, x17");
+                self.state.emit("    ldr x17, [x17]");
+            }
             self.state.emit("    blr x17");
         }
     }

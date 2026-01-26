@@ -605,7 +605,8 @@ impl<'a> ExprTypeChecker<'a> {
             // Void-returning builtins
             "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_copy"
             | "__builtin_abort" | "__builtin_exit" | "__builtin_trap"
-            | "__builtin_unreachable" | "__builtin_prefetch" => Some(CType::Void),
+            | "__builtin_unreachable" | "__builtin_prefetch"
+            | "__builtin___clear_cache" => Some(CType::Void),
 
             _ => None,
         }

@@ -76,6 +76,7 @@ See `git log` for full history. Key milestones:
 - `register` variable `__asm__("regname")` support for pinning variables to specific registers in inline asm
 - Performance: Rc<StructLayout> eliminates deep cloning in lowering (~18% compile speedup on sqlite3.c)
 - AArch64 inline asm: `"Q"` memory constraint (single base register, `[Xn]` syntax) and `"w"` FP/SIMD register constraint with `%d`/`%s`/`%q` modifiers (needed for musl atomic ops and math functions)
+- libffi fixes: `__builtin___clear_cache` support, tied FP register constraint propagation (RISC-V), alloca+indirect call frame addressing (ARM)
 
 ### Project Build Status
 

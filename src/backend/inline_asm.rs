@@ -81,6 +81,8 @@ impl AsmOperand {
             self.kind = AsmOperandKind::Memory;
         } else if matches!(source.kind, AsmOperandKind::Address) {
             self.kind = AsmOperandKind::Address;
+        } else if matches!(source.kind, AsmOperandKind::FpReg) {
+            self.kind = AsmOperandKind::FpReg;
         }
     }
 }
