@@ -290,9 +290,21 @@ impl Lowerer {
         self.insert_static_local_scoped(declarator.name.clone(), static_name.clone());
 
         // Determine initializer (evaluated at compile time for static locals)
+        // For pointer arrays and scalar pointers, use Ptr as the base type for
+        // initializer coercion (matching file-scope global handling). Without this,
+        // base_ty is the pointee type (e.g., I8 for char*), causing NULL pointer
+        // entries in pointer arrays to be emitted as 1-byte .byte 0 instead of
+        // 8-byte .quad 0, corrupting the array layout.
         let init = if let Some(ref initializer) = declarator.init {
+            let init_base_ty = if da.is_pointer && !da.is_array {
+                da.var_ty  // scalar pointer: var_ty = Ptr
+            } else if da.is_array_of_pointers || da.is_array_of_func_ptrs {
+                IrType::Ptr  // pointer array: each element is Ptr
+            } else {
+                da.base_ty
+            };
             self.lower_global_init(
-                initializer, &decl.type_spec, da.base_ty, da.is_array,
+                initializer, &decl.type_spec, init_base_ty, da.is_array,
                 da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides,
             )
         } else {
