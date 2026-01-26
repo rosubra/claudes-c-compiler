@@ -1,5 +1,5 @@
 Task: fix_builtin_ffs_intrinsic
-Status: in_progress
+Status: completed
 Description: Implement __builtin_ffs/ffsl/ffsll as compiler intrinsics instead of external library calls.
 
 Bug: __builtin_ffs/ffsl/ffsll were registered as LibcAlias builtins, generating external calls

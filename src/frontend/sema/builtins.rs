@@ -142,9 +142,9 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_bswap16", BuiltinInfo::intrinsic(BuiltinIntrinsic::Bswap));
     m.insert("__builtin_bswap32", BuiltinInfo::intrinsic(BuiltinIntrinsic::Bswap));
     m.insert("__builtin_bswap64", BuiltinInfo::intrinsic(BuiltinIntrinsic::Bswap));
-    m.insert("__builtin_ffs", BuiltinInfo::simple("ffs"));
-    m.insert("__builtin_ffsl", BuiltinInfo::simple("ffsl"));
-    m.insert("__builtin_ffsll", BuiltinInfo::simple("ffsll"));
+    m.insert("__builtin_ffs", BuiltinInfo::intrinsic(BuiltinIntrinsic::Ffs));
+    m.insert("__builtin_ffsl", BuiltinInfo::intrinsic(BuiltinIntrinsic::Ffs));
+    m.insert("__builtin_ffsll", BuiltinInfo::intrinsic(BuiltinIntrinsic::Ffs));
     m.insert("__builtin_parity", BuiltinInfo::intrinsic(BuiltinIntrinsic::Parity));
     m.insert("__builtin_parityl", BuiltinInfo::intrinsic(BuiltinIntrinsic::Parity));
     m.insert("__builtin_parityll", BuiltinInfo::intrinsic(BuiltinIntrinsic::Parity));
@@ -310,6 +310,8 @@ pub enum BuiltinKind {
 pub enum BuiltinIntrinsic {
     Clz,
     Ctz,
+    /// ffs(x) = x == 0 ? 0 : ctz(x) + 1 — find first set bit (1-indexed)
+    Ffs,
     Clrsb,
     Popcount,
     Bswap,

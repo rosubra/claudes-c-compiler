@@ -276,6 +276,7 @@ impl Lowerer {
             BuiltinIntrinsic::MulOverflow => self.lower_overflow_builtin(name, args, IrBinOp::Mul),
             BuiltinIntrinsic::Clz => self.lower_unary_intrinsic(name, args, IrUnaryOp::Clz),
             BuiltinIntrinsic::Ctz => self.lower_unary_intrinsic(name, args, IrUnaryOp::Ctz),
+            BuiltinIntrinsic::Ffs => self.lower_ffs_intrinsic(name, args),
             BuiltinIntrinsic::Clrsb => self.lower_clrsb_intrinsic(name, args),
             BuiltinIntrinsic::Bswap => self.lower_bswap_intrinsic(name, args),
             BuiltinIntrinsic::Popcount => self.lower_unary_intrinsic(name, args, IrUnaryOp::Popcount),
@@ -621,6 +622,53 @@ impl Lowerer {
         let dest = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest, op: ir_op, src: arg, ty });
         Some(Operand::Value(dest))
+    }
+
+    /// Lower __builtin_ffs/__builtin_ffsl/__builtin_ffsll.
+    /// ffs(x) returns 0 if x == 0, otherwise (ctz(x) + 1).
+    /// Synthesized as: select(x == 0, 0, ctz(x) + 1)
+    fn lower_ffs_intrinsic(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        if args.is_empty() {
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+        let arg = self.lower_expr(&args[0]);
+        let ty = Self::intrinsic_type_from_suffix(name);
+
+        // ctz_val = ctz(x)
+        let ctz_val = self.fresh_value();
+        self.emit(Instruction::UnaryOp { dest: ctz_val, op: IrUnaryOp::Ctz, src: arg.clone(), ty });
+
+        // ctz_plus_1 = ctz_val + 1
+        let ctz_plus_1 = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: ctz_plus_1,
+            op: IrBinOp::Add,
+            lhs: Operand::Value(ctz_val),
+            rhs: Operand::Const(if ty == IrType::I64 { IrConst::I64(1) } else { IrConst::I32(1) }),
+            ty,
+        });
+
+        // is_zero = (x == 0)
+        let is_zero = self.fresh_value();
+        self.emit(Instruction::Cmp {
+            dest: is_zero,
+            op: IrCmpOp::Eq,
+            lhs: arg,
+            rhs: Operand::Const(if ty == IrType::I64 { IrConst::I64(0) } else { IrConst::I32(0) }),
+            ty,
+        });
+
+        // result = select(is_zero, 0, ctz_plus_1)
+        let result = self.fresh_value();
+        self.emit(Instruction::Select {
+            dest: result,
+            cond: Operand::Value(is_zero),
+            true_val: Operand::Const(if ty == IrType::I64 { IrConst::I64(0) } else { IrConst::I32(0) }),
+            false_val: Operand::Value(ctz_plus_1),
+            ty,
+        });
+
+        Some(Operand::Value(result))
     }
 
     /// Lower __builtin_bswap{16,32,64} - type determined by numeric suffix.
