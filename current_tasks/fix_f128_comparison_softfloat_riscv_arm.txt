@@ -1,0 +1,20 @@
+Fix F128 (long double) comparisons on RISC-V and ARM backends using soft-float libcalls
+
+Problem:
+- On RISC-V and ARM, long double is 128-bit IEEE quad precision
+- The current codegen uses F64 hardware float instructions (feq.d/flt.d/fle.d on RISC-V,
+  fcmp d0,d1 on ARM) for F128 comparisons, which only compares the double-precision approximation
+- This gives wrong results for values that differ only in the lower bits of their 128-bit
+  representation (e.g., LDBL_MIN vs 0.0, LDBL_MAX comparisons)
+- Failing tests: compiler_suite_0017_0024 through 0017_0028 (isgreater, isgreaterequal,
+  isless, islessequal, islessgreater for long double)
+
+Fix:
+- For F128 comparisons on RISC-V: emit calls to soft-float library functions:
+  __eqtf2 (equality), __letf2 (<=), __getf2 (>=), __unordtf2 (unordered/NaN check)
+  Arguments passed in GP register pairs a0:a1 and a2:a3, result returned in a0
+- For F128 comparisons on ARM: emit calls to the same soft-float library functions:
+  Arguments passed in q0/q1 (128-bit registers), result returned in x0/w0
+- Map the libcall results to the correct boolean for each IrCmpOp
+
+Status: in_progress
