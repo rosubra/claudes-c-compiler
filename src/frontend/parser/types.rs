@@ -769,7 +769,8 @@ impl Parser {
             }
             result_type
         } else {
-            eprintln!("error: expected type in __builtin_va_arg");
+            let loc = self.span_to_location(self.peek_span());
+            eprintln!("{}error: expected type in __builtin_va_arg", loc);
             self.error_count += 1;
             TypeSpecifier::Int
         }

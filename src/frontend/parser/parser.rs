@@ -11,7 +11,7 @@
 // Methods are pub(super) so they can be called across modules within the parser.
 
 use crate::common::fx_hash::FxHashMap;
-use crate::common::source::Span;
+use crate::common::source::{Span, SourceManager};
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::{Token, TokenKind};
 use super::ast::*;
@@ -121,6 +121,8 @@ pub struct Parser {
     pub(super) pragma_default_visibility: Option<String>,
     /// Count of parse errors encountered (invalid tokens at top level, etc.)
     pub error_count: usize,
+    /// Source manager for resolving spans to file:line:col in error messages.
+    source_manager: Option<SourceManager>,
     /// Set to true when __attribute__((used)) is encountered.
     /// Prevents dead code elimination of the symbol even if unreferenced.
     pub(super) parsing_used: bool,
@@ -170,10 +172,27 @@ impl Parser {
             pragma_visibility_stack: Vec::new(),
             pragma_default_visibility: None,
             error_count: 0,
+            source_manager: None,
             parsing_used: false,
             parsing_vector_size: None,
             parsing_address_space: AddressSpace::Default,
             enum_constants: FxHashMap::default(),
+        }
+    }
+
+    /// Set the source manager for resolving spans to file:line:col in errors.
+    pub fn set_source_manager(&mut self, sm: SourceManager) {
+        self.source_manager = Some(sm);
+    }
+
+    /// Format a location prefix for error messages from a span.
+    /// Returns "file:line:col: " if source manager is available, "" otherwise.
+    pub(super) fn span_to_location(&self, span: Span) -> String {
+        if let Some(ref sm) = self.source_manager {
+            let loc = sm.resolve_span(span);
+            format!("{}:{}:{}: ", loc.file, loc.line, loc.column)
+        } else {
+            String::new()
         }
     }
 
@@ -229,7 +248,8 @@ impl Parser {
                 // Report error for unrecognized token at top level
                 if !matches!(self.peek(), TokenKind::Semicolon | TokenKind::Eof) {
                     self.error_count += 1;
-                    eprintln!("error: expected declaration, got {:?}", self.peek());
+                    let loc = self.span_to_location(self.peek_span());
+                    eprintln!("{}error: expected declaration, got {:?}", loc, self.peek());
                 }
                 self.advance();
             }
@@ -287,7 +307,8 @@ impl Parser {
                     other => format!("{:?}", other),
                 }
             }).collect();
-            eprintln!("error: expected {:?}, got {:?}", expected, self.peek());
+            let loc = self.span_to_location(span);
+            eprintln!("{}error: expected {:?}, got {:?}", loc, expected, self.peek());
             self.error_count += 1;
             span
         }

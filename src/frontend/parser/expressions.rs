@@ -591,7 +591,8 @@ impl Parser {
             }
             _ => {
                 let span = self.peek_span();
-                eprintln!("error: unexpected token {:?} in expression", self.peek());
+                let loc = self.span_to_location(span);
+                eprintln!("{}error: unexpected token {:?} in expression", loc, self.peek());
                 self.error_count += 1;
                 self.advance();
                 Expr::IntLiteral(0, span)

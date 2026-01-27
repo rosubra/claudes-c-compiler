@@ -1,33 +1,31 @@
-LOW PRIORITY: Add structured error infrastructure
+LOW PRIORITY: Add structured error infrastructure (DiagnosticEngine)
 
-Problem:
-Error reporting uses 4 different ad-hoc patterns across compilation phases:
-1. Parser: bare eprintln! + manual error_count integer, no spans
+Current state (partially addressed):
+- Parser errors now include file:line:col via SourceManager + preprocessor line markers
+- Preprocessor emits GCC-style # linenum "filename" markers at #include boundaries
+- SourceManager builds a line map from these markers for span resolution
+- SourceManager::get_source_line() is ready for snippet rendering
+
+Remaining patterns still using bare eprintln! without structured diagnostics:
+1. Parser: still uses eprintln! (now with location prefix) + manual error_count
 2. Sema: eprintln! immediately + push to Vec<String> that nobody reads
-3. Preprocessor: #error pushed to Vec<String> driver never checks; #warning to eprintln!
+3. Preprocessor: #error pushed to Vec<String>; #warning to eprintln!
 4. IR lowering: standalone eprintln! with no buffering
-
-Note: The old dead-code DiagnosticEngine in common/error.rs was removed during cleanup.
-A new implementation should be built from scratch when this becomes a priority.
 
 What to do (incremental):
 1. Create a DiagnosticEngine in common/ -- Diagnostic with severity, message, span,
    optional notes. Support emit(), print_all(), has_errors(), error_count().
 2. Wire it into the driver -- create one instance, thread it through each phase
-3. Have the parser emit Diagnostics instead of eprintln!
+3. Have the parser emit Diagnostics instead of eprintln! (locations already work)
 4. Have sema emit Diagnostics instead of eprintln! + warnings Vec
 5. Have the preprocessor report errors through DiagnosticEngine
 6. Have the driver check for errors after each phase and print_all at the end
 7. Add source-snippet rendering to Diagnostic::emit() -- extract the source line
-   from SourceManager, print a caret/underline under the span
-
-This is low priority because the compiler works correctly without it -- users just
-get unhelpful error messages. It becomes higher priority when adding better parse
-error recovery or type-checking diagnostics.
+   from SourceManager (get_source_line is ready), print a caret/underline under span
 
 Key files:
-- src/common/source.rs (SourceManager, has file content for snippets)
-- src/frontend/parser/parser.rs (eprintln! sites)
+- src/common/source.rs (SourceManager with line map, get_source_line for snippets)
+- src/frontend/parser/parser.rs (eprintln! with location prefix)
 - src/frontend/sema/sema.rs (eprintln! + warnings Vec)
 - src/frontend/preprocessor/preprocessor.rs (errors Vec, eprintln! for #warning)
-- src/driver/driver.rs (never reads preprocessor.errors() or sema_result.warnings)
+- src/driver/driver.rs (creates SourceManager, passes to parser)

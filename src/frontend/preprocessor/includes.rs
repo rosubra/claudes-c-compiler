@@ -99,8 +99,11 @@ impl Preprocessor {
                         is_predefined: true,
                     });
 
+                    // Emit line marker for entering the included file
+                    let mut result = format!("# 1 \"{}\"\n", resolved_path.display());
+
                     // Preprocess the included content
-                    let result = self.preprocess_included(&content);
+                    result.push_str(&self.preprocess_included(&content));
 
                     // Restore __FILE__
                     if let Some(old) = old_file {
@@ -204,7 +207,10 @@ impl Preprocessor {
                         is_predefined: true,
                     });
 
-                    let result = self.preprocess_included(&content);
+                    // Emit line marker for entering the included file
+                    let mut result = format!("# 1 \"{}\"\n", resolved_path.display());
+
+                    result.push_str(&self.preprocess_included(&content));
 
                     if let Some(old) = old_file {
                         self.macros.define(MacroDef {
@@ -219,6 +225,7 @@ impl Preprocessor {
                     }
 
                     self.include_stack.pop();
+
                     Some(result)
                 }
                 Err(_) => None,

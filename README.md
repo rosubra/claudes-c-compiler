@@ -7,8 +7,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 **Basic compilation pipeline functional with SSA.** ~98.5% of tests passing across all architectures (ratio 10 sample, ~2900 tests per arch).
 
 ### Working Features
-- Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
+- Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once), GCC-style line markers
 - Recursive descent parser with typedef tracking (modular: expressions, types, statements, declarations, declarators)
+- **Source location tracking**: parse errors include file:line:col via preprocessor line markers and SourceManager
 - Type-aware IR lowering and code generation
 - **SSA construction via mem2reg** (dominator tree, dominance frontiers, phi insertion, variable renaming)
 - Phi elimination for backend codegen (parallel copy lowering)
@@ -90,6 +91,7 @@ See `git log` for full history. Key milestones:
 - Bumped `__GNUC__` from 4.8 to 6.5 (satisfies kernel ≥5.1 minimum, stays <7 for glibc compat)
 - Fix enum constants in designated array initializers: `expr_might_be_addr()` now excludes enum identifiers, fixing musl vfprintf's states[][] table
 - Fix ARM inline asm `load_input_to_reg`: check `is_alloca` and emit `add` (address computation) instead of `ldr` (load) for alloca values, matching x86 `leaq` and RISC-V `addi` behavior (fixed musl tmpfile EFAULT on ARM)
+- **Source location in errors**: preprocessor emits GCC-style `# linenum "filename"` markers at `#include` boundaries; parser errors now show `file:line:col` for all error sites; SourceManager resolves spans back through `#include` chains
 
 ### Project Build Status
 

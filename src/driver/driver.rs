@@ -643,6 +643,8 @@ impl Driver {
         let t1 = std::time::Instant::now();
         let mut source_manager = SourceManager::new();
         let file_id = source_manager.add_file(input_file.to_string(), preprocessed.clone());
+        // Build line map from preprocessor line markers for source location tracking
+        source_manager.build_line_map(&preprocessed);
         let mut lexer = Lexer::new(&preprocessed, file_id);
         let tokens = lexer.tokenize();
         if time_phases { eprintln!("[TIME] lex: {:.3}s ({} tokens)", t1.elapsed().as_secs_f64(), tokens.len()); }
@@ -654,6 +656,7 @@ impl Driver {
         // Parse
         let t2 = std::time::Instant::now();
         let mut parser = Parser::new(tokens);
+        parser.set_source_manager(source_manager);
         let ast = parser.parse();
         if time_phases { eprintln!("[TIME] parse: {:.3}s", t2.elapsed().as_secs_f64()); }
 

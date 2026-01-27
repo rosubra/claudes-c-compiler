@@ -76,6 +76,18 @@ impl Lexer {
                 return;
             }
 
+            // Skip GCC-style line markers: # <number> "filename"
+            // These are emitted by the preprocessor and must not be lexed as tokens.
+            // A line marker is a '#' at the start of a line (after optional whitespace)
+            // followed by a digit.
+            if self.input[self.pos] == b'#' && self.is_line_marker() {
+                // Skip the entire line
+                while self.pos < self.input.len() && self.input[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+                continue;
+            }
+
             // Skip line comments
             if self.pos + 1 < self.input.len() && self.input[self.pos] == b'/' && self.input[self.pos + 1] == b'/' {
                 while self.pos < self.input.len() && self.input[self.pos] != b'\n' {
@@ -99,6 +111,26 @@ impl Lexer {
 
             break;
         }
+    }
+
+    /// Check if the current position is at a GCC-style line marker.
+    /// A line marker is `# <digit>` at the start of a line (i.e., the '#' is
+    /// either at position 0 or preceded by a newline).
+    fn is_line_marker(&self) -> bool {
+        // Must be at '#'
+        if self.pos >= self.input.len() || self.input[self.pos] != b'#' {
+            return false;
+        }
+        // '#' must be at the start of a line
+        if self.pos > 0 && self.input[self.pos - 1] != b'\n' {
+            return false;
+        }
+        // Next non-space char must be a digit
+        let mut j = self.pos + 1;
+        while j < self.input.len() && self.input[j] == b' ' {
+            j += 1;
+        }
+        j < self.input.len() && self.input[j].is_ascii_digit()
     }
 
     fn peek_next(&self) -> Option<u8> {

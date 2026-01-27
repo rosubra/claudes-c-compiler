@@ -333,14 +333,19 @@ impl Preprocessor {
     }
 
     /// Process source code, expanding macros and handling conditionals.
-    /// Returns the preprocessed source.
+    /// Returns the preprocessed source with embedded line markers for source tracking.
     pub fn preprocess(&mut self, source: &str) -> String {
+        // Emit initial line marker for the main file
+        let line_marker = format!("# 1 \"{}\"\n", self.filename);
         let main_output = self.preprocess_source(source, false);
         // Prepend any output from force-included files (e.g., pragma synthetic tokens)
         if self.force_include_output.is_empty() {
-            main_output
+            let mut result = line_marker;
+            result.push_str(&main_output);
+            result
         } else {
             let mut result = std::mem::take(&mut self.force_include_output);
+            result.push_str(&line_marker);
             result.push_str(&main_output);
             result
         }
@@ -455,7 +460,15 @@ impl Preprocessor {
                 let include_result = self.process_directive(trimmed, source_line_num + 1);
                 if let Some(included_content) = include_result {
                     output.push_str(&included_content);
-                    output.push('\n');
+                    // After included content, emit a return-to-parent line marker
+                    // so the source manager can map subsequent lines back to the
+                    // correct file and line number. source_line_num is 0-based,
+                    // and the next line of the parent file is source_line_num + 2
+                    // (since the #include directive itself was source_line_num + 1).
+                    let parent_file = self.include_stack.last()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| self.filename.clone());
+                    output.push_str(&format!("# {} \"{}\"\n", source_line_num + 2, parent_file));
                 } else if is_include {
                     // Included files always emit a newline for non-include directives
                     output.push('\n');
