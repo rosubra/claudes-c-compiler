@@ -96,15 +96,43 @@ pub fn allocate_registers(
     // handle loops (values live across back-edges have their intervals extended).
     let liveness = compute_live_intervals(func);
 
-    // Count uses per value for prioritization.
-    let mut use_count: FxHashMap<u32, u32> = FxHashMap::default();
+    // Count uses per value for prioritization, weighted by loop depth.
+    //
+    // Uses inside loops are weighted more heavily because they execute more
+    // frequently. A use inside a loop at depth D contributes 10^D to the
+    // weighted use count (so a use in a singly-nested loop counts 10x, doubly-
+    // nested counts 100x, etc.). This ensures inner-loop temporaries get
+    // priority for register allocation over values in straight-line code,
+    // which is critical for performance in compute-heavy loops like zlib's
+    // deflate_slow, longest_match, and slide_hash.
+    let mut use_count: FxHashMap<u32, u64> = FxHashMap::default();
+
+    // Precompute per-block loop weight: 10^depth, capped to avoid overflow.
+    let block_loop_weight: Vec<u64> = liveness.block_loop_depth.iter()
+        .map(|&d| {
+            match d {
+                0 => 1,
+                1 => 10,
+                2 => 100,
+                3 => 1000,
+                _ => 10_000, // cap at 10K for very deep nesting
+            }
+        })
+        .collect();
 
     // Use a whitelist approach: only allocate registers for values produced
     // by simple, well-understood instructions that store results via the
     // standard accumulator path (e.g., store_rax_to on x86, store_t0_to on RISC-V).
     let mut eligible: FxHashSet<u32> = FxHashSet::default();
 
-    for block in &func.blocks {
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        // Get the loop weight for this block (default 1 if no loop info available).
+        let weight: u64 = if block_idx < block_loop_weight.len() {
+            block_loop_weight[block_idx]
+        } else {
+            1
+        };
+
         for inst in &block.instructions {
             // Values eligible for register allocation: those stored via the
             // standard accumulator path (store_rax_to on x86, store_t0_to on RISC-V).
@@ -216,16 +244,18 @@ pub fn allocate_registers(
                 _ => {}
             }
 
-            // Count uses of operands via shared iterators.
+            // Count uses of operands, weighted by loop depth of the containing block.
+            // Uses inside loops contribute more to the score, ensuring inner-loop
+            // values get priority for register allocation.
             for_each_operand_in_instruction(inst, |op| {
                 if let Operand::Value(v) = op {
-                    *use_count.entry(v.0).or_insert(0) += 1;
+                    *use_count.entry(v.0).or_insert(0) += weight;
                 }
             });
         }
         for_each_operand_in_terminator(&block.terminator, |op| {
             if let Operand::Value(v) = op {
-                *use_count.entry(v.0).or_insert(0) += 1;
+                *use_count.entry(v.0).or_insert(0) += weight;
             }
         });
     }
@@ -324,12 +354,26 @@ pub fn allocate_registers(
         })
         .collect();
 
-    // Prioritize: longer intervals with more uses get registers first.
-    // Score = interval_length * use_count (heuristic).
+    // Prioritize by weighted use count (loop-aware).
+    //
+    // The weighted use count accounts for loop nesting depth: uses inside loops
+    // are weighted by 10^depth, so inner-loop values automatically get much
+    // higher scores. This replaces the previous interval_length * use_count
+    // heuristic which didn't account for execution frequency and caused
+    // inner-loop temporaries to be spilled to the stack.
+    //
+    // Tie-breaking by interval length (descending) ensures that among values
+    // with equal weighted use counts, longer-lived values (which benefit more
+    // from being in a register) are preferred.
     candidates.sort_by(|a, b| {
-        let score_a = (a.end - a.start) as u64 * use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
-        let score_b = (b.end - b.start) as u64 * use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
-        score_b.cmp(&score_a) // Descending: highest score first
+        let score_a = use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
+        let score_b = use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
+        score_b.cmp(&score_a)
+            .then_with(|| {
+                let len_a = (a.end - a.start) as u64;
+                let len_b = (b.end - b.start) as u64;
+                len_b.cmp(&len_a)
+            })
     });
 
     // Linear scan: greedily assign registers.
@@ -415,11 +459,16 @@ pub fn allocate_registers(
             })
             .collect();
 
-        // Prioritize by use_count * interval_length (same heuristic as callee-saved).
+        // Prioritize by weighted use count (loop-aware), same as Phase 1.
         caller_candidates.sort_by(|a, b| {
-            let score_a = (a.end - a.start) as u64 * use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
-            let score_b = (b.end - b.start) as u64 * use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
+            let score_a = use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
+            let score_b = use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
             score_b.cmp(&score_a)
+                .then_with(|| {
+                    let len_a = (a.end - a.start) as u64;
+                    let len_b = (b.end - b.start) as u64;
+                    len_b.cmp(&len_a)
+                })
         });
 
         // Linear scan for caller-saved registers.
@@ -470,11 +519,16 @@ pub fn allocate_registers(
             })
             .collect();
 
-        // Prioritize by use_count * interval_length (same heuristic).
+        // Prioritize by weighted use count (loop-aware), same as Phases 1 & 2.
         spillover_candidates.sort_by(|a, b| {
-            let score_a = (a.end - a.start) as u64 * use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
-            let score_b = (b.end - b.start) as u64 * use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
+            let score_a = use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
+            let score_b = use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
             score_b.cmp(&score_a)
+                .then_with(|| {
+                    let len_a = (a.end - a.start) as u64;
+                    let len_b = (b.end - b.start) as u64;
+                    len_b.cmp(&len_a)
+                })
         });
 
         // Use the existing reg_free_until from Phase 1 since it tracks callee-saved

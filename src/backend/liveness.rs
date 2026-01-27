@@ -39,6 +39,10 @@ pub struct LivenessResult {
     /// Program points that are Call or CallIndirect instructions.
     /// Used by the register allocator to identify values that cross call boundaries.
     pub call_points: Vec<u32>,
+    /// Loop nesting depth for each block (block_index -> depth).
+    /// Depth 0 = not in any loop. Depth 1 = in one loop. Depth 2 = nested, etc.
+    /// Used by the register allocator to weight uses inside loops more heavily.
+    pub block_loop_depth: Vec<u32>,
 }
 
 // ── Compact bitset for dataflow ──────────────────────────────────────────────
@@ -129,7 +133,7 @@ impl BitSet {
 pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
     let num_blocks = func.blocks.len();
     if num_blocks == 0 {
-        return LivenessResult { intervals: Vec::new(), num_points: 0, call_points: Vec::new() };
+        return LivenessResult { intervals: Vec::new(), num_points: 0, call_points: Vec::new(), block_loop_depth: Vec::new() };
     }
 
     // Collect alloca values (not register-allocatable).
@@ -178,7 +182,7 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
 
     let num_values = value_ids.len();
     if num_values == 0 {
-        return LivenessResult { intervals: Vec::new(), num_points: 0, call_points: Vec::new() };
+        return LivenessResult { intervals: Vec::new(), num_points: 0, call_points: Vec::new(), block_loop_depth: Vec::new() };
     }
 
     // Build sparse->dense mapping
@@ -292,6 +296,14 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
             }
         }
     }
+
+    // Phase 2b: Compute loop nesting depth per block.
+    //
+    // Uses a simple DFS-based back-edge detection: an edge src -> dst where dst
+    // is an ancestor in the DFS tree is a back edge, defining a natural loop.
+    // For each back edge, all blocks on any path from dst to src are in the loop.
+    // Loop depth = number of loop bodies a block belongs to.
+    let block_loop_depth = compute_loop_depth(&successors, num_blocks);
 
     // Phase 3: Backward dataflow to compute live-in/live-out per block.
     // live_in[B] = gen[B] ∪ (live_out[B] - kill[B])
@@ -432,6 +444,7 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
         intervals,
         num_points,
         call_points,
+        block_loop_depth,
     }
 }
 
@@ -795,4 +808,98 @@ pub(super) fn for_each_operand_in_terminator(term: &Terminator, mut f: impl FnMu
         Terminator::Switch { val, .. } => f(val),
         _ => {}
     }
+}
+
+/// Compute the loop nesting depth for each block in the CFG.
+///
+/// Uses DFS-based back-edge detection: an edge src -> dst where dst is an
+/// ancestor in the DFS tree is a back edge defining a natural loop. For each
+/// back edge (src -> header), all blocks on any path from header to src form
+/// the loop body. The depth of a block is the number of loop bodies it belongs to.
+///
+/// This is used by the register allocator to weight uses inside loops more
+/// heavily, so that inner-loop temporaries get priority for register allocation.
+fn compute_loop_depth(successors: &[Vec<usize>], num_blocks: usize) -> Vec<u32> {
+    if num_blocks == 0 {
+        return Vec::new();
+    }
+
+    let mut depth = vec![0u32; num_blocks];
+
+    // Build predecessor lists from successor lists.
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
+    for (src, succs) in successors.iter().enumerate() {
+        for &dst in succs {
+            if dst < num_blocks {
+                predecessors[dst].push(src);
+            }
+        }
+    }
+
+    // DFS to classify edges. An edge src -> dst is a back edge if dst is an
+    // ancestor of src in the DFS tree (i.e., dst was visited but not finished).
+    // State: 0 = unvisited, 1 = in-progress (on stack), 2 = finished.
+    let mut state = vec![0u8; num_blocks];
+    let mut back_edges: Vec<(usize, usize)> = Vec::new(); // (src, header)
+
+    // Iterative DFS to avoid stack overflow on deeply nested CFGs.
+    let mut stack: Vec<(usize, usize)> = Vec::new(); // (block, successor_index)
+    state[0] = 1; // Mark entry block as in-progress
+    stack.push((0, 0));
+
+    while let Some(&mut (block, ref mut succ_idx)) = stack.last_mut() {
+        if *succ_idx < successors[block].len() {
+            let next = successors[block][*succ_idx];
+            *succ_idx += 1;
+            if next < num_blocks {
+                match state[next] {
+                    0 => {
+                        // Unvisited: push to stack
+                        state[next] = 1;
+                        stack.push((next, 0));
+                    }
+                    1 => {
+                        // Back edge: next is an ancestor (in-progress)
+                        back_edges.push((block, next));
+                    }
+                    _ => {
+                        // Cross or forward edge: ignore
+                    }
+                }
+            }
+        } else {
+            // All successors processed: mark as finished
+            state[block] = 2;
+            stack.pop();
+        }
+    }
+
+    // For each back edge (src -> header), find the natural loop body.
+    // The loop body consists of all blocks that can reach `src` without going
+    // through `header`, plus `header` itself. We compute this by a reverse
+    // BFS/DFS from `src` following predecessor edges, stopping at `header`.
+    for &(tail, header) in &back_edges {
+        // All blocks in the loop body get +1 depth
+        depth[header] += 1;
+        if tail != header {
+            // BFS backwards from tail, stopping at header
+            let mut worklist = vec![tail];
+            let mut visited = vec![false; num_blocks];
+            visited[header] = true; // Don't go past header
+            visited[tail] = true;
+            depth[tail] += 1;
+
+            while let Some(b) = worklist.pop() {
+                for &pred in &predecessors[b] {
+                    if pred < num_blocks && !visited[pred] {
+                        visited[pred] = true;
+                        depth[pred] += 1;
+                        worklist.push(pred);
+                    }
+                }
+            }
+        }
+    }
+
+    depth
 }

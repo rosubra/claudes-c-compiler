@@ -125,6 +125,13 @@ pub struct Driver {
     /// When true, `# <line> "<file>"` directives are stripped from -E output.
     /// Used by the Linux kernel's cc-version.sh to detect the compiler.
     pub suppress_line_markers: bool,
+    /// Whether -nostdinc was passed. When delegating to gcc for assembly
+    /// preprocessing, this must be forwarded to prevent system header
+    /// interference.
+    pub nostdinc: bool,
+    /// Macro undefinitions from -U flags. These need to be forwarded when
+    /// delegating preprocessing to gcc (e.g., -Uriscv for kernel linker scripts).
+    pub undef_macros: Vec<String>,
 }
 
 impl Driver {
@@ -165,6 +172,8 @@ impl Driver {
             gcc_fallback: false,
             original_args: Vec::new(),
             suppress_line_markers: false,
+            nostdinc: false,
+            undef_macros: Vec::new(),
         }
     }
 
@@ -324,9 +333,30 @@ impl Driver {
                         cmd.arg(format!("-D{}={}", def.name, def.value));
                     }
                 }
+                // Pass through force-include files (-include). Critical for the
+                // Linux kernel where kconfig.h defines CONFIG_* macros needed
+                // when preprocessing linker scripts (.lds.S -> .lds).
+                for inc in &self.force_includes {
+                    cmd.arg("-include").arg(inc);
+                }
+                // Pass through -nostdinc to prevent system headers from interfering
+                if self.nostdinc {
+                    cmd.arg("-nostdinc");
+                }
+                // Pass through -U (undefine) flags (e.g., -Uriscv for kernel scripts)
+                for undef in &self.undef_macros {
+                    cmd.arg(format!("-U{}", undef));
+                }
                 cmd.arg("-E");
                 if self.suppress_line_markers {
                     cmd.arg("-P");
+                }
+                // Pass through dependency file generation so that build systems
+                // like the Linux kernel's fixdep can track header dependencies.
+                if let Some(ref dep_path) = self.dep_file {
+                    if !dep_path.is_empty() {
+                        cmd.arg(format!("-Wp,-MMD,{}", dep_path));
+                    }
                 }
                 cmd.arg(input_file);
                 if self.output_path_set {
@@ -362,6 +392,10 @@ impl Driver {
             if self.output_path_set {
                 std::fs::write(&self.output_path, &output)
                     .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
+                // Write dependency file if requested (e.g., -Wp,-MMD,<depfile>).
+                // The kernel build uses this when preprocessing linker scripts
+                // (.lds.S -> .lds) and fixdep expects the .d file to exist.
+                self.write_dep_file(input_file, &self.output_path.clone());
             } else {
                 print!("{}", output);
             }
@@ -524,6 +558,17 @@ impl Driver {
                 cmd.arg(format!("-D{}={}", def.name, def.value));
             }
         }
+        // Pass through force-include files (-include), -nostdinc, and -U flags
+        // for .S preprocessing (needed by kernel for kconfig.h, etc.)
+        for inc in &self.force_includes {
+            cmd.arg("-include").arg(inc);
+        }
+        if self.nostdinc {
+            cmd.arg("-nostdinc");
+        }
+        for undef in &self.undef_macros {
+            cmd.arg(format!("-U{}", undef));
+        }
 
         // Pass through -Wa, assembler flags
         for flag in &self.assembler_extra_args {
@@ -584,6 +629,13 @@ impl Driver {
             if !self.pic {
                 args.push("-fno-pic".to_string());
             }
+        }
+        // Pass through any -Wa, flags from the command line. These are needed
+        // when compiling C code that contains inline asm requiring specific
+        // assembler settings (e.g., -Wa,-misa-spec=2.2 for RISC-V to enable
+        // implicit zicsr in the old ISA spec, required by Linux kernel vDSO).
+        for flag in &self.assembler_extra_args {
+            args.push(format!("-Wa,{}", flag));
         }
         args
     }

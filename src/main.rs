@@ -216,10 +216,14 @@ fn real_main() {
             // Undefine macro
             "-U" => {
                 i += 1;
-                // TODO: implement -U (undefine) support
+                if i < args.len() {
+                    driver.undef_macros.push(args[i].clone());
+                }
+                // TODO: implement -U in our own preprocessor
             }
             arg if arg.starts_with("-U") => {
-                // TODO: implement -U (undefine) support
+                driver.undef_macros.push(arg[2..].to_string());
+                // TODO: implement -U in our own preprocessor
             }
 
             // Standard version flag
@@ -330,7 +334,10 @@ fn real_main() {
             "-nostdlib" => {
                 driver.nostdlib = true;
             }
-            "-nostdinc" | "-nodefaultlibs" => {
+            "-nostdinc" => {
+                driver.nostdinc = true;
+            }
+            "-nodefaultlibs" => {
                 // Silently accepted for GCC compatibility
             }
 

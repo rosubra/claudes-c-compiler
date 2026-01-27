@@ -219,6 +219,19 @@ impl RiscvCodegen {
         }
     }
 
+    /// Emit: load from `offset(base)` into `dest`, handling large offsets via t6.
+    /// For arbitrary base registers (not s0/sp). Uses t6 as scratch when offset
+    /// exceeds RISC-V's 12-bit signed immediate range (-2048..2047).
+    fn emit_load_from_reg(state: &mut crate::backend::state::CodegenState, dest: &str, base: &str, offset: i64, load_instr: &str) {
+        if Self::fits_imm12(offset) {
+            state.emit_fmt(format_args!("    {} {}, {}({})", load_instr, dest, offset, base));
+        } else {
+            state.emit_fmt(format_args!("    li t6, {}", offset));
+            state.emit_fmt(format_args!("    add t6, {}, t6", base));
+            state.emit_fmt(format_args!("    {} {}, 0(t6)", load_instr, dest));
+        }
+    }
+
     /// Emit: load from `offset(s0)` into `reg`, handling large offsets via t6.
     /// Uses t6 as scratch to avoid conflicts with t3-t5 call argument temps.
     pub(super) fn emit_load_from_s0(&mut self, reg: &str, offset: i64, load_instr: &str) {
@@ -1005,11 +1018,13 @@ impl ArchCodegen for RiscvCodegen {
                     if src_reg != "t1" {
                         self.state.emit_fmt(format_args!("    mv t1, {}", src_reg));
                     }
+                    // Large structs (>2048 bytes) have dword offsets exceeding
+                    // RISC-V's 12-bit signed immediate; emit_load_from_reg handles this.
                     let n_dwords = (size + 7) / 8;
                     for qi in 0..n_dwords {
                         let src_off = (qi * 8) as i64;
                         let dst_off = slot.0 + src_off;
-                        self.state.emit_fmt(format_args!("    ld t0, {}(t1)", src_off));
+                        Self::emit_load_from_reg(&mut self.state, "t0", "t1", src_off, "ld");
                         self.emit_store_to_s0("t0", dst_off, "sd");
                     }
                 }
@@ -1022,7 +1037,7 @@ impl ArchCodegen for RiscvCodegen {
                     for qi in 0..n_dwords {
                         let src_off = (qi * 8) as i64;
                         let dst_off = slot.0 + src_off;
-                        self.state.emit_fmt(format_args!("    ld t0, {}(t1)", src_off));
+                        Self::emit_load_from_reg(&mut self.state, "t0", "t1", src_off, "ld");
                         self.emit_store_to_s0("t0", dst_off, "sd");
                     }
                 }
@@ -1903,13 +1918,7 @@ impl ArchCodegen for RiscvCodegen {
                         }
                         for qi in 0..n_dwords {
                             let src_off = (qi * 8) as i64;
-                            if Self::fits_imm12(src_off) {
-                                self.state.emit_fmt(format_args!("    ld t1, {}(t0)", src_off));
-                            } else {
-                                self.state.emit_fmt(format_args!("    li t6, {}", src_off));
-                                self.state.emit("    add t6, t0, t6");
-                                self.state.emit("    ld t1, 0(t6)");
-                            }
+                            Self::emit_load_from_reg(&mut self.state, "t1", "t0", src_off, "ld");
                             self.emit_store_to_sp("t1", offset as i64 + src_off, "sd");
                         }
                         offset += n_dwords * 8;
