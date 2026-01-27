@@ -11,7 +11,6 @@
 //! This pass runs to a fixpoint, since one simplification can enable others.
 //! Phi nodes in successor blocks are updated when edges are redirected.
 
-use crate::common::asm_constraints::constraint_is_immediate_only;
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::ir::ir::*;
 
@@ -495,18 +494,17 @@ fn remove_dead_blocks(func: &mut IrFunction) -> usize {
                         worklist.push(*label);
                     }
                 }
-                if let Instruction::InlineAsm { goto_labels, template, inputs, input_symbols, .. } = inst {
-                    // If this asm goto will be skipped at codegen time (because it has
-                    // unsatisfiable immediate constraints and uses .pushsection), don't
-                    // mark the goto label blocks as reachable. This prevents objtool
-                    // "unreachable instruction" errors for dead code that was only
-                    // reachable through the skipped asm's jump targets.
-                    let skip = !goto_labels.is_empty() && asm_goto_will_be_skipped(template, inputs, input_symbols);
-                    if !skip {
-                        for (_, label) in goto_labels {
-                            if reachable.insert(*label) {
-                                worklist.push(*label);
-                            }
+                if let Instruction::InlineAsm { goto_labels, .. } = inst {
+                    // Always mark asm goto target blocks as reachable.
+                    // The backend always emits the asm body (using $0 placeholders
+                    // for unsatisfiable immediate constraints), so goto target labels
+                    // must exist in the assembly output. Removing them would cause
+                    // linker errors like "undefined reference to '.L30'" when the
+                    // asm template references %l[label] in .pushsection directives
+                    // like __jump_table.
+                    for (_, label) in goto_labels {
+                        if reachable.insert(*label) {
+                            worklist.push(*label);
                         }
                     }
                 }
@@ -532,6 +530,13 @@ fn remove_dead_blocks(func: &mut IrFunction) -> usize {
         for inst in &mut block.instructions {
             if let Instruction::Phi { incoming, .. } = inst {
                 incoming.retain(|(_, label)| !dead_blocks.contains(label));
+            }
+            // Defensive: clean up InlineAsm goto_labels that reference
+            // dead blocks. While asm goto targets are always marked reachable
+            // above, this guards against edge cases where other passes might
+            // remove blocks that happen to be goto targets.
+            if let Instruction::InlineAsm { goto_labels, .. } = inst {
+                goto_labels.retain(|(_, label)| !dead_blocks.contains(label));
             }
         }
     }
@@ -605,44 +610,6 @@ fn get_terminator_targets(term: &Terminator) -> Vec<BlockId> {
     }
 }
 
-/// Check whether an inline asm goto will be skipped at codegen time.
-///
-/// The backend skips asm templates that have unsatisfiable immediate ("i") constraints
-/// AND contain `.pushsection` directives. This is a heuristic to avoid emitting corrupt
-/// kernel metadata (e.g., __jump_table entries with null key pointers).
-///
-/// When such an asm goto is skipped, its goto label targets become unreachable dead code.
-/// This function allows the dead block elimination pass to avoid marking those goto label
-/// blocks as reachable, so they get properly removed and don't cause objtool
-/// "unreachable instruction" errors.
-fn asm_goto_will_be_skipped(
-    template: &str,
-    inputs: &[(String, Operand, Option<String>)],
-    input_symbols: &[Option<String>],
-) -> bool {
-    // Check if template uses .pushsection (the skip is only triggered for pushsection asm)
-    if !template.contains(".pushsection") {
-        return false;
-    }
-
-    // Check if any input has an unsatisfiable immediate-only constraint:
-    // - The constraint must be purely immediate (e.g., "i", "n") with no register/memory alternatives
-    // - The operand must be a runtime Value (not a compile-time constant)
-    // - There must be no symbol name for this operand
-    // Note: Only inputs are checked because output constraints have "=" prefix and are never
-    // classified as Immediate by the backend, so they can't trigger the skip condition.
-    for (i, (constraint, operand, _name)) in inputs.iter().enumerate() {
-        if constraint_is_immediate_only(constraint) {
-            let is_const = matches!(operand, Operand::Const(_));
-            let has_symbol = input_symbols.get(i).map_or(false, |s| s.is_some());
-            if !is_const && !has_symbol {
-                return true;
-            }
-        }
-    }
-
-    false
-}
 
 #[cfg(test)]
 mod tests {
