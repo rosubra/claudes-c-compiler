@@ -765,6 +765,19 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 }
                 return;
             }
+            // Kernel code model: fold GlobalAddr + Load into RIP-relative load.
+            // In kernel code model, GlobalAddr emits `movq $symbol, %rax`
+            // (absolute R_X86_64_32S), which gives the link-time virtual address.
+            // For data access, we need RIP-relative addressing (R_X86_64_PC32)
+            // like GCC's `movl symbol(%rip), %eax`. This is critical for early
+            // boot code (.head.text) that runs before page tables are set up,
+            // where virtual addresses are not yet valid.
+            if cg.state_ref().code_model_kernel && !is_i128_type(*ty) && *ty != IrType::F128 {
+                if let Some(sym) = global_addr_map.get(&ptr.0) {
+                    cg.emit_global_load_rip_rel(dest, sym, *ty);
+                    return;
+                }
+            }
             // Check if the ptr comes from a foldable GEP with constant offset.
             // Fold when the base is safe to access at the Load point:
             // 1. Alloca bases: slots are stable, never reused by packing.
@@ -855,6 +868,20 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                             cg.emit_seg_store_symbol(val, sym, *ty, *seg_override);
                         } else {
                             cg.emit_seg_store(val, ptr, *ty, *seg_override);
+                        }
+                    } else if cg.state_ref().code_model_kernel && !is_i128_type(*ty) && *ty != IrType::F128 {
+                        // Kernel code model: fold GlobalAddr + Store into RIP-relative
+                        // store (see Load comment above for rationale).
+                        if let Some(sym) = global_addr_map.get(&ptr.0) {
+                            cg.emit_global_store_rip_rel(val, sym, *ty);
+                        } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
+                            if cg.state_ref().is_alloca(gep_info.base.0) {
+                                cg.emit_store_with_const_offset(val, &gep_info.base, gep_info.offset, *ty);
+                            } else {
+                                cg.emit_store(val, ptr, *ty);
+                            }
+                        } else {
+                            cg.emit_store(val, ptr, *ty);
                         }
                     } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
                         // Fold GEP into store when base is safe at use site:

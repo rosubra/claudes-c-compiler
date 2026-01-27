@@ -162,6 +162,20 @@ pub trait ArchCodegen {
         panic!("segment override stores only supported on x86");
     }
 
+    /// Emit a RIP-relative load from a global symbol (folded GlobalAddr + Load).
+    /// Used in kernel code model where GlobalAddr uses absolute addressing but
+    /// data accesses need RIP-relative addressing. Default: panics.
+    fn emit_global_load_rip_rel(&mut self, _dest: &Value, _sym: &str, _ty: IrType) {
+        panic!("global RIP-relative load only supported on x86");
+    }
+
+    /// Emit a RIP-relative store to a global symbol (folded GlobalAddr + Store).
+    /// Used in kernel code model where GlobalAddr uses absolute addressing but
+    /// data accesses need RIP-relative addressing. Default: panics.
+    fn emit_global_store_rip_rel(&mut self, _val: &Operand, _sym: &str, _ty: IrType) {
+        panic!("global RIP-relative store only supported on x86");
+    }
+
     /// Emit a load with a folded GEP constant offset: load from (base + const_offset).
     ///
     /// This is an optimization for the common pattern:

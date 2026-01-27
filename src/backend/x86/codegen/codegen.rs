@@ -2936,7 +2936,9 @@ impl ArchCodegen for X86Codegen {
             // Use RIP-relative LEA for both default and kernel code models.
             // In kernel model, emit_global_addr_absolute() is used instead
             // for GlobalAddr values that are only used as integer values
-            // (not as pointers to dereference).
+            // (not as pointers to dereference). Additionally, GlobalAddr+Load/Store
+            // is folded into RIP-relative memory accesses via emit_global_load_rip_rel
+            // / emit_global_store_rip_rel in generation.rs.
             self.state.out.emit_instr_sym_base_reg("    leaq", name, "rip", "rax");
         }
         self.store_rax_to(dest);
@@ -2953,6 +2955,28 @@ impl ArchCodegen for X86Codegen {
         // never for pointers that will be dereferenced.
         self.state.out.emit_instr_sym_imm_reg("    movq", name, "rax");
         self.store_rax_to(dest);
+    }
+
+    /// Emit a RIP-relative load from a global symbol.
+    /// Used in kernel code model to fold GlobalAddr + Load into a single
+    /// `movl symbol(%rip), %eax` (or appropriate variant), matching GCC's
+    /// behavior of using R_X86_64_PC32 for data accesses.
+    fn emit_global_load_rip_rel(&mut self, dest: &Value, sym: &str, ty: IrType) {
+        let load_instr = Self::mov_load_for_type(ty);
+        let dest_reg = Self::load_dest_reg(ty);
+        self.state.emit_fmt(format_args!("    {} {}(%rip), {}", load_instr, sym, dest_reg));
+        self.emit_store_result(dest);
+    }
+
+    /// Emit a RIP-relative store to a global symbol.
+    /// Used in kernel code model to fold GlobalAddr + Store into a single
+    /// `movl %eax, symbol(%rip)` (or appropriate variant), matching GCC's
+    /// behavior of using R_X86_64_PC32 for data accesses.
+    fn emit_global_store_rip_rel(&mut self, val: &Operand, sym: &str, ty: IrType) {
+        self.emit_load_operand(val);
+        let store_instr = Self::mov_store_for_type(ty);
+        let store_reg = Self::reg_for_type("rax", ty);
+        self.state.emit_fmt(format_args!("    {} %{}, {}(%rip)", store_instr, store_reg, sym));
     }
 
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
