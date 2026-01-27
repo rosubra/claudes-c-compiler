@@ -426,9 +426,13 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
             total_changes += n;
         }
 
-        // Phase 10.5: Interprocedural constant return propagation (IPCP).
-        if iter == 0 && !dis_ipcp {
-            let ipcp_changes = timed_pass!("ipcp", ipcp::run(module));
+        // Phase 10.5: Interprocedural constant propagation (IPCP).
+        // Run on every iteration, not just iter 0, because later iterations may
+        // have simplified call arguments to constants (e.g., phi nodes collapsed
+        // after CFG simplification resolved dead branches from IS_ENABLED() checks).
+        let mut ipcp_changes = 0;
+        if !dis_ipcp {
+            ipcp_changes = timed_pass!("ipcp", ipcp::run(module));
             if ipcp_changes > 0 {
                 changed.iter_mut().for_each(|c| *c = true);
             }
@@ -450,8 +454,15 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         // iter 1 finds ~10K, iter 2 finds ~200. Stopping when an iteration yields
         // less than 5% of the first iteration's output saves one full pipeline
         // iteration with negligible impact on optimization quality.
+        //
+        // Exception: if IPCP made changes this iteration, always run another
+        // iteration regardless of diminishing returns. IPCP changes (constant
+        // argument propagation, dead call elimination) create opportunities for
+        // constant folding, DCE, and CFG simplification that require a full pass
+        // to clean up. Without this, dead code referencing undefined symbols
+        // (like the kernel's convert_to_fxsr) would survive.
         const DIMINISHING_RETURNS_FACTOR: usize = 20; // 1/20 = 5% threshold
-        if iter > 0 && iter0_total_changes > 0
+        if iter > 0 && ipcp_changes == 0 && iter0_total_changes > 0
             && total_changes * DIMINISHING_RETURNS_FACTOR < iter0_total_changes
         {
             break;
