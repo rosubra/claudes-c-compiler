@@ -250,6 +250,26 @@ pub fn constraint_is_memory_only(constraint: &str) -> bool {
     !has_reg && !has_tied
 }
 
+/// Check whether a constraint requires an address (lvalue) rather than a value (rvalue).
+/// This covers both memory-only constraints (m, o, V, Q) and address constraints (A)
+/// that need the compiler to provide the memory address, not the loaded value.
+///
+/// "A" is RISC-V-specific: it means "address operand for AMO/LR/SC instructions".
+/// The inline asm template receives the address in a register, formatted as "(reg)".
+/// Unlike "m" constraints where the backend formats the memory reference, "A" provides
+/// just the bare register holding the address.
+///
+/// This is used by the IR lowering to decide whether to call lower_lvalue() (getting
+/// the address) or lower_expr() (loading the value) for inline asm input operands.
+pub fn constraint_needs_address(constraint: &str) -> bool {
+    if constraint_is_memory_only(constraint) {
+        return true;
+    }
+    // RISC-V "A" constraint: address for AMO/LR/SC instructions
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    stripped == "A"
+}
+
 /// Shared inline assembly emission logic. All three backends call this from their
 /// `emit_inline_asm` implementation, providing an `InlineAsmEmitter` to handle
 /// arch-specific details.

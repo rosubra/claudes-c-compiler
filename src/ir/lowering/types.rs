@@ -586,6 +586,7 @@ impl Lowerer {
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
             // Compute strides from the Array dims BEFORE the pointer in the derived list
             // (these are the pointed-to array dimensions)
+            let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
             let array_dims: Vec<usize> = derived.iter()
                 .take_while(|d| !matches!(d, DerivedDeclarator::Pointer))
                 .filter_map(|d| {
@@ -603,6 +604,17 @@ impl Lowerer {
             } else {
                 array_dims.iter().product::<usize>() * base_elem_size
             };
+
+            // When there are multiple pointers (e.g., char (**pp)[2] has ptr_count=2),
+            // the outermost pointer is a pointer-to-pointer, not pointer-to-array.
+            // pp[i] strides by sizeof(pointer)=8 and requires a load (pointer deref).
+            // The array strides only apply after dereferencing through all pointer levels.
+            // Treat as a simple pointer with no array strides, so subscript operations
+            // will use CType-based stride resolution for correct behavior.
+            if ptr_count >= 2 {
+                return (8, 8, false, true, vec![]);
+            }
+
             // strides[0] = full pointed-to array size, then per-dim strides
             let mut strides = vec![full_array_size];
             if !array_dims.is_empty() {

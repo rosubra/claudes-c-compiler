@@ -14,7 +14,7 @@ use crate::ir::ir::*;
 use crate::common::types::{AddressSpace, IrType};
 use super::lowering::Lowerer;
 use super::definitions::LValue;
-use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_is_memory_only};
+use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_is_memory_only, constraint_needs_address};
 
 impl Lowerer {
     pub(super) fn lower_inline_asm_stmt(
@@ -173,12 +173,18 @@ impl Lowerer {
                     sym_name = self.extract_symbol_name(&inp.expr);
                     self.lower_expr(&inp.expr)
                 }
-            } else if constraint_is_memory_only(&constraint) {
-                // For memory-only constraints, also try to extract the symbol name.
-                // This allows the backend to emit direct symbol(%rip) references
-                // instead of loading addresses into registers, which is critical
-                // when the inline asm template adds a segment prefix like %%gs:.
-                sym_name = self.extract_mem_operand_symbol(&inp.expr);
+            } else if constraint_needs_address(&constraint) {
+                // For memory-only and address constraints (m, o, V, Q, A), provide the
+                // address (lvalue) rather than the loaded value (rvalue).
+                // For memory constraints, also try to extract the symbol name so the
+                // backend can emit direct symbol(%rip) references instead of loading
+                // addresses into registers, which is critical when the inline asm
+                // template adds a segment prefix like %%gs:.
+                // For RISC-V "A" constraints (AMO/LR/SC), the address is loaded into
+                // a register and formatted as "(reg)" in the template.
+                if constraint_is_memory_only(&constraint) {
+                    sym_name = self.extract_mem_operand_symbol(&inp.expr);
+                }
                 if let Some(lv) = self.lower_lvalue(&inp.expr) {
                     let ptr = match lv {
                         LValue::Variable(v) | LValue::Address(v, _) => v,
