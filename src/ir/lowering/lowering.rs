@@ -459,8 +459,13 @@ impl Lowerer {
                         if declarator.is_noreturn && !declarator.name.is_empty() {
                             self.noreturn_functions.insert(declarator.name.clone());
                         }
-                        // Collect weak/visibility attributes on extern declarations (not aliases)
-                        if declarator.alias_target.is_none()
+                        // Collect weak/visibility attributes on extern declarations (not aliases).
+                        // Skip typedefs: they are not linker symbols and should never get
+                        // .weak/.hidden directives. This matters when #pragma GCC visibility
+                        // push(hidden) is active (e.g., kernel EFI stub) because it would
+                        // otherwise emit .hidden for thousands of typedef names.
+                        if !decl.is_typedef
+                            && declarator.alias_target.is_none()
                             && !declarator.name.is_empty()
                             && (declarator.is_weak || declarator.visibility.is_some())
                         {
