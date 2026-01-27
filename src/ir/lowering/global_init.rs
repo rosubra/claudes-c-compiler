@@ -589,6 +589,8 @@ impl Lowerer {
 
     /// Create an anonymous global for a compound literal at file scope.
     /// Used for: struct S *s = &(struct S){1, 2};
+    /// Also handles array compound literals like (const u8[]){0xEC, 0xA1, 0}
+    /// which decay to pointers when used in pointer contexts.
     pub(super) fn create_compound_literal_global(
         &mut self,
         type_spec: &TypeSpecifier,
@@ -597,12 +599,29 @@ impl Lowerer {
         let label = format!(".Lcompound_lit_{}", self.next_anon_struct);
         self.next_anon_struct += 1;
 
-        let base_ty = self.type_spec_to_ir(type_spec);
+        // Detect array compound literals to pass correct is_array/elem_size/alloc_size.
+        // For (const u8[]){0xEC, 0xA1, 0}, we need elem_size=1 and alloc_size=3.
+        let is_array = matches!(type_spec, TypeSpecifier::Array(_, _));
+        let (elem_size, base_ty, computed_alloc_size) = if let TypeSpecifier::Array(ref elem_ts, _) = type_spec {
+            let elem_ir_ty = self.type_spec_to_ir(elem_ts);
+            let e_size = self.sizeof_type(elem_ts);
+            let num_elems = if let Initializer::List(items) = init {
+                items.len()
+            } else {
+                1
+            };
+            (e_size, elem_ir_ty, e_size * num_elems)
+        } else {
+            let ty = self.type_spec_to_ir(type_spec);
+            let size = self.sizeof_type(type_spec);
+            (0, ty, size)
+        };
+
         let struct_layout = self.get_struct_layout_for_type(type_spec);
         let alloc_size = if let Some(ref layout) = struct_layout {
             layout.size
         } else {
-            self.sizeof_type(type_spec)
+            computed_alloc_size
         };
 
         let align = if let Some(ref layout) = struct_layout {
@@ -611,7 +630,7 @@ impl Lowerer {
             base_ty.align()
         };
 
-        let global_init = self.lower_global_init(init, type_spec, base_ty, false, 0, alloc_size, &struct_layout, &[]);
+        let global_init = self.lower_global_init(init, type_spec, base_ty, is_array, elem_size, alloc_size, &struct_layout, &[]);
 
         let global_ty = if matches!(&global_init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
             IrType::I8

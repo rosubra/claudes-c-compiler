@@ -319,6 +319,12 @@ impl Lowerer {
                 return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
             }
         }
+        // Bare compound literal used as a pointer value (array-to-pointer decay).
+        // e.g., .commands = (const u8 []){ ATA_CMD_ID_ATA, ATA_CMD_ID_ATAPI, 0 }
+        // The array compound literal decays to a pointer to its first element.
+        if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = expr {
+            return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
+        }
         // Try as a global address expression (&x, func name, array name, etc.)
         if let Some(addr) = self.eval_global_addr_expr(expr) {
             return Some(addr);
