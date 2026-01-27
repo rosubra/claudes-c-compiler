@@ -1,0 +1,7 @@
+Task: Fix x86 kernel miscompilation in arch/x86/kernel/head64.c
+
+The delta debugging tool identified that arch/x86/kernel/head64.c compiled with
+our compiler causes a boot failure. This is the early x86-64 kernel startup code.
+Investigating the miscompilation to find and fix the underlying compiler bug.
+
+Status: in_progress
