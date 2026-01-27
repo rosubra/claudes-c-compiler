@@ -106,7 +106,7 @@ See `git log` for full history. Key milestones:
 | libsodium | PASS | All 7 tests pass on all architectures (init, random, sha256, secretbox, sign, box, generichash) |
 | mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
 | libpng | PASS | pngtest passes |
-| libjpeg-turbo | FAIL | Linker errors: static inline functions not emitted (pre-existing) |
+| libjpeg-turbo | PASS | All 2 tests pass (cjpeg/djpeg roundtrip, jpegtran) |
 | sqlite | PASS | All 622 sqllogictest tests pass (x86, ARM, RISC-V) |
 | libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
 | redis | PASS | All 3 tests pass (version, cli version, SET/GET roundtrip) |
@@ -118,7 +118,7 @@ See `git log` for full history. Key milestones:
 | kernel | PASS (x86, ARM) | Linux 6.9 kernel builds and boots on x86 and ARM; RISC-V build fails (vDSO) |
 | mquickjs-clang | PASS | All architectures pass |
 | liburing | FAIL | Builds but all 5 runtime tests fail (io_uring init returns -1) |
-| postgres | PARTIAL | 211/216 tests pass (5 remaining: strerror, stats, stack depth) |
+| postgres | PARTIAL | 210/216 tests pass (6 remaining: stack depth in plpgsql recursion) |
 
 See `ideas/project_triage.txt` for detailed failure analysis and fix priorities.
 
