@@ -25,6 +25,7 @@ pub mod narrow;
 pub mod simplify;
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
+use crate::ir::analysis::CfgAnalysis;
 use crate::ir::ir::{Instruction, IrModule, IrFunction, GlobalInit, Operand, Value};
 
 /// Run a per-function pass only on functions in the visit set.
@@ -58,6 +59,108 @@ where
         }
     }
     total
+}
+
+/// Run GVN, LICM, and IVSR with shared CFG analysis per function.
+///
+/// For each dirty function, builds CFG/dominator/loop analysis once and passes
+/// it to all three passes. This eliminates redundant analysis computation that
+/// previously occurred when each pass independently computed build_label_map +
+/// build_cfg + compute_dominators (+ find_natural_loops for LICM/IVSR).
+///
+/// Returns (gvn_changes, licm_changes, ivsr_changes).
+fn run_gvn_licm_ivsr_shared(
+    module: &mut IrModule,
+    visit: &[bool],
+    changed: &mut [bool],
+    run_gvn: bool,
+    run_licm: bool,
+    run_ivsr: bool,
+    time_passes: bool,
+    iter: usize,
+) -> (usize, usize, usize) {
+    let mut gvn_total = 0usize;
+    let mut licm_total = 0usize;
+    let mut ivsr_total = 0usize;
+
+    for (i, func) in module.functions.iter_mut().enumerate() {
+        if func.is_declaration {
+            continue;
+        }
+        if i < visit.len() && !visit[i] {
+            continue;
+        }
+        let num_blocks = func.blocks.len();
+        if num_blocks == 0 {
+            continue;
+        }
+
+        // GVN fast path: single-block functions don't need CFG analysis.
+        if num_blocks == 1 {
+            if run_gvn {
+                let n = gvn::run_gvn_function(func);
+                if n > 0 {
+                    gvn_total += n;
+                    if i < changed.len() { changed[i] = true; }
+                }
+            }
+            // LICM and IVSR need loops (>= 2 blocks), so skip.
+            continue;
+        }
+
+        // Build CFG analysis once for this function.
+        let cfg = CfgAnalysis::build(func);
+
+        // Run GVN with shared analysis.
+        if run_gvn {
+            let t0 = if time_passes { Some(std::time::Instant::now()) } else { None };
+            let n = gvn::run_gvn_with_analysis(func, &cfg);
+            if let Some(t0) = t0 {
+                eprintln!("[PASS] iter={} gvn (func {}): {:.4}s ({} changes)", iter, func.name, t0.elapsed().as_secs_f64(), n);
+            }
+            if n > 0 {
+                gvn_total += n;
+                if i < changed.len() { changed[i] = true; }
+            }
+        }
+
+        // Run LICM with shared analysis.
+        // GVN does not modify the CFG (only replaces operands), so analysis is still valid.
+        if run_licm {
+            let t0 = if time_passes { Some(std::time::Instant::now()) } else { None };
+            let n = licm::licm_with_analysis(func, &cfg);
+            if let Some(t0) = t0 {
+                eprintln!("[PASS] iter={} licm (func {}): {:.4}s ({} changes)", iter, func.name, t0.elapsed().as_secs_f64(), n);
+            }
+            if n > 0 {
+                licm_total += n;
+                if i < changed.len() { changed[i] = true; }
+            }
+        }
+
+        // Run IVSR with shared analysis.
+        // LICM hoists instructions to preheaders but does not add/remove blocks,
+        // so CFG analysis is still valid.
+        if run_ivsr {
+            let t0 = if time_passes { Some(std::time::Instant::now()) } else { None };
+            let n = iv_strength_reduce::ivsr_with_analysis(func, &cfg);
+            if let Some(t0) = t0 {
+                eprintln!("[PASS] iter={} iv_strength_reduce (func {}): {:.4}s ({} changes)", iter, func.name, t0.elapsed().as_secs_f64(), n);
+            }
+            if n > 0 {
+                ivsr_total += n;
+                if i < changed.len() { changed[i] = true; }
+            }
+        }
+    }
+
+    if time_passes {
+        eprintln!("[PASS] iter={} gvn_total: {} changes", iter, gvn_total);
+        eprintln!("[PASS] iter={} licm_total: {} changes", iter, licm_total);
+        eprintln!("[PASS] iter={} ivsr_total: {} changes", iter, ivsr_total);
+    }
+
+    (gvn_total, licm_total, ivsr_total)
 }
 
 /// Run all optimization passes on the module.
@@ -263,29 +366,29 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
             total_changes += n;
         }
 
-        // Phase 5: GVN
-        // Upstream: cfg_simplify (simpler dom tree), copy_prop (propagated values), simplify
-        if !dis_gvn && should_run!(5, 0, 1, 3) {
-            let n = timed_pass!("gvn", run_on_visited(module, &dirty, &mut changed, gvn::run_gvn_function));
-            cur_pass_changes[5] = n;
-            total_changes += n;
-        }
+        // Phases 5-6a: GVN + LICM + IVSR with shared CFG analysis.
+        //
+        // These three passes all need CFG + dominator + loop analysis. Since GVN
+        // does not modify the CFG (it only replaces instruction operands within
+        // existing blocks), the analysis computed for GVN remains valid for LICM
+        // and IVSR. We compute it once per function and share it across all three.
+        {
+            let run_gvn = !dis_gvn && should_run!(5, 0, 1, 3);
+            let run_licm = !dis_licm && should_run!(6, 0, 1, 5);
+            let run_ivsr = iter == 0 && !disabled.contains("ivsr");
 
-        // Phase 6: LICM
-        // Upstream: cfg_simplify, copy_prop, gvn (eliminated redundant loads)
-        if !dis_licm && should_run!(6, 0, 1, 5) {
-            let n = timed_pass!("licm", run_on_visited(module, &dirty, &mut changed, licm::licm_function));
-            cur_pass_changes[6] = n;
-            total_changes += n;
-        }
-
-        // Phase 6a: Induction variable strength reduction (first iteration only).
-        // Replaces expensive multiply-based array index computations (iv * stride + base)
-        // with pointer induction variables (ptr += stride). Run after LICM so that
-        // loop-invariant base pointers have been hoisted to preheaders.
-        if iter == 0 && !disabled.contains("ivsr") {
-            total_changes += timed_pass!("iv_strength_reduce",
-                run_on_visited(module, &dirty, &mut changed, iv_strength_reduce::ivsr_function));
+            if run_gvn || run_licm || run_ivsr {
+                let (gvn_n, licm_n, ivsr_n) = run_gvn_licm_ivsr_shared(
+                    module, &dirty, &mut changed,
+                    run_gvn, run_licm, run_ivsr,
+                    time_passes, iter,
+                );
+                cur_pass_changes[5] = gvn_n;
+                total_changes += gvn_n;
+                cur_pass_changes[6] = licm_n;
+                total_changes += licm_n;
+                total_changes += ivsr_n;
+            }
         }
 
         // Phase 7: If-conversion

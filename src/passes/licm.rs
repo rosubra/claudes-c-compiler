@@ -42,30 +42,25 @@ pub(crate) fn licm_function(func: &mut IrFunction) -> usize {
         return 0; // Need at least 2 blocks for a loop
     }
 
-    // Build CFG
-    let label_to_idx = analysis::build_label_map(func);
-    let (preds, succs) = analysis::build_cfg(func, &label_to_idx);
+    // Build CFG and dominator tree
+    let cfg = analysis::CfgAnalysis::build(func);
+    licm_with_analysis(func, &cfg)
+}
 
-    // Compute dominators
-    let idom = analysis::compute_dominators(num_blocks, &preds, &succs);
+/// Run LICM using pre-computed CFG analysis (avoids redundant analysis when
+/// called from a pipeline that shares analysis across GVN, LICM, IVSR).
+pub(crate) fn licm_with_analysis(func: &mut IrFunction, cfg: &analysis::CfgAnalysis) -> usize {
+    if cfg.num_blocks < 2 {
+        return 0;
+    }
 
     // Find natural loops
-    let loops = loop_analysis::find_natural_loops(num_blocks, &preds, &succs, &idom);
+    let loops = loop_analysis::find_natural_loops(cfg.num_blocks, &cfg.preds, &cfg.succs, &cfg.idom);
     if loops.is_empty() {
         return 0;
     }
 
     // Merge natural loops that share the same header block.
-    //
-    // When a loop has multiple back edges (e.g., `continue` in a while-loop
-    // plus `break` from inner switch cases that re-enter the loop), each back
-    // edge produces a separate NaturalLoop whose body is only the blocks
-    // reachable from that specific back edge. Processing these subsets
-    // independently is unsound: a small subset may lack stores or calls that
-    // exist in the full loop, causing LICM to incorrectly determine that a
-    // load is safe to hoist.
-    //
-    // The fix: take the union of all loop bodies for the same header.
     let loops = loop_analysis::merge_loops_by_header(loops);
 
     // Pre-compute function-level alloca analysis for load hoisting.
@@ -74,12 +69,11 @@ pub(crate) fn licm_function(func: &mut IrFunction) -> usize {
     let mut total_hoisted = 0;
 
     // Process loops from innermost to outermost (smaller loops first).
-    // This ensures inner-loop invariants are hoisted before outer-loop analysis.
     let mut sorted_loops = loops;
     sorted_loops.sort_by_key(|l| l.body.len());
 
     for natural_loop in &sorted_loops {
-        total_hoisted += hoist_loop_invariants(func, natural_loop, &preds, &alloca_info);
+        total_hoisted += hoist_loop_invariants(func, natural_loop, &cfg.preds, &alloca_info);
     }
 
     total_hoisted

@@ -329,3 +329,41 @@ pub fn build_dom_tree_children(num_blocks: usize, idom: &[usize]) -> Vec<Vec<usi
     }
     children
 }
+
+// ── Cached analysis bundle ──────────────────────────────────────────────────
+
+/// Pre-computed CFG analysis results shared across multiple passes within
+/// a single pipeline iteration.
+///
+/// GVN, LICM, and IVSR all need the same CFG, dominator, and loop analysis.
+/// Since GVN does not modify the CFG (it only replaces instruction operands),
+/// these results remain valid across all three passes. Computing them once
+/// and sharing avoids redundant `build_cfg` + `compute_dominators` +
+/// `find_natural_loops` calls per function per iteration.
+pub struct CfgAnalysis {
+    pub label_to_idx: FxHashMap<BlockId, usize>,
+    pub preds: FlatAdj,
+    pub succs: FlatAdj,
+    pub idom: Vec<usize>,
+    pub dom_children: Vec<Vec<usize>>,
+    pub num_blocks: usize,
+}
+
+impl CfgAnalysis {
+    /// Build a complete CFG analysis bundle for a function.
+    pub fn build(func: &IrFunction) -> Self {
+        let num_blocks = func.blocks.len();
+        let label_to_idx = build_label_map(func);
+        let (preds, succs) = build_cfg(func, &label_to_idx);
+        let idom = compute_dominators(num_blocks, &preds, &succs);
+        let dom_children = build_dom_tree_children(num_blocks, &idom);
+        CfgAnalysis {
+            label_to_idx,
+            preds,
+            succs,
+            idom,
+            dom_children,
+            num_blocks,
+        }
+    }
+}

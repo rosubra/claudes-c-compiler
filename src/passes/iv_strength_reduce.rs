@@ -63,15 +63,20 @@ pub(crate) fn ivsr_function(func: &mut IrFunction) -> usize {
         return 0;
     }
 
-    // Build CFG
-    let label_to_idx = analysis::build_label_map(func);
-    let (preds, succs) = analysis::build_cfg(func, &label_to_idx);
+    // Build CFG and dominator tree
+    let cfg = analysis::CfgAnalysis::build(func);
+    ivsr_with_analysis(func, &cfg)
+}
 
-    // Compute dominators
-    let idom = analysis::compute_dominators(num_blocks, &preds, &succs);
+/// Run IVSR using pre-computed CFG analysis (avoids redundant analysis when
+/// called from a pipeline that shares analysis across GVN, LICM, IVSR).
+pub(crate) fn ivsr_with_analysis(func: &mut IrFunction, cfg: &analysis::CfgAnalysis) -> usize {
+    if cfg.num_blocks < 2 {
+        return 0;
+    }
 
     // Find natural loops
-    let loops = loop_analysis::find_natural_loops(num_blocks, &preds, &succs, &idom);
+    let loops = loop_analysis::find_natural_loops(cfg.num_blocks, &cfg.preds, &cfg.succs, &cfg.idom);
     if loops.is_empty() {
         return 0;
     }
@@ -86,7 +91,7 @@ pub(crate) fn ivsr_function(func: &mut IrFunction) -> usize {
     sorted_loops.sort_by_key(|l| l.body.len());
 
     for natural_loop in &sorted_loops {
-        total_reductions += reduce_loop(func, natural_loop, &preds);
+        total_reductions += reduce_loop(func, natural_loop, &cfg.preds);
     }
 
     total_reductions

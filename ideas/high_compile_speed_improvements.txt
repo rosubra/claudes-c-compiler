@@ -21,9 +21,10 @@ Current bottleneck breakdown (from perf profiling):
    - passes::div_by_const
 
    PARTIALLY FIXED: build_cfg now uses FlatAdj (CSR format) with u32 indices,
-   reducing per-call allocations from 2*n+2 to 4. Further improvements possible:
+   reducing per-call allocations from 2*n+2 to 4. CFG/dominator analysis is now
+   shared across GVN/LICM/IVSR via CfgAnalysis (eliminates redundant build_cfg +
+   compute_dominators calls). Further improvements possible:
    - Use arena allocation or bump allocators for per-function data
-   - Cache CFG/dominator results between passes that don't modify the CFG
    - Reuse Vec buffers across function invocations
 
 3. STRING COMPARISON (3.39% of total, ~0.09s)
@@ -41,9 +42,10 @@ Current bottleneck breakdown (from perf profiling):
    GVN is the most expensive single optimization pass. Each invocation
    builds CFG + dominators from scratch.
 
-   FIX: Cache CFG/dominator analysis between GVN, LICM, and if_convert
-   (they run consecutively with no CFG-modifying pass between them).
-   Could save ~30% of the per-iteration pass cost.
+   FIXED: CfgAnalysis struct caches CFG/dominator/dom_tree analysis and
+   shares it across GVN, LICM, and IVSR within each pipeline iteration.
+   Eliminates 2 redundant build_cfg + compute_dominators calls per function
+   per iteration.
 
 5. PEEPHOLE OPTIMIZER (1.47% on eliminate_dead_stores)
    The dead store elimination in the peephole has O(n^2) behavior due

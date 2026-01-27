@@ -63,54 +63,51 @@ pub(crate) fn run_gvn_function(func: &mut IrFunction) -> usize {
         return 0;
     }
 
+    // Fast path for single-block functions: skip CFG/dominator computation.
+    if num_blocks == 1 {
+        return run_gvn_single_block(func);
+    }
+
+    // Build CFG and dominator tree
+    let cfg = analysis::CfgAnalysis::build(func);
+    run_gvn_with_analysis(func, &cfg)
+}
+
+/// Run GVN using pre-computed CFG analysis (avoids redundant analysis when
+/// called from a pipeline that shares analysis across GVN, LICM, IVSR).
+pub(crate) fn run_gvn_with_analysis(func: &mut IrFunction, cfg: &analysis::CfgAnalysis) -> usize {
+    let num_blocks = func.blocks.len();
+    if num_blocks == 0 {
+        return 0;
+    }
+
+    // Fast path for single-block functions.
+    if num_blocks == 1 {
+        return run_gvn_single_block(func);
+    }
+
     // Allocate value number table indexed by Value ID
     let max_id = func.max_value_id() as usize;
     let mut value_numbers: Vec<u32> = vec![u32::MAX; max_id + 1];
     let mut next_vn: u32 = 0;
 
-    // Scoped expression-to-value map using a rollback log.
-    // Pure expressions (BinOp, Cmp, etc.) map ExprKey -> Value.
-    // Load expressions also store a "load generation" tag: the load entry is
-    // only valid if its generation matches the current load_generation counter.
-    // On memory clobber, we simply bump load_generation (O(1)) instead of
-    // iterating all accumulated load keys to remove them (O(n)).
     let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
     let mut load_expr_to_value: FxHashMap<ExprKey, (Value, u32)> = FxHashMap::default();
     let mut load_generation: u32 = 0;
 
-    // Fast path for single-block functions: skip CFG/dominator computation
-    // entirely. We only need to do CSE within the single block.
-    if num_blocks == 1 {
-        let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
-        let mut load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)> = Vec::new();
-        let mut vn_log: Vec<(usize, u32)> = Vec::new();
-        return process_block(
-            0, func, &mut value_numbers, &mut next_vn,
-            &mut expr_to_value, &mut load_expr_to_value, &mut load_generation,
-            &mut rollback_log, &mut load_rollback_log, &mut vn_log,
-        );
-    }
-
-    // Build CFG and dominator tree
-    let label_to_idx = analysis::build_label_map(func);
-    let (preds, succs) = analysis::build_cfg(func, &label_to_idx);
-    let idom = analysis::compute_dominators(num_blocks, &preds, &succs);
-    let dom_children = analysis::build_dom_tree_children(num_blocks, &idom);
-
     // Rollback log: tracks (key, old_value) pairs pushed at each scope
     let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
     let mut load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)> = Vec::new();
-    // Track value_numbers slots assigned, for rollback
     let mut vn_log: Vec<(usize, u32)> = Vec::new();
 
     let mut total_eliminated = 0;
 
     // DFS over the dominator tree
     gvn_dfs(
-        0, // start from entry block
+        0,
         func,
-        &dom_children,
-        &preds,
+        &cfg.dom_children,
+        &cfg.preds,
         &mut value_numbers,
         &mut next_vn,
         &mut expr_to_value,
@@ -123,6 +120,24 @@ pub(crate) fn run_gvn_function(func: &mut IrFunction) -> usize {
     );
 
     total_eliminated
+}
+
+/// Fast path for single-block functions: skip CFG/dominator computation.
+fn run_gvn_single_block(func: &mut IrFunction) -> usize {
+    let max_id = func.max_value_id() as usize;
+    let mut value_numbers: Vec<u32> = vec![u32::MAX; max_id + 1];
+    let mut next_vn: u32 = 0;
+    let mut expr_to_value: FxHashMap<ExprKey, Value> = FxHashMap::default();
+    let mut load_expr_to_value: FxHashMap<ExprKey, (Value, u32)> = FxHashMap::default();
+    let mut load_generation: u32 = 0;
+    let mut rollback_log: Vec<(ExprKey, Option<Value>)> = Vec::new();
+    let mut load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)> = Vec::new();
+    let mut vn_log: Vec<(usize, u32)> = Vec::new();
+    process_block(
+        0, func, &mut value_numbers, &mut next_vn,
+        &mut expr_to_value, &mut load_expr_to_value, &mut load_generation,
+        &mut rollback_log, &mut load_rollback_log, &mut vn_log,
+    )
 }
 
 /// Recursive DFS over the dominator tree for GVN.
