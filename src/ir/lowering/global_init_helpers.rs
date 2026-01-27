@@ -115,6 +115,8 @@ fn expr_might_be_addr(expr: &Expr, enum_constants: &FxHashMap<String, i64>) -> b
         // Identifiers that are enum constants are compile-time integer values, not addresses.
         // Only treat non-enum identifiers as potential addresses (array/function names).
         Expr::Identifier(name, _) => !enum_constants.contains_key(name),
+        // Member access might be array-to-pointer decay (e.g., s.arr where arr is an array field)
+        Expr::MemberAccess(_, _, _) => true,
         // Cast of an address expression
         Expr::Cast(_, inner, _) => expr_might_be_addr(inner, enum_constants),
         // Binary ops on addresses (e.g., &x + offset, arr + n)
