@@ -1,0 +1,13 @@
+Fix: asm goto target blocks incorrectly removed by dead block elimination
+
+The CFG simplify pass had a bug where asm goto target blocks were removed when
+the asm had unsatisfiable immediate constraints (e.g., in standalone bodies of
+static __always_inline functions where "i" constraint parameters can't be
+resolved). The dead block elimination would suppress goto label reachability,
+but the backend still emits the asm body with $0 placeholders, causing the
+linker to fail with "undefined reference to '.L30'" when the asm template
+references the deleted label in .pushsection directives like __jump_table.
+
+Fix: Always mark asm goto target blocks as reachable, since the backend always
+emits the asm body. Also added defensive cleanup of dangling goto_labels in
+InlineAsm instructions when blocks are removed for any reason.
