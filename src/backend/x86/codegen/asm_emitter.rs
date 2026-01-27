@@ -276,22 +276,26 @@ impl InlineAsmEmitter for X86Codegen {
             }
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    // Use type-appropriate load to avoid reading garbage from
-                    // stack slots of smaller-than-8-byte variables.
-                    // Both alloca and non-alloca values need the VALUE loaded
-                    // into the register, not the address. (Alloca stack slots
-                    // directly store the variable's value.)
-                    let load_instr = Self::mov_load_for_type(ty);
-                    let dest_reg = match ty {
-                        IrType::U32 | IrType::F32 => Self::reg_to_32(reg),
-                        _ => format!("%{}", reg),
-                    };
-                    let dest_reg_str = if matches!(ty, IrType::U32 | IrType::F32) {
-                        format!("%{}", dest_reg)
+                    if self.state.is_alloca(v.0) {
+                        // Alloca: the IR value represents the ADDRESS of the
+                        // allocated memory. Use leaq to compute the address,
+                        // not movq which would load the contents.
+                        self.state.out.emit_instr_rbp_reg("    leaq", slot.0, reg);
                     } else {
-                        dest_reg
-                    };
-                    self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg_str));
+                        // Non-alloca: use type-appropriate load to avoid reading
+                        // garbage from stack slots of smaller-than-8-byte variables.
+                        let load_instr = Self::mov_load_for_type(ty);
+                        let dest_reg = match ty {
+                            IrType::U32 | IrType::F32 => Self::reg_to_32(reg),
+                            _ => format!("%{}", reg),
+                        };
+                        let dest_reg_str = if matches!(ty, IrType::U32 | IrType::F32) {
+                            format!("%{}", dest_reg)
+                        } else {
+                            dest_reg
+                        };
+                        self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg_str));
+                    }
                 }
             }
         }

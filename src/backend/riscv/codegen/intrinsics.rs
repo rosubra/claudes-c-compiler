@@ -239,6 +239,25 @@ impl RiscvCodegen {
                     self.store_t0_to(d);
                 }
             }
+            // x86-specific SSE/AES-NI/CLMUL intrinsics - these are x86-only and should
+            // not appear in RISC-V codegen in practice. Cross-compiled code that conditionally
+            // uses these behind #ifdef __x86_64__ will have the calls dead-code eliminated.
+            // TODO: consider emitting a runtime trap instead of silent zeros
+            IntrinsicOp::Aesenc128 | IntrinsicOp::Aesenclast128
+            | IntrinsicOp::Aesdec128 | IntrinsicOp::Aesdeclast128
+            | IntrinsicOp::Aesimc128 | IntrinsicOp::Aeskeygenassist128
+            | IntrinsicOp::Pclmulqdq128
+            | IntrinsicOp::Pslldqi128 | IntrinsicOp::Psrldqi128
+            | IntrinsicOp::Psllqi128 | IntrinsicOp::Psrlqi128
+            | IntrinsicOp::Pshufd128 | IntrinsicOp::Loadldi128 => {
+                // x86-only: zero dest if present
+                if let Some(dptr) = dest_ptr {
+                    if let Some(slot) = self.state.get_slot(dptr.0) {
+                        self.state.emit_fmt(format_args!("    sd zero, {}(sp)", slot.0));
+                        self.state.emit_fmt(format_args!("    sd zero, {}(sp)", slot.0 + 8));
+                    }
+                }
+            }
         }
     }
 

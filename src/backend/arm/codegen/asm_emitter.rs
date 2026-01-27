@@ -177,10 +177,13 @@ impl InlineAsmEmitter for ArmCodegen {
                         // Load to scratch first, then mov to sp.
                         self.emit_load_from_sp("x9", slot.0, "ldr");
                         self.state.emit("    mov sp, x9");
+                    } else if self.state.is_alloca(v.0) {
+                        // Alloca: the IR value represents the ADDRESS of the
+                        // allocated memory. Compute its address instead of
+                        // loading the contents.
+                        self.emit_add_sp_offset(reg, slot.0);
                     } else {
-                        // Both alloca and non-alloca: load the VALUE from
-                        // the stack slot. For register constraints, we need
-                        // the value, not the address.
+                        // Non-alloca: load the value from the stack slot.
                         self.emit_load_from_sp(reg, slot.0, "ldr");
                     }
                 }

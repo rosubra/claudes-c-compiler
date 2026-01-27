@@ -807,6 +807,25 @@ impl X86Codegen {
         }
     }
 
+    /// Extract an immediate integer value from an operand.
+    /// Used for SSE/AES instructions that require compile-time immediate operands.
+    fn operand_to_imm_i64(&self, op: &Operand) -> i64 {
+        match op {
+            Operand::Const(c) => match c {
+                IrConst::I8(v) => *v as i64,
+                IrConst::I16(v) => *v as i64,
+                IrConst::I32(v) => *v as i64,
+                IrConst::I64(v) => *v,
+                _ => 0,
+            },
+            Operand::Value(_) => {
+                // TODO: this shouldn't happen for compile-time immediate arguments;
+                // the frontend should always fold these to constants.
+                0
+            }
+        }
+    }
+
     /// Load a float operand into %xmm0. Handles both Value operands (from stack)
     /// and float constants (loaded via their bit pattern into rax first).
     fn float_operand_to_xmm0(&mut self, op: &Operand, is_f32: bool) {
@@ -1052,6 +1071,119 @@ impl X86Codegen {
                 self.state.emit("    movd %xmm0, %eax");
                 if let Some(d) = dest {
                     self.store_rax_to(d);
+                }
+            }
+            // AES-NI binary ops: aesenc, aesenclast, aesdec, aesdeclast
+            IntrinsicOp::Aesenc128 | IntrinsicOp::Aesenclast128
+            | IntrinsicOp::Aesdec128 | IntrinsicOp::Aesdeclast128 => {
+                if let Some(dptr) = dest_ptr {
+                    let inst = match op {
+                        IntrinsicOp::Aesenc128 => "aesenc",
+                        IntrinsicOp::Aesenclast128 => "aesenclast",
+                        IntrinsicOp::Aesdec128 => "aesdec",
+                        IntrinsicOp::Aesdeclast128 => "aesdeclast",
+                        _ => unreachable!(),
+                    };
+                    self.emit_sse_binary_128(dptr, args, inst);
+                }
+            }
+            // AES-NI unary: aesimc
+            IntrinsicOp::Aesimc128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.state.emit("    aesimc %xmm0, %xmm0");
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // AES-NI: aeskeygenassist with immediate
+            IntrinsicOp::Aeskeygenassist128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    // args[1] is the immediate value
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    aeskeygenassist ${}, %xmm0, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // CLMUL: pclmulqdq with immediate
+            IntrinsicOp::Pclmulqdq128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.operand_to_reg(&args[1], "rcx");
+                    self.state.emit("    movdqu (%rcx), %xmm1");
+                    let imm = self.operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pclmulqdq ${}, %xmm1, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // SSE2 byte shift left (PSLLDQ)
+            IntrinsicOp::Pslldqi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pslldq ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // SSE2 byte shift right (PSRLDQ)
+            IntrinsicOp::Psrldqi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrldq ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // SSE2 bit shift left per 64-bit lane (PSLLQ)
+            IntrinsicOp::Psllqi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psllq ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // SSE2 bit shift right per 64-bit lane (PSRLQ)
+            IntrinsicOp::Psrlqi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    psrlq ${}, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // SSE2 shuffle 32-bit integers (PSHUFD)
+            IntrinsicOp::Pshufd128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    let imm = self.operand_to_imm_i64(&args[1]);
+                    self.state.emit_fmt(format_args!("    pshufd ${}, %xmm0, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            // Load low 64 bits, zero upper (MOVQ)
+            IntrinsicOp::Loadldi128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movq (%rax), %xmm0");
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
                 }
             }
         }

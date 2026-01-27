@@ -499,7 +499,20 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Pand128
             | BuiltinIntrinsic::X86Pxor128
             | BuiltinIntrinsic::X86Set1Epi8
-            | BuiltinIntrinsic::X86Set1Epi32 => {
+            | BuiltinIntrinsic::X86Set1Epi32
+            | BuiltinIntrinsic::X86Aesenc128
+            | BuiltinIntrinsic::X86Aesenclast128
+            | BuiltinIntrinsic::X86Aesdec128
+            | BuiltinIntrinsic::X86Aesdeclast128
+            | BuiltinIntrinsic::X86Aesimc128
+            | BuiltinIntrinsic::X86Aeskeygenassist128
+            | BuiltinIntrinsic::X86Pclmulqdq128
+            | BuiltinIntrinsic::X86Pslldqi128
+            | BuiltinIntrinsic::X86Psrldqi128
+            | BuiltinIntrinsic::X86Psllqi128
+            | BuiltinIntrinsic::X86Psrlqi128
+            | BuiltinIntrinsic::X86Pshufd128
+            | BuiltinIntrinsic::X86Loadldi128 => {
                 let sse_op = match intrinsic {
                     BuiltinIntrinsic::X86Loaddqu => IntrinsicOp::Loaddqu,
                     BuiltinIntrinsic::X86Pcmpeqb128 => IntrinsicOp::Pcmpeqb128,
@@ -510,6 +523,19 @@ impl Lowerer {
                     BuiltinIntrinsic::X86Pxor128 => IntrinsicOp::Pxor128,
                     BuiltinIntrinsic::X86Set1Epi8 => IntrinsicOp::SetEpi8,
                     BuiltinIntrinsic::X86Set1Epi32 => IntrinsicOp::SetEpi32,
+                    BuiltinIntrinsic::X86Aesenc128 => IntrinsicOp::Aesenc128,
+                    BuiltinIntrinsic::X86Aesenclast128 => IntrinsicOp::Aesenclast128,
+                    BuiltinIntrinsic::X86Aesdec128 => IntrinsicOp::Aesdec128,
+                    BuiltinIntrinsic::X86Aesdeclast128 => IntrinsicOp::Aesdeclast128,
+                    BuiltinIntrinsic::X86Aesimc128 => IntrinsicOp::Aesimc128,
+                    BuiltinIntrinsic::X86Aeskeygenassist128 => IntrinsicOp::Aeskeygenassist128,
+                    BuiltinIntrinsic::X86Pclmulqdq128 => IntrinsicOp::Pclmulqdq128,
+                    BuiltinIntrinsic::X86Pslldqi128 => IntrinsicOp::Pslldqi128,
+                    BuiltinIntrinsic::X86Psrldqi128 => IntrinsicOp::Psrldqi128,
+                    BuiltinIntrinsic::X86Psllqi128 => IntrinsicOp::Psllqi128,
+                    BuiltinIntrinsic::X86Psrlqi128 => IntrinsicOp::Psrlqi128,
+                    BuiltinIntrinsic::X86Pshufd128 => IntrinsicOp::Pshufd128,
+                    BuiltinIntrinsic::X86Loadldi128 => IntrinsicOp::Loadldi128,
                     _ => unreachable!(),
                 };
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();

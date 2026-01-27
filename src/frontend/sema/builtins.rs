@@ -252,6 +252,23 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_ia32_crc32si", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_32));
     m.insert("__builtin_ia32_crc32di", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_64));
 
+    // x86 AES-NI builtins
+    m.insert("__builtin_ia32_aesenc128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesenc128));
+    m.insert("__builtin_ia32_aesenclast128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesenclast128));
+    m.insert("__builtin_ia32_aesdec128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesdec128));
+    m.insert("__builtin_ia32_aesdeclast128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesdeclast128));
+    m.insert("__builtin_ia32_aesimc128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesimc128));
+    m.insert("__builtin_ia32_aeskeygenassist128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aeskeygenassist128));
+    // x86 CLMUL
+    m.insert("__builtin_ia32_pclmulqdq128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pclmulqdq128));
+    // x86 SSE2 shift/shuffle builtins
+    m.insert("__builtin_ia32_pslldqi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pslldqi128));
+    m.insert("__builtin_ia32_psrldqi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrldqi128));
+    m.insert("__builtin_ia32_psllqi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psllqi128));
+    m.insert("__builtin_ia32_psrlqi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrlqi128));
+    m.insert("__builtin_ia32_pshufd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufd128));
+    m.insert("__builtin_ia32_loadldi128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loadldi128));
+
     // Direct _mm_* function name mappings (bypass wrapper functions, avoid ABI issues)
     m.insert("_mm_loadu_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loaddqu));
     m.insert("_mm_load_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loaddqu));
@@ -280,6 +297,20 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_crc32_u16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_16));
     m.insert("_mm_crc32_u32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_32));
     m.insert("_mm_crc32_u64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Crc32_64));
+    // Direct _mm_* AES-NI/CLMUL/shift mappings
+    m.insert("_mm_aesenc_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesenc128));
+    m.insert("_mm_aesenclast_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesenclast128));
+    m.insert("_mm_aesdec_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesdec128));
+    m.insert("_mm_aesdeclast_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesdeclast128));
+    m.insert("_mm_aesimc_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aesimc128));
+    m.insert("_mm_aeskeygenassist_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Aeskeygenassist128));
+    m.insert("_mm_clmulepi64_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pclmulqdq128));
+    m.insert("_mm_slli_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pslldqi128));
+    m.insert("_mm_srli_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrldqi128));
+    m.insert("_mm_slli_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psllqi128));
+    m.insert("_mm_srli_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psrlqi128));
+    m.insert("_mm_shuffle_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufd128));
+    m.insert("_mm_loadl_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Loadldi128));
 
     m
 });
@@ -391,6 +422,22 @@ pub enum BuiltinIntrinsic {
     X86Crc32_16,
     X86Crc32_32,
     X86Crc32_64,
+    // AES-NI intrinsics
+    X86Aesenc128,
+    X86Aesenclast128,
+    X86Aesdec128,
+    X86Aesdeclast128,
+    X86Aesimc128,
+    X86Aeskeygenassist128,
+    // CLMUL
+    X86Pclmulqdq128,
+    // SSE2 shift/shuffle
+    X86Pslldqi128,     // _mm_slli_si128 (byte shift left)
+    X86Psrldqi128,     // _mm_srli_si128 (byte shift right)
+    X86Psllqi128,      // _mm_slli_epi64 (bit shift left per 64-bit lane)
+    X86Psrlqi128,      // _mm_srli_epi64 (bit shift right per 64-bit lane)
+    X86Pshufd128,      // _mm_shuffle_epi32
+    X86Loadldi128,     // _mm_loadl_epi64 (load low 64 bits)
 }
 
 impl BuiltinInfo {

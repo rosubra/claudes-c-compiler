@@ -1193,6 +1193,40 @@ pub enum IntrinsicOp {
     /// args[0] = input float value; dest = |x|
     FabsF32,
     FabsF64,
+    /// AES-NI: aesenc (single round encrypt)
+    /// args[0] = state ptr, args[1] = round key ptr; dest_ptr = result ptr
+    Aesenc128,
+    /// AES-NI: aesenclast (final round encrypt)
+    Aesenclast128,
+    /// AES-NI: aesdec (single round decrypt)
+    Aesdec128,
+    /// AES-NI: aesdeclast (final round decrypt)
+    Aesdeclast128,
+    /// AES-NI: aesimc (inverse mix columns)
+    /// args[0] = input ptr; dest_ptr = result ptr
+    Aesimc128,
+    /// AES-NI: aeskeygenassist with immediate
+    /// args[0] = input ptr, args[1] = imm8; dest_ptr = result ptr
+    Aeskeygenassist128,
+    /// CLMUL: pclmulqdq with immediate
+    /// args[0] = src1 ptr, args[1] = src2 ptr, args[2] = imm8; dest_ptr = result ptr
+    Pclmulqdq128,
+    /// SSE2 byte shift left (PSLLDQ): shift by imm8 bytes
+    /// args[0] = src ptr, args[1] = imm8; dest_ptr = result ptr
+    Pslldqi128,
+    /// SSE2 byte shift right (PSRLDQ): shift by imm8 bytes
+    Psrldqi128,
+    /// SSE2 bit shift left per 64-bit lane (PSLLQ)
+    /// args[0] = src ptr, args[1] = count; dest_ptr = result ptr
+    Psllqi128,
+    /// SSE2 bit shift right per 64-bit lane (PSRLQ)
+    Psrlqi128,
+    /// SSE2 shuffle 32-bit integers (PSHUFD)
+    /// args[0] = src ptr, args[1] = imm8; dest_ptr = result ptr
+    Pshufd128,
+    /// Load low 64 bits, zero upper (MOVQ)
+    /// args[0] = src ptr; dest_ptr = result ptr
+    Loadldi128,
 }
 
 impl IntrinsicOp {
@@ -1201,7 +1235,14 @@ impl IntrinsicOp {
     pub fn is_pure(&self) -> bool {
         matches!(self,
             IntrinsicOp::SqrtF32 | IntrinsicOp::SqrtF64 |
-            IntrinsicOp::FabsF32 | IntrinsicOp::FabsF64
+            IntrinsicOp::FabsF32 | IntrinsicOp::FabsF64 |
+            IntrinsicOp::Aesenc128 | IntrinsicOp::Aesenclast128 |
+            IntrinsicOp::Aesdec128 | IntrinsicOp::Aesdeclast128 |
+            IntrinsicOp::Aesimc128 | IntrinsicOp::Aeskeygenassist128 |
+            IntrinsicOp::Pclmulqdq128 |
+            IntrinsicOp::Pslldqi128 | IntrinsicOp::Psrldqi128 |
+            IntrinsicOp::Psllqi128 | IntrinsicOp::Psrlqi128 |
+            IntrinsicOp::Pshufd128
         )
     }
 }

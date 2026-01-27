@@ -132,6 +132,35 @@ _mm_xor_si128(__m128i __a, __m128i __b)
                         __a.__val[1] ^ __b.__val[1] } };
 }
 
+/* === Shift operations === */
+
+/* Byte-level shift left (PSLLDQ): shift __a left by __N bytes, zero-fill */
+#define _mm_slli_si128(a, N) \
+    ((__m128i){ { __builtin_ia32_pslldqi128((a), (N)) } })
+
+/* Byte-level shift right (PSRLDQ): shift __a right by __N bytes, zero-fill */
+#define _mm_srli_si128(a, N) \
+    ((__m128i){ { __builtin_ia32_psrldqi128((a), (N)) } })
+
+/* Bit-level shift left on each 64-bit element (PSLLQ) */
+#define _mm_slli_epi64(a, count) \
+    ((__m128i){ { __builtin_ia32_psllqi128((a), (count)) } })
+
+/* Bit-level shift right on each 64-bit element (PSRLQ) */
+#define _mm_srli_epi64(a, count) \
+    ((__m128i){ { __builtin_ia32_psrlqi128((a), (count)) } })
+
+/* Shuffle 32-bit integers (PSHUFD) */
+#define _mm_shuffle_epi32(a, imm) \
+    ((__m128i){ { __builtin_ia32_pshufd128((a), (imm)) } })
+
+/* Load low 64 bits into lower half, zero upper half (MOVQ) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_loadl_epi64(__m128i const *__p)
+{
+    return (__m128i){ { __builtin_ia32_loadldi128(__p) } };
+}
+
 /* === Miscellaneous === */
 
 static __inline__ int __attribute__((__always_inline__))
