@@ -1109,11 +1109,18 @@ impl ArchCodegen for RiscvCodegen {
     /// For F128 runtime values (f64 approx in t0), extends to f128 via __extenddftf2.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
         if ty == IrType::F128 {
+            let is_indirect = !self.state.is_alloca(ptr.0);
             let addr = self.state.resolve_slot_addr(ptr.0);
             if let Some(addr) = addr {
                 match addr {
-                    SlotAddr::Direct(slot) => {
+                    SlotAddr::Direct(slot) if !is_indirect => {
+                        // Alloca: the F128 data lives directly at the slot.
                         self.emit_f128_store_to_slot(val, slot);
+                    }
+                    SlotAddr::Direct(slot) => {
+                        // Non-alloca pointer (e.g. GEP result): the slot holds
+                        // an 8-byte pointer; dereference it to store F128.
+                        self.emit_f128_store_indirect(val, slot, ptr.0);
                     }
                     SlotAddr::OverAligned(slot, id) => {
                         // Compute aligned address into t5, then store 16 bytes
@@ -1147,9 +1154,17 @@ impl ArchCodegen for RiscvCodegen {
             if let Some(addr) = addr {
                 // Load the full 16-byte f128 from the source into a0:a1
                 match addr {
-                    SlotAddr::Direct(slot) => {
+                    SlotAddr::Direct(slot) if !is_indirect => {
+                        // Alloca: the F128 data lives directly at the slot.
                         self.emit_load_from_s0("a0", slot.0, "ld");
                         self.emit_load_from_s0("a1", slot.0 + 8, "ld");
+                    }
+                    SlotAddr::Direct(slot) => {
+                        // Non-alloca pointer (e.g. GEP result): the slot holds
+                        // an 8-byte pointer that must be dereferenced to get F128.
+                        self.emit_load_from_s0("t5", slot.0, "ld");
+                        self.state.emit("    ld a0, 0(t5)");
+                        self.state.emit("    ld a1, 8(t5)");
                     }
                     SlotAddr::OverAligned(slot, id) => {
                         self.emit_alloca_aligned_addr(slot, id);
@@ -1177,17 +1192,38 @@ impl ArchCodegen for RiscvCodegen {
     /// Override emit_store_with_const_offset for F128: store full 16 bytes at offset.
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
         if ty == IrType::F128 {
+            let is_indirect = !self.state.is_alloca(base.0);
+
+            // Check if the base pointer lives in a callee-saved register.
+            if let Some(&reg) = self.reg_assignments.get(&base.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mv t5, {}", reg_name));
+                if offset != 0 {
+                    self.emit_add_offset_to_addr_reg(offset);
+                }
+                self.emit_f128_store_to_addr_in_t5(val);
+                return;
+            }
+
             let addr = self.state.resolve_slot_addr(base.0);
             if let Some(addr) = addr {
                 match addr {
-                    SlotAddr::Direct(slot) => {
+                    SlotAddr::Direct(slot) if !is_indirect => {
+                        // Alloca: the F128 data lives directly at the slot.
                         let folded_slot = StackSlot(slot.0 + offset);
                         self.emit_f128_store_to_slot(val, folded_slot);
+                    }
+                    SlotAddr::Direct(slot) => {
+                        // Non-alloca pointer: dereference, then add offset.
+                        self.emit_load_from_s0("t5", slot.0, "ld");
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.emit_f128_store_to_addr_in_t5(val);
                     }
                     SlotAddr::OverAligned(slot, id) => {
                         self.emit_alloca_aligned_addr(slot, id);
                         self.emit_add_offset_to_addr_reg(offset);
-                        // t5 now points to the target address
                         self.emit_f128_store_to_addr_in_t5(val);
                     }
                     SlotAddr::Indirect(slot) => {
@@ -1195,7 +1231,6 @@ impl ArchCodegen for RiscvCodegen {
                         if offset != 0 {
                             self.emit_add_offset_to_addr_reg(offset);
                         }
-                        // t5 now points to the target address
                         self.emit_f128_store_to_addr_in_t5(val);
                     }
                 }
@@ -1234,29 +1269,54 @@ impl ArchCodegen for RiscvCodegen {
     fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
         if ty == IrType::F128 {
             // Track the source alloca + offset for full-precision comparison access.
-            // base is always an alloca here (const-offset GEP was folded), so not indirect.
-            self.f128_load_sources.insert(dest.0, (base.0, offset, false));
+            let is_indirect = !self.state.is_alloca(base.0);
+            self.f128_load_sources.insert(dest.0, (base.0, offset, is_indirect));
 
-            let addr = self.state.resolve_slot_addr(base.0);
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::Direct(slot) => {
-                        let folded_slot = StackSlot(slot.0 + offset);
-                        self.emit_f128_load_from_slot(folded_slot);
-                    }
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_add_offset_to_addr_reg(offset);
-                        self.emit_f128_load_from_addr_in_t5();
-                    }
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_load_ptr_from_slot(slot, base.0);
-                        if offset != 0 {
-                            self.emit_add_offset_to_addr_reg(offset);
-                        }
-                        self.emit_f128_load_from_addr_in_t5();
-                    }
+            // Check if the base pointer lives in a callee-saved register.
+            let loaded = if let Some(&reg) = self.reg_assignments.get(&base.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mv t5, {}", reg_name));
+                if offset != 0 {
+                    self.emit_add_offset_to_addr_reg(offset);
                 }
+                self.emit_f128_load_from_addr_in_t5();
+                true
+            } else {
+                let addr = self.state.resolve_slot_addr(base.0);
+                if let Some(addr) = addr {
+                    match addr {
+                        SlotAddr::Direct(slot) if !is_indirect => {
+                            // Alloca: the F128 data lives directly at the slot.
+                            let folded_slot = StackSlot(slot.0 + offset);
+                            self.emit_f128_load_from_slot(folded_slot);
+                        }
+                        SlotAddr::Direct(slot) => {
+                            // Non-alloca pointer: dereference, then add offset.
+                            self.emit_load_from_s0("t5", slot.0, "ld");
+                            if offset != 0 {
+                                self.emit_add_offset_to_addr_reg(offset);
+                            }
+                            self.emit_f128_load_from_addr_in_t5();
+                        }
+                        SlotAddr::OverAligned(slot, id) => {
+                            self.emit_alloca_aligned_addr(slot, id);
+                            self.emit_add_offset_to_addr_reg(offset);
+                            self.emit_f128_load_from_addr_in_t5();
+                        }
+                        SlotAddr::Indirect(slot) => {
+                            self.emit_load_ptr_from_slot(slot, base.0);
+                            if offset != 0 {
+                                self.emit_add_offset_to_addr_reg(offset);
+                            }
+                            self.emit_f128_load_from_addr_in_t5();
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if loaded {
                 // t0 now has f64 bits from __trunctfdf2
                 self.store_t0_to(dest);
             }

@@ -1136,6 +1136,19 @@ impl ArmCodegen {
         }
     }
 
+    /// Add an immediate offset to x17. Used by F128 load/store paths that
+    /// use x17 as the address register instead of x9 (which emit_add_offset_to_addr_reg uses).
+    fn emit_add_imm_to_x17(&mut self, offset: i64) {
+        if offset >= 0 && offset <= 4095 {
+            self.state.emit_fmt(format_args!("    add x17, x17, #{}", offset));
+        } else if offset < 0 && (-offset) <= 4095 {
+            self.state.emit_fmt(format_args!("    sub x17, x17, #{}", -offset));
+        } else {
+            // Use x9 as a temp to load the large immediate, then add to x17
+            self.load_large_imm("x9", offset);
+            self.state.emit("    add x17, x17, x9");
+        }
+    }
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -2941,6 +2954,7 @@ impl ArchCodegen for ArmCodegen {
     /// Override emit_store for F128: store full 16-byte IEEE binary128.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
         if ty == IrType::F128 {
+            let is_indirect = !self.state.is_alloca(ptr.0);
             // Handle register-only pointer values.
             if let Some(&reg) = self.reg_assignments.get(&ptr.0) {
                 let reg_name = callee_saved_name(reg);
@@ -2951,11 +2965,19 @@ impl ArchCodegen for ArmCodegen {
             let addr = self.state.resolve_slot_addr(ptr.0);
             if let Some(addr) = addr {
                 match addr {
-                    SlotAddr::Direct(slot) => {
+                    SlotAddr::Direct(slot) if !is_indirect => {
+                        // Alloca: the F128 data lives directly at the slot.
                         self.emit_f128_store_to_slot(val, slot);
+                    }
+                    SlotAddr::Direct(slot) => {
+                        // Non-alloca pointer (e.g. GEP result): the slot holds
+                        // an 8-byte pointer; dereference it to store F128.
+                        self.emit_load_from_sp("x17", slot.0, "ldr");
+                        self.emit_f128_store_to_addr_in_x17(val);
                     }
                     SlotAddr::OverAligned(slot, id) => {
                         self.emit_alloca_aligned_addr(slot, id);
+                        self.state.emit("    mov x17, x9");
                         self.emit_f128_store_to_addr_in_x17(val);
                     }
                     SlotAddr::Indirect(slot) => {
@@ -2987,11 +3009,19 @@ impl ArchCodegen for ArmCodegen {
                 let addr = self.state.resolve_slot_addr(ptr.0);
                 if let Some(addr) = addr {
                     match addr {
-                        SlotAddr::Direct(slot) => {
+                        SlotAddr::Direct(slot) if !is_indirect => {
+                            // Alloca: the F128 data lives directly at the slot.
                             self.emit_load_from_sp("q0", slot.0, "ldr");
+                        }
+                        SlotAddr::Direct(slot) => {
+                            // Non-alloca pointer (e.g. GEP result): the slot holds
+                            // an 8-byte pointer that must be dereferenced to get F128.
+                            self.emit_load_from_sp("x17", slot.0, "ldr");
+                            self.state.emit("    ldr q0, [x17]");
                         }
                         SlotAddr::OverAligned(slot, id) => {
                             self.emit_alloca_aligned_addr(slot, id);
+                            self.state.emit("    mov x17, x9");
                             self.state.emit("    ldr q0, [x17]");
                         }
                         SlotAddr::Indirect(slot) => {
@@ -3018,22 +3048,47 @@ impl ArchCodegen for ArmCodegen {
     /// Override emit_store_with_const_offset for F128: store full 16 bytes at offset.
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
         if ty == IrType::F128 {
+            let is_indirect = !self.state.is_alloca(base.0);
+
+            // Check if the base pointer lives in a callee-saved register.
+            if let Some(&reg) = self.reg_assignments.get(&base.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mov x17, {}", reg_name));
+                if offset != 0 {
+                    self.emit_add_imm_to_x17(offset);
+                }
+                self.emit_f128_store_to_addr_in_x17(val);
+                return;
+            }
+
             let addr = self.state.resolve_slot_addr(base.0);
             if let Some(addr) = addr {
                 match addr {
-                    SlotAddr::Direct(slot) => {
+                    SlotAddr::Direct(slot) if !is_indirect => {
+                        // Alloca: the F128 data lives directly at the slot.
                         let folded_slot = StackSlot(slot.0 + offset);
                         self.emit_f128_store_to_slot(val, folded_slot);
                     }
+                    SlotAddr::Direct(slot) => {
+                        // Non-alloca pointer: dereference, then add offset.
+                        self.emit_load_from_sp("x17", slot.0, "ldr");
+                        if offset != 0 {
+                            self.emit_add_imm_to_x17(offset);
+                        }
+                        self.emit_f128_store_to_addr_in_x17(val);
+                    }
                     SlotAddr::OverAligned(slot, id) => {
                         self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_add_offset_to_addr_reg(offset);
+                        self.state.emit("    mov x17, x9");
+                        if offset != 0 {
+                            self.emit_add_imm_to_x17(offset);
+                        }
                         self.emit_f128_store_to_addr_in_x17(val);
                     }
                     SlotAddr::Indirect(slot) => {
                         self.emit_load_from_sp("x17", slot.0, "ldr");
                         if offset != 0 {
-                            self.emit_add_offset_to_addr_reg(offset);
+                            self.emit_add_imm_to_x17(offset);
                         }
                         self.emit_f128_store_to_addr_in_x17(val);
                     }
@@ -3073,28 +3128,59 @@ impl ArchCodegen for ArmCodegen {
     fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
         if ty == IrType::F128 {
             // Track source for full-precision reload.
-            self.f128_load_sources.insert(dest.0, (base.0, offset, false));
+            let is_indirect = !self.state.is_alloca(base.0);
+            self.f128_load_sources.insert(dest.0, (base.0, offset, is_indirect));
 
-            let addr = self.state.resolve_slot_addr(base.0);
-            if let Some(addr) = addr {
-                match addr {
-                    SlotAddr::Direct(slot) => {
-                        let folded_slot = StackSlot(slot.0 + offset);
-                        self.emit_load_from_sp("q0", folded_slot.0, "ldr");
-                    }
-                    SlotAddr::OverAligned(slot, id) => {
-                        self.emit_alloca_aligned_addr(slot, id);
-                        self.emit_add_offset_to_addr_reg(offset);
-                        self.state.emit("    ldr q0, [x17]");
-                    }
-                    SlotAddr::Indirect(slot) => {
-                        self.emit_load_from_sp("x17", slot.0, "ldr");
-                        if offset != 0 {
-                            self.emit_add_offset_to_addr_reg(offset);
-                        }
-                        self.state.emit("    ldr q0, [x17]");
-                    }
+            // Check if the base pointer lives in a callee-saved register.
+            // This handles cases where a pointer (e.g. from array indexing) is
+            // register-allocated and we need to load F128 at base+offset.
+            let loaded = if let Some(&reg) = self.reg_assignments.get(&base.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mov x17, {}", reg_name));
+                if offset != 0 {
+                    self.emit_add_imm_to_x17(offset);
                 }
+                self.state.emit("    ldr q0, [x17]");
+                true
+            } else {
+                let addr = self.state.resolve_slot_addr(base.0);
+                if let Some(addr) = addr {
+                    match addr {
+                        SlotAddr::Direct(slot) if !is_indirect => {
+                            // Alloca: the F128 data lives directly at the slot.
+                            let folded_slot = StackSlot(slot.0 + offset);
+                            self.emit_load_from_sp("q0", folded_slot.0, "ldr");
+                        }
+                        SlotAddr::Direct(slot) => {
+                            // Non-alloca pointer: dereference, then add offset.
+                            self.emit_load_from_sp("x17", slot.0, "ldr");
+                            if offset != 0 {
+                                self.emit_add_imm_to_x17(offset);
+                            }
+                            self.state.emit("    ldr q0, [x17]");
+                        }
+                        SlotAddr::OverAligned(slot, id) => {
+                            self.emit_alloca_aligned_addr(slot, id);
+                            self.state.emit("    mov x17, x9");
+                            if offset != 0 {
+                                self.emit_add_imm_to_x17(offset);
+                            }
+                            self.state.emit("    ldr q0, [x17]");
+                        }
+                        SlotAddr::Indirect(slot) => {
+                            self.emit_load_from_sp("x17", slot.0, "ldr");
+                            if offset != 0 {
+                                self.emit_add_imm_to_x17(offset);
+                            }
+                            self.state.emit("    ldr q0, [x17]");
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if loaded {
                 // Convert f128 to f64 in x0 for register-based data flow.
                 // Full f128 stays in source alloca, accessible via f128_load_sources.
                 self.state.emit("    bl __trunctfdf2");
