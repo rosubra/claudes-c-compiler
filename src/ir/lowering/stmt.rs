@@ -59,7 +59,8 @@ impl Lowerer {
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
         // Resolve typeof(expr) or __auto_type to concrete type before processing
         let resolved_decl;
-        let decl = if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_) | TypeSpecifier::AutoType) {
+        let did_clone_decl = matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_) | TypeSpecifier::AutoType);
+        let decl = if did_clone_decl {
             let resolved_type_spec = if matches!(&decl.type_spec, TypeSpecifier::AutoType) {
                 // __auto_type: infer type from the first declarator's initializer
                 if let Some(first) = decl.declarators.first() {
@@ -78,6 +79,10 @@ impl Lowerer {
             } else {
                 self.resolve_typeof(&decl.type_spec)
             };
+            // Cloning declarators creates new AST nodes at fresh heap addresses.
+            // Since expr_ctype_cache keys on pointer addresses, we must clear it
+            // after the cloned declaration is dropped to prevent stale entries
+            // from being returned for new nodes allocated at recycled addresses.
             resolved_decl = Declaration {
                 type_spec: resolved_type_spec,
                 declarators: decl.declarators.clone(),
@@ -317,6 +322,16 @@ impl Lowerer {
                     }
                 }
             }
+        }
+
+        // Clear the expr_ctype_cache after processing declarations that cloned
+        // AST nodes (typeof/auto_type resolution). The cache keys on raw pointer
+        // addresses, and cloned nodes allocated at fresh addresses will be freed
+        // when resolved_decl drops. Without clearing, those addresses could be
+        // recycled by later allocations, causing the cache to return stale types
+        // for completely different expressions at the same address.
+        if did_clone_decl {
+            self.expr_ctype_cache.borrow_mut().clear();
         }
     }
 
