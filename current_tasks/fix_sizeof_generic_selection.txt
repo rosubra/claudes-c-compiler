@@ -1,0 +1,18 @@
+Task: Fix sizeof(_Generic(...)) always returning 4 instead of correct type size
+Status: in_progress
+Started: 2026-01-27
+
+Problem: The IR lowerer's sizeof_expr() function in expr_types.rs has no
+explicit case for Expr::GenericSelection, so it falls through to the
+default catch-all arm which returns 4. This causes sizeof(_Generic(...))
+to always return 4 bytes regardless of the actual selected type.
+
+Impact: Kernel READ_ONCE() macro uses _Generic to determine type for volatile
+loads. When sizeof is computed through typeof(_Generic(...)) paths, the wrong
+size (4 instead of 8 for pointers) causes 32-bit loads (movslq) instead of
+64-bit loads (movq) for pointer-typed fields, corrupting kernel pointers
+and causing boot hangs. Specifically fs/file.c fd_install() loads files->fdt
+(a pointer) with movslq, truncating the kernel virtual address.
+
+Fix: Add GenericSelection arm to sizeof_expr() that resolves the selected
+association and returns the correct size.
