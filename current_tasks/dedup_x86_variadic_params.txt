@@ -1,6 +1,0 @@
-Task: Deduplicate x86 variadic parameter classification in calculate_stack_space
-
-The x86 backend's calculate_stack_space has an 85-line hand-rolled parameter
-classification that duplicates the logic in classify_params_full() from call_emit.rs.
-ARM and RISC-V already use the shared helper. Replace the x86 hand-rolled logic
-with the shared classify_params_full() and named_params_stack_bytes().
