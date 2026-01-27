@@ -151,7 +151,6 @@ impl Lowerer {
                 // Integer source: use bit-based cast chain evaluation
                 let (bits, src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_width = target_ir_ty.size() * 8;
-                let target_signed = matches!(target_ir_ty, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64 | IrType::I128);
 
                 // For 128-bit targets, sign-extend or zero-extend from 64 bits
                 // based on the source expression's signedness (not the target's).

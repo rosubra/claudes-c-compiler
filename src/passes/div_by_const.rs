@@ -240,7 +240,7 @@ fn fresh_value(next_id: &mut u32) -> Value {
 /// Uses a direct computation approach: find the smallest p such that
 /// ceil(2^(32+p) / d) * d - 2^(32+p) <= 2^p, then magic = ceil(2^(32+p) / d).
 /// If magic >= 2^32 (doesn't fit in 32 bits), use the add-and-shift fixup.
-fn compute_unsigned_magic_32(d: u32) -> (u64, u32, bool) {
+fn compute_unsigned_magic_32(d: u32) -> Option<(u64, u32, bool)> {
     assert!(d >= 2);
 
     // Try each shift amount starting from 0
@@ -255,18 +255,19 @@ fn compute_unsigned_magic_32(d: u32) -> (u64, u32, bool) {
         if error <= (1u128 << p) {
             if magic <= u32::MAX as u128 {
                 // Fits in 32 bits - simple case
-                return (magic as u64, p, false);
+                return Some((magic as u64, p, false));
             } else if magic <= u64::MAX as u128 {
                 // Doesn't fit in 32 bits - use add-and-shift fixup
                 // We need to subtract 2^32 from magic and compensate
                 let m = magic - (1u128 << 32);
-                return (m as u64, p, true);
+                return Some((m as u64, p, true));
             }
         }
     }
 
-    // Fallback (shouldn't reach here for valid 32-bit divisors)
-    unreachable!("No valid magic number found for d={}", d);
+    // Some large divisors near u32::MAX cannot be handled with 32-bit magic
+    // numbers. Fall back to native division for these rare cases.
+    None
 }
 
 /// Expand `dest = x /u C` for 32-bit unsigned x.
@@ -293,7 +294,7 @@ fn expand_udiv32(
         }]);
     }
 
-    let (magic, shift, needs_add) = compute_unsigned_magic_32(d);
+    let (magic, shift, needs_add) = compute_unsigned_magic_32(d)?;
 
     let mut insts = Vec::new();
 
@@ -713,7 +714,7 @@ fn expand_udiv32_in_i64(
         }]);
     }
 
-    let (magic, shift, needs_add) = compute_unsigned_magic_32(d);
+    let (magic, shift, needs_add) = compute_unsigned_magic_32(d)?;
     let mut insts = Vec::new();
 
     // x is already in I64 (zero-extended from U32).
@@ -991,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_unsigned_magic_7() {
-        let (magic, shift, needs_add) = compute_unsigned_magic_32(7);
+        let (magic, shift, needs_add) = compute_unsigned_magic_32(7).unwrap();
         // Verify: for all u32, (x * magic) >> 32 >> shift should == x / 7
         for &x in &[0u32, 1, 6, 7, 8, 13, 14, 100, 255, 1000, u32::MAX, u32::MAX - 1] {
             let result = if !needs_add {
@@ -1007,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_unsigned_magic_10() {
-        let (magic, shift, needs_add) = compute_unsigned_magic_32(10);
+        let (magic, shift, needs_add) = compute_unsigned_magic_32(10).unwrap();
         for &x in &[0u32, 1, 9, 10, 11, 99, 100, 255, 1000, u32::MAX, u32::MAX - 1] {
             let result = if !needs_add {
                 ((x as u64 * magic) >> 32 >> shift) as u32
@@ -1022,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_unsigned_magic_3() {
-        let (magic, shift, needs_add) = compute_unsigned_magic_32(3);
+        let (magic, shift, needs_add) = compute_unsigned_magic_32(3).unwrap();
         for &x in &[0u32, 1, 2, 3, 4, 5, 6, 100, u32::MAX, u32::MAX - 1, u32::MAX - 2] {
             let result = if !needs_add {
                 ((x as u64 * magic) >> 32 >> shift) as u32
@@ -1067,7 +1068,7 @@ mod tests {
     fn test_unsigned_magic_exhaustive_small() {
         // Exhaustively test small divisors with a representative range
         for d in 2u32..=20 {
-            let (magic, shift, needs_add) = compute_unsigned_magic_32(d);
+            let (magic, shift, needs_add) = compute_unsigned_magic_32(d).unwrap();
             for x in (0..1000u32).chain(u32::MAX - 1000..=u32::MAX) {
                 let result = if !needs_add {
                     ((x as u64 * magic) >> 32 >> shift) as u32
