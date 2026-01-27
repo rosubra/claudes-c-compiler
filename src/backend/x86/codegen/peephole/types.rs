@@ -1,0 +1,1118 @@
+//! x86-64 peephole optimizer: types, line classification, and utility functions.
+//!
+//! Contains the core data structures (LineInfo, LineKind, LineStore) and the
+//! classify_line function that pre-parses assembly lines into compact metadata
+//! for fast pattern matching in the optimization passes.
+
+// ── Pre-parsed line metadata ─────────────────────────────────────────────────
+
+/// Register identifier (0..=15 for GPRs, 255 = unknown/none).
+/// Matches the x86 register family numbering.
+pub(super) type RegId = u8;
+pub(super) const REG_NONE: RegId = 255;
+
+/// Sentinel value for `rbp_offset` meaning "no %rbp reference" or "multiple/complex references".
+pub(super) const RBP_OFFSET_NONE: i32 = i32::MIN;
+
+/// Compact classification of a single assembly line.
+/// Stored in a parallel array alongside the raw text, so hot loops
+/// can check integer fields instead of re-parsing strings.
+#[derive(Clone, Copy)]
+pub(super) struct LineInfo {
+    pub(super) kind: LineKind,
+    /// Pre-parsed extension classification for redundant extension elimination.
+    /// Avoids repeated `starts_with`/`ends_with` string comparisons in the hot
+    /// `combined_local_pass` loop.
+    pub(super) ext_kind: ExtKind,
+    /// Byte offset of the first non-space character in the raw line.
+    /// Caches `trim_asm` so passes don't repeatedly scan leading whitespace.
+    pub(super) trim_start: u16,
+    /// Cached result of `has_indirect_memory_access` for `Other` lines.
+    /// `false` for all non-`Other` kinds. This avoids repeated byte scans in
+    /// `eliminate_dead_stores` and `global_store_forwarding`.
+    pub(super) has_indirect_mem: bool,
+    /// Pre-parsed %rbp offset for `Other` lines that reference a stack slot
+    /// (e.g., `leaq -24(%rbp), %rax`). `RBP_OFFSET_NONE` if no rbp reference,
+    /// multiple references, or non-Other kind. This eliminates expensive
+    /// `str::contains` checks in `eliminate_dead_stores`.
+    pub(super) rbp_offset: i32,
+}
+
+/// What kind of assembly line this is, with pre-extracted fields for the
+/// patterns we care about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LineKind {
+    Nop,                // Deleted line (marked via LineInfo only)
+    Empty,              // Blank line
+
+    /// `movX %reg, offset(%rbp)` – store register to stack slot
+    StoreRbp { reg: RegId, offset: i32, size: MoveSize },
+    /// `movX offset(%rbp), %reg` or `movslq offset(%rbp), %reg` – load from stack slot
+    LoadRbp  { reg: RegId, offset: i32, size: MoveSize },
+
+    /// `movq %reg, %reg` – self-move (pre-classified to avoid string ops in hot loop)
+    SelfMove,
+
+    Label,              // `name:`
+    Jmp,                // `jmp label`
+    JmpIndirect,        // `jmpq *%rax` or `jmp __x86_indirect_thunk_rax`
+    CondJmp,            // `je`/`jne`/`jl`/... label
+    Call,               // `call ...`
+    Ret,                // `ret`
+    Push { reg: RegId },  // `pushq %reg`
+    Pop { reg: RegId },   // `popq %reg`
+    SetCC,              // `setCC %al`
+    Cmp,                // `cmpX`/`testX`/`ucomis*`
+    Directive,          // Lines starting with `.`
+
+    /// Everything else (regular instructions).
+    /// `dest_reg` is the pre-parsed destination register family (REG_NONE if unknown).
+    /// This allows fast register-modification checks without re-parsing.
+    Other { dest_reg: RegId },
+}
+
+/// Pre-parsed classification of what kind of extension/operation an instruction performs.
+/// Used by the redundant extension elimination pass to avoid repeated string comparisons
+/// in the hot combined_local_pass loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExtKind {
+    /// Not an extension or producer recognized for the extension elimination pass
+    None,
+    /// movzbq %al, %rax (or similar zero-extend of %al to %rax)
+    MovzbqAlRax,
+    /// movzwq %ax, %rax
+    MovzwqAxRax,
+    /// movsbq %al, %rax
+    MovsbqAlRax,
+    /// movslq %eax, %rax
+    MovslqEaxRax,
+    /// movl %eax, %eax (zero-extend of lower 32 bits)
+    MovlEaxEax,
+    /// cltq instruction
+    Cltq,
+    /// Producer that writes to %rax with movzbq
+    ProducerMovzbqToRax,
+    /// Producer that writes to %rax with movzwq
+    ProducerMovzwqToRax,
+    /// Producer that writes to %rax with movsbq
+    ProducerMovsbqToRax,
+    /// Producer that writes to %rax with movslq
+    ProducerMovslqToRax,
+    /// Producer: movq $const, %rax
+    ProducerMovqConstRax,
+    /// Producer: 32-bit arithmetic op (addl, subl, imull, andl, orl, xorl, shll, shrl)
+    ProducerArith32,
+    /// Producer: movl to %eax
+    ProducerMovlToEax,
+    /// Producer: movzbl to %eax or movzbq to %rax
+    ProducerMovzbToEax,
+    /// Producer: movzwl to %eax or movzwq to %rax
+    ProducerMovzwToEax,
+    /// Producer: divl or idivl %ecx
+    ProducerDiv32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MoveSize {
+    Q,   // movq  (64-bit)
+    L,   // movl  (32-bit)
+    W,   // movw  (16-bit)
+    B,   // movb  (8-bit)
+    SLQ, // movslq (sign-extend 32->64)
+}
+
+impl MoveSize {
+    pub(super) fn mnemonic(self) -> &'static str {
+        match self {
+            MoveSize::Q => "movq",
+            MoveSize::L => "movl",
+            MoveSize::W => "movw",
+            MoveSize::B => "movb",
+            MoveSize::SLQ => "movslq",
+        }
+    }
+
+    /// Return the number of bytes this move size covers.
+    pub(super) fn byte_size(self) -> i32 {
+        match self {
+            MoveSize::Q => 8,
+            MoveSize::L | MoveSize::SLQ => 4,
+            MoveSize::W => 2,
+            MoveSize::B => 1,
+        }
+    }
+}
+
+impl LineInfo {
+    #[inline]
+    pub(super) fn is_nop(self) -> bool { self.kind == LineKind::Nop }
+    #[inline]
+    pub(super) fn is_barrier(self) -> bool {
+        matches!(self.kind,
+            LineKind::Label | LineKind::Call | LineKind::Jmp | LineKind::JmpIndirect |
+            LineKind::CondJmp | LineKind::Ret | LineKind::Directive)
+    }
+    #[inline]
+    pub(super) fn is_push(self) -> bool { matches!(self.kind, LineKind::Push { .. }) }
+
+    /// Get the trimmed content of a line using the cached trim offset.
+    /// This avoids re-scanning leading whitespace on every access.
+    #[inline]
+    pub(super) fn trimmed<'a>(&self, line: &'a str) -> &'a str {
+        &line[self.trim_start as usize..]
+    }
+}
+
+// ── Line parsing ─────────────────────────────────────────────────────────────
+
+/// Helper to construct a LineInfo with default ext_kind and has_indirect_mem.
+#[inline]
+pub(super) fn line_info(kind: LineKind, ts: u16) -> LineInfo {
+    LineInfo { kind, ext_kind: ExtKind::None, trim_start: ts, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE }
+}
+
+/// Helper to construct a LineInfo with a specific ext_kind.
+#[inline]
+pub(super) fn line_info_ext(kind: LineKind, ext: ExtKind, ts: u16) -> LineInfo {
+    LineInfo { kind, ext_kind: ext, trim_start: ts, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE }
+}
+
+/// Parse one assembly line into a `LineInfo`.
+pub(super) fn classify_line(raw: &str) -> LineInfo {
+    let b = raw.as_bytes();
+
+    // Compute trim offset once and cache it
+    let trim_start = compute_trim_offset(b);
+    debug_assert!(trim_start <= u16::MAX as usize, "assembly line with >65535 leading spaces");
+    let s = &raw[trim_start..];
+    let sb = s.as_bytes();
+
+    if sb.is_empty() {
+        return line_info(LineKind::Empty, trim_start as u16);
+    }
+
+    let first = sb[0];
+    let last = sb[sb.len() - 1];
+    let ts = trim_start as u16;
+
+    // Label: ends with ':'
+    if last == b':' {
+        return line_info(LineKind::Label, ts);
+    }
+
+    // Directive: starts with '.'
+    if first == b'.' {
+        return line_info(LineKind::Directive, ts);
+    }
+
+    // Fast path: only try store/load/self-move/extension parsing if line starts with 'mov' or 'movs'
+    if first == b'm' && sb.len() >= 4 && sb[1] == b'o' && sb[2] == b'v' {
+        if let Some((reg_str, offset_str, size)) = parse_store_to_rbp_str(s) {
+            let reg = register_family_fast(reg_str);
+            let offset = fast_parse_i32(offset_str);
+            return line_info(LineKind::StoreRbp { reg, offset, size }, ts);
+        }
+        if let Some((offset_str, reg_str, size)) = parse_load_from_rbp_str(s) {
+            let reg = register_family_fast(reg_str);
+            let offset = fast_parse_i32(offset_str);
+            // Classify loads that produce results making subsequent extensions redundant:
+            // - movslq offset(%rbp), %rax -> producer for cltq elimination
+            // - movl offset(%rbp), %eax   -> producer for movl %eax,%eax elimination
+            //   (movl already zero-extends to 64 bits)
+            // - movzbl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
+            // - movzwl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
+            let ext = if reg == 0 {
+                match size {
+                    MoveSize::SLQ => ExtKind::ProducerMovslqToRax,
+                    MoveSize::L => ExtKind::ProducerMovlToEax,
+                    _ => ExtKind::None,
+                }
+            } else {
+                ExtKind::None
+            };
+            return line_info_ext(LineKind::LoadRbp { reg, offset, size }, ext, ts);
+        }
+        // Check for self-move: movq %reg, %reg (same src and dst)
+        if sb[3] == b'q' && sb.len() >= 6 && sb[4] == b' ' {
+            if is_self_move_fast(sb) {
+                return line_info(LineKind::SelfMove, ts);
+            }
+        }
+        // Pre-classify extension-related instructions
+        let ext = classify_mov_ext(s, sb);
+        if ext != ExtKind::None {
+            let dest_reg = parse_dest_reg_fast(s);
+            let has_indirect = has_indirect_memory_access(s);
+            let rbp_off = if has_indirect { RBP_OFFSET_NONE } else { parse_rbp_offset(s) };
+            return LineInfo {
+                kind: LineKind::Other { dest_reg },
+                ext_kind: ext,
+                trim_start: ts,
+                has_indirect_mem: has_indirect,
+                rbp_offset: rbp_off,
+            };
+        }
+    }
+
+    // Control flow: dispatch on first byte
+    if first == b'j' {
+        if sb.len() >= 4 && sb[1] == b'm' && sb[2] == b'p' {
+            if sb[3] == b' ' {
+                // `jmp label` or `jmp __x86_indirect_thunk_rax` or `jmp *%reg`
+                if s.contains("indirect_thunk") {
+                    return line_info(LineKind::JmpIndirect, ts);
+                }
+                // `jmp *%rcx` / `jmp *%rax` – indirect jump through register
+                if sb.len() > 4 && sb[4] == b'*' {
+                    return line_info(LineKind::JmpIndirect, ts);
+                }
+                return line_info(LineKind::Jmp, ts);
+            }
+            if sb[3] == b'q' && sb.len() >= 5 && sb[4] == b' ' {
+                // `jmpq *%rax` – computed goto indirect jump
+                return line_info(LineKind::JmpIndirect, ts);
+            }
+        }
+        if is_conditional_jump(s) {
+            return line_info(LineKind::CondJmp, ts);
+        }
+    }
+
+    if first == b'c' {
+        if sb.len() >= 4 && sb[1] == b'a' && sb[2] == b'l' && sb[3] == b'l' {
+            return line_info(LineKind::Call, ts);
+        }
+        // Compare: cmpX
+        if sb.len() >= 5 && sb[1] == b'm' && sb[2] == b'p' {
+            return line_info(LineKind::Cmp, ts);
+        }
+        // cltq - classify as extension producer
+        if s == "cltq" {
+            return line_info_ext(LineKind::Other { dest_reg: 0 }, ExtKind::Cltq, ts);
+        }
+    }
+
+    if first == b'r' && s == "ret" {
+        return line_info(LineKind::Ret, ts);
+    }
+
+    // Test instructions
+    if first == b't' && sb.len() >= 5 && sb[1] == b'e' && sb[2] == b's' && sb[3] == b't' {
+        return line_info(LineKind::Cmp, ts);
+    }
+
+    // ucomis* instructions
+    if first == b'u' && (s.starts_with("ucomisd ") || s.starts_with("ucomiss ")) {
+        return line_info(LineKind::Cmp, ts);
+    }
+
+    // Push / Pop (extract register for fast checks)
+    if first == b'p' {
+        if s.starts_with("pushq ") {
+            let reg = register_family_fast(s[6..].trim());
+            return line_info(LineKind::Push { reg }, ts);
+        }
+        if s.starts_with("popq ") {
+            let reg = register_family_fast(s[5..].trim());
+            return line_info(LineKind::Pop { reg }, ts);
+        }
+    }
+
+    // SetCC
+    if first == b's' && sb.len() >= 4 && sb[1] == b'e' && sb[2] == b't' && parse_setcc(s).is_some() {
+        return line_info(LineKind::SetCC, ts);
+    }
+
+    // Pre-classify 32-bit arithmetic producers for extension elimination
+    let ext = classify_arith_ext(s, sb, first);
+
+    // Pre-parse destination register for fast modification checks.
+    let dest_reg = parse_dest_reg_fast(s);
+    // Cache has_indirect_memory_access for Other lines
+    let has_indirect = has_indirect_memory_access(s);
+    let rbp_off = if has_indirect { RBP_OFFSET_NONE } else { parse_rbp_offset(s) };
+    LineInfo { kind: LineKind::Other { dest_reg }, ext_kind: ext, trim_start: ts, has_indirect_mem: has_indirect, rbp_offset: rbp_off }
+}
+
+/// Fast check for self-move: `movq %REG, %REG` where both register names match.
+/// Works on the raw bytes after trimming. The caller ensures sb starts with "movq "
+/// and has length >= 6.
+#[inline]
+pub(super) fn is_self_move_fast(sb: &[u8]) -> bool {
+    // sb = "movq %REG, %REG" - find the comma
+    let len = sb.len();
+    // The source starts at byte 5 (after "movq ")
+    if len < 10 || sb[5] != b'%' { return false; }
+    // Find comma
+    let mut comma = 6;
+    while comma < len {
+        if sb[comma] == b',' { break; }
+        comma += 1;
+    }
+    if comma >= len { return false; }
+    // Source = sb[5..comma], skip whitespace after comma
+    let src = &sb[5..comma];
+    let mut dst_start = comma + 1;
+    while dst_start < len && sb[dst_start] == b' ' {
+        dst_start += 1;
+    }
+    let dst = &sb[dst_start..];
+    // Trim trailing whitespace from dst
+    let mut dst_end = dst.len();
+    while dst_end > 0 && dst[dst_end - 1] == b' ' {
+        dst_end -= 1;
+    }
+    let dst = &dst[..dst_end];
+    src == dst && src.len() >= 2 && src[0] == b'%'
+}
+
+/// Classify mov-family instructions for extension elimination.
+/// Called only when the line starts with "mov".
+#[inline]
+pub(super) fn classify_mov_ext(s: &str, sb: &[u8]) -> ExtKind {
+    let len = sb.len();
+    // Check specific extension patterns that the combined_local_pass cares about.
+    // Note: movslq %eax, %rax serves dual roles: it IS a consumer (can be eliminated
+    // after another movslq to %rax) and is also a producer for cltq elimination.
+    // We classify it as ProducerMovslqToRax so cltq elimination works, and add
+    // MovslqEaxRax to the consumer matching so it can also be eliminated.
+    if s == "movzbq %al, %rax" { return ExtKind::MovzbqAlRax; }
+    if s == "movzwq %ax, %rax" { return ExtKind::MovzwqAxRax; }
+    if s == "movsbq %al, %rax" { return ExtKind::MovsbqAlRax; }
+    if s == "movslq %eax, %rax" { return ExtKind::MovslqEaxRax; }
+    if s == "movl %eax, %eax" { return ExtKind::MovlEaxEax; }
+
+    // Producers: movslq ... %rax
+    if len >= 7 && sb[3] == b's' && sb[4] == b'l' && sb[5] == b'q' && sb[6] == b' ' {
+        // movslq - check if destination is %rax
+        if s.ends_with("%rax") {
+            return ExtKind::ProducerMovslqToRax;
+        }
+    }
+
+    // Producers: movq $const, %rax
+    if len >= 6 && sb[3] == b'q' && sb[4] == b' ' && sb[5] == b'$' {
+        if s.ends_with("%rax") {
+            return ExtKind::ProducerMovqConstRax;
+        }
+    }
+
+    // Producers: movzbq ... %rax
+    if s.starts_with("movzbq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovzbqToRax;
+    }
+    if s.starts_with("movzwq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovzwqToRax;
+    }
+    if s.starts_with("movsbq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovsbqToRax;
+    }
+
+    // Producers: movl ... %eax
+    if len >= 6 && sb[3] == b'l' && sb[4] == b' ' {
+        if s.ends_with("%eax") {
+            return ExtKind::ProducerMovlToEax;
+        }
+    }
+
+    // Producers: movzbl ... %eax
+    if s.starts_with("movzbl ") && s.ends_with("%eax") {
+        return ExtKind::ProducerMovzbToEax;
+    }
+    // movzbq ... %rax is already handled above as ProducerMovzbqToRax
+    // which also counts as ProducerMovzbToEax for movl %eax,%eax elimination
+
+    // Producers: movzwl ... %eax
+    if s.starts_with("movzwl ") && s.ends_with("%eax") {
+        return ExtKind::ProducerMovzwToEax;
+    }
+    // movzwq ... %rax is already handled above
+
+    ExtKind::None
+}
+
+/// Classify arithmetic instructions that produce 32-bit results for extension elimination.
+#[inline]
+pub(super) fn classify_arith_ext(s: &str, _sb: &[u8], first: u8) -> ExtKind {
+    match first {
+        b'a' => {
+            if s.starts_with("addl ") || s.starts_with("andl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b's' => {
+            if s.starts_with("subl ") || s.starts_with("shll ") || s.starts_with("shrl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'i' => {
+            if s.starts_with("imull ") { ExtKind::ProducerArith32 }
+            else if s == "idivl %ecx" { ExtKind::ProducerDiv32 }
+            else { ExtKind::None }
+        }
+        b'o' => {
+            if s.starts_with("orl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'x' => {
+            if s.starts_with("xorl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'd' => {
+            if s == "divl %ecx" { ExtKind::ProducerDiv32 }
+            else { ExtKind::None }
+        }
+        _ => ExtKind::None,
+    }
+}
+
+/// Compute byte offset to first non-space character.
+#[inline]
+pub(super) fn compute_trim_offset(b: &[u8]) -> usize {
+    let mut i = 0;
+    while i < b.len() && b[i] == b' ' {
+        i += 1;
+    }
+    i
+}
+
+/// Fast extraction of the destination register family from a generic instruction.
+/// Handles the AT&T syntax convention where the last operand is the destination.
+/// Also handles implicit writes (cltq, cqto, div, mul, etc.).
+#[inline]
+pub(super) fn parse_dest_reg_fast(s: &str) -> RegId {
+    let b = s.as_bytes();
+    // Implicit rax writers
+    if b.len() >= 4 {
+        if b[0] == b'c' && (s == "cltq" || s == "cqto" || s == "cdq" || s == "cqo") {
+            return 0; // rax family
+        }
+    }
+    // Single-operand div/idiv/mul implicitly write rax:rdx.
+    // Note: imul is not listed because the codegen only emits two/three-operand
+    // forms (imulq %rcx, %rax / imulq $imm, %rax, %rax) which write to the
+    // explicit destination, handled by the comma-based dest extraction below.
+    if b.len() >= 3 && (b[0] == b'd' || b[0] == b'i' || b[0] == b'm') {
+        if s.starts_with("div") || s.starts_with("idiv") || s.starts_with("mul") {
+            return 0; // rax family (also rdx, but we track rax as primary)
+        }
+    }
+    // Two-operand instructions: last operand is destination
+    if let Some(comma_pos) = memrchr(b',', b) {
+        let after_comma = &s[comma_pos + 1..];
+        let trimmed = after_comma.trim();
+        return register_family(trimmed).unwrap_or(REG_NONE);
+    }
+    // Single-operand instructions that modify their operand in-place:
+    //   inc, dec, not, neg    (arithmetic/logic)
+    //   bswapl, bswapq        (byte swap)
+    //   popcntl, popcntq      (popcount, though these usually have 2 operands with comma)
+    if b.len() >= 4 {
+        let is_single_op_modifier =
+            (b[0] == b'i' || b[0] == b'd' || b[0] == b'n') &&
+            (s.starts_with("inc") || s.starts_with("dec") || s.starts_with("not") || s.starts_with("neg"))
+            || b[0] == b'b' && (s.starts_with("bswapl") || s.starts_with("bswapq"));
+        if is_single_op_modifier {
+            if let Some(space_pos) = s.find(' ') {
+                let operand = s[space_pos + 1..].trim();
+                return register_family(operand).unwrap_or(REG_NONE);
+            }
+        }
+    }
+    REG_NONE
+}
+
+/// Find the last occurrence of byte `needle` in `haystack`.
+#[inline]
+pub(super) fn memrchr(needle: u8, haystack: &[u8]) -> Option<usize> {
+    let mut i = haystack.len();
+    while i > 0 {
+        i -= 1;
+        if haystack[i] == needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Fast i32 parse for stack offsets like "-8", "-24", "0", etc.
+/// Falls back to 0 on unparseable inputs (should not happen with valid asm).
+#[inline]
+pub(super) fn fast_parse_i32(s: &str) -> i32 {
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return 0;
+    }
+    let (neg, start) = if b[0] == b'-' { (true, 1) } else { (false, 0) };
+    let mut v: i32 = 0;
+    for &c in &b[start..] {
+        if c >= b'0' && c <= b'9' {
+            v = v.wrapping_mul(10).wrapping_add((c - b'0') as i32);
+        } else {
+            break;
+        }
+    }
+    if neg { -v } else { v }
+}
+
+// ── Existing string-level parsers (used once during classify and for mutations) ──
+
+/// Strip a `mov*` prefix from an instruction, returning the remainder and size.
+/// Handles movq, movl, movw, movb, and optionally movslq (for load parsing).
+pub(super) fn strip_mov_prefix(s: &str, allow_slq: bool) -> Option<(&str, MoveSize)> {
+    if let Some(r) = s.strip_prefix("movq ") {
+        Some((r, MoveSize::Q))
+    } else if let Some(r) = s.strip_prefix("movl ") {
+        Some((r, MoveSize::L))
+    } else if let Some(r) = s.strip_prefix("movw ") {
+        Some((r, MoveSize::W))
+    } else if let Some(r) = s.strip_prefix("movb ") {
+        Some((r, MoveSize::B))
+    } else if allow_slq {
+        s.strip_prefix("movslq ").map(|r| (r, MoveSize::SLQ))
+    } else {
+        None
+    }
+}
+
+/// Parse `movX %reg, offset(%rbp)` (store to rbp-relative slot).
+/// Returns (register_str, offset_str, size).
+pub(super) fn parse_store_to_rbp_str(s: &str) -> Option<(&str, &str, MoveSize)> {
+    let (rest, size) = strip_mov_prefix(s, false)?;
+
+    let (src, dst) = rest.split_once(',')?;
+    let src = src.trim();
+    let dst = dst.trim();
+
+    if !src.starts_with('%') {
+        return None;
+    }
+    if !dst.ends_with("(%rbp)") {
+        return None;
+    }
+    let offset = &dst[..dst.len() - 6];
+
+    Some((src, offset, size))
+}
+
+/// Parse `movX offset(%rbp), %reg` or `movslq offset(%rbp), %reg` (load from rbp).
+/// Returns (offset_str, register_str, size).
+pub(super) fn parse_load_from_rbp_str(s: &str) -> Option<(&str, &str, MoveSize)> {
+    let (rest, size) = strip_mov_prefix(s, true)?;
+
+    let (src, dst) = rest.split_once(',')?;
+    let src = src.trim();
+    let dst = dst.trim();
+
+    if !src.ends_with("(%rbp)") {
+        return None;
+    }
+    let offset = &src[..src.len() - 6];
+    if !dst.starts_with('%') {
+        return None;
+    }
+
+    Some((offset, dst, size))
+}
+
+// ── Zero-allocation line storage ─────────────────────────────────────────────
+//
+// Instead of splitting the input assembly into N individual heap-allocated
+// Strings (which causes thousands of malloc/free calls per function), we keep
+// the original contiguous String and store (start, end) byte offsets for each
+// line. When a line is replaced by an optimization pass, the replacement is
+// stored in a small side Vec<String>. When a line is NOPed, only the LineInfo
+// is updated (no string mutation).
+//
+// This replaces N heap allocations with:
+// - 1 Vec<u32> for byte offsets (2 u32 per line, no heap per entry)
+// - A small Vec<String> for replaced lines (typically <1% of total lines)
+
+/// Storage for assembly lines that avoids per-line heap allocation.
+///
+/// Lines reference byte ranges in the original assembly string. Replaced lines
+/// are stored in a side buffer. NOP lines are tracked only via LineInfo.
+pub(super) struct LineStore {
+    /// The original assembly text (kept alive for the duration of optimization).
+    original: String,
+    /// For each line: (start_offset, len_or_replacement).
+    /// If `len != u32::MAX`, the line is `original[start..start+len]`.
+    /// If `len == u32::MAX`, the line has been replaced; `start` is the index
+    /// into `replacements`.
+    entries: Vec<LineEntry>,
+    /// Side buffer for lines that have been replaced by optimization passes.
+    /// Only a small fraction of lines are ever replaced.
+    replacements: Vec<String>,
+}
+
+/// Compact entry for one line (8 bytes instead of 24 bytes for String).
+#[derive(Clone, Copy)]
+pub(super) struct LineEntry {
+    /// Byte offset into original string, OR index into replacements vec.
+    start: u32,
+    /// Length of the line in the original string. u32::MAX means replaced.
+    len: u32,
+}
+
+impl LineStore {
+    /// Build a LineStore from an assembly string without per-line allocation.
+    pub(super) fn new(asm: String) -> Self {
+        let bytes = asm.as_bytes();
+        let line_count = bytes.iter().filter(|&&b| b == b'\n').count() + 1;
+        let mut entries = Vec::with_capacity(line_count);
+
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                entries.push(LineEntry {
+                    start: start as u32,
+                    len: (i - start) as u32,
+                });
+                start = i + 1;
+            }
+        }
+        // Handle last line (no trailing newline)
+        if start <= bytes.len() {
+            let remaining = bytes.len() - start;
+            if remaining > 0 || entries.is_empty() {
+                entries.push(LineEntry {
+                    start: start as u32,
+                    len: remaining as u32,
+                });
+            }
+        }
+
+        LineStore {
+            original: asm,
+            entries,
+            replacements: Vec::new(),
+        }
+    }
+
+    /// Get the text of line `idx`.
+    #[inline]
+    pub(super) fn get(&self, idx: usize) -> &str {
+        let e = &self.entries[idx];
+        if e.len == u32::MAX {
+            // Replaced line
+            &self.replacements[e.start as usize]
+        } else {
+            // Original line
+            let start = e.start as usize;
+            let end = start + e.len as usize;
+            &self.original[start..end]
+        }
+    }
+
+    /// Get the number of lines.
+    #[inline]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if the store is empty.
+    #[inline]
+    #[allow(dead_code)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Replace a line with new text. Stores the replacement in the side buffer.
+    pub(super) fn replace(&mut self, idx: usize, new_text: String) {
+        let rep_idx = self.replacements.len();
+        self.replacements.push(new_text);
+        self.entries[idx] = LineEntry {
+            start: rep_idx as u32,
+            len: u32::MAX,
+        };
+    }
+
+    /// Build the final output string, skipping NOP lines.
+    pub(super) fn build_result(&self, infos: &[LineInfo]) -> String {
+        // Estimate total size from original length (close upper bound).
+        let mut result = String::with_capacity(self.original.len());
+        for (i, info) in infos.iter().enumerate() {
+            if !info.is_nop() {
+                result.push_str(self.get(i));
+                result.push('\n');
+            }
+        }
+        result
+    }
+}
+
+// ── NOP / replace helpers ────────────────────────────────────────────────────
+
+#[inline]
+pub(super) fn mark_nop(info: &mut LineInfo) {
+    *info = LineInfo { kind: LineKind::Nop, ext_kind: ExtKind::None, trim_start: 0, has_indirect_mem: false, rbp_offset: RBP_OFFSET_NONE };
+}
+
+/// Replace a line's text and re-classify it.
+#[inline]
+pub(super) fn replace_line(store: &mut LineStore, info: &mut LineInfo, idx: usize, new_text: String) {
+    store.replace(idx, new_text);
+    *info = classify_line(store.get(idx));
+}
+
+/// Find the next non-NOP line at or after `start`, returning its index.
+/// Returns `len` (infos.len()) if no non-NOP line is found before `limit`.
+#[inline]
+pub(super) fn next_non_nop(infos: &[LineInfo], start: usize, limit: usize) -> usize {
+    let mut j = start;
+    while j < limit && infos[j].is_nop() {
+        j += 1;
+    }
+    j
+}
+
+/// Collect up to `N` non-NOP line indices starting after `start`.
+/// Returns the number of indices found (may be < N if we hit the end).
+#[inline]
+pub(super) fn collect_non_nop_indices<const N: usize>(
+    infos: &[LineInfo],
+    start: usize,
+    limit: usize,
+    out: &mut [usize; N],
+) -> usize {
+    let mut count = 0;
+    let mut j = start + 1;
+    while j < limit && count < N {
+        if !infos[j].is_nop() {
+            out[count] = j;
+            count += 1;
+        }
+        j += 1;
+    }
+    count
+}
+
+/// Check if two byte ranges `[a, a+a_size)` and `[b, b+b_size)` overlap.
+#[inline]
+pub(super) fn ranges_overlap(a: i32, a_size: i32, b: i32, b_size: i32) -> bool {
+    a < b + b_size && b < a + a_size
+}
+
+// ── Helper functions ─────────────────────────────────────────────────────────
+
+pub(super) fn has_indirect_memory_access(s: &str) -> bool {
+    // rep movsb/movsd/stosb/stosd etc. use implicit memory operands through
+    // %rdi (dest) and %rsi (source) that aren't visible in the instruction text.
+    // They also modify %rdi, %rsi, and %rcx. Treat them as indirect memory access
+    // to ensure store forwarding and dead store elimination are conservative.
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("rep ") || trimmed.starts_with("rep\t") {
+        return true;
+    }
+    // Look for patterns like "(%r" where the register is not rbp or rsp
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'(' && i + 2 < len && bytes[i + 1] == b'%' {
+            // Found "(%" - check if it's %rbp or %rsp (which are not indirect aliasing)
+            let rest = &s[i + 2..];
+            if !rest.starts_with("rbp") && !rest.starts_with("rsp")
+                && !rest.starts_with("rip") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Pre-parse an `Other` line for a %rbp offset reference.
+/// Looks for patterns like `N(%rbp)` and returns the offset N.
+/// Returns `RBP_OFFSET_NONE` if no rbp reference or multiple references found.
+/// This is called once during classify_line and cached in LineInfo.rbp_offset,
+/// eliminating the expensive `str::contains` in eliminate_dead_stores.
+pub(super) fn parse_rbp_offset(s: &str) -> i32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Search for "(%rbp)" pattern
+    let mut found_offset = RBP_OFFSET_NONE;
+    let mut i = 0;
+    while i + 5 < len {
+        if bytes[i] == b'(' && bytes[i + 1] == b'%'
+            && bytes[i + 2] == b'r' && bytes[i + 3] == b'b' && bytes[i + 4] == b'p'
+            && bytes[i + 5] == b')'
+        {
+            // Found "(%rbp)" at position i. Parse the offset before '('.
+            // The offset is the integer immediately before the '(' character.
+            let offset = if i == 0 {
+                0 // bare (%rbp) with no offset
+            } else {
+                // Scan backwards for digits/minus sign
+                let end = i;
+                let mut start = end;
+                while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'-') {
+                    start -= 1;
+                }
+                if start == end {
+                    0 // no numeric prefix, bare (%rbp) after space/comma
+                } else {
+                    fast_parse_i32(&s[start..end])
+                }
+            };
+            if found_offset == RBP_OFFSET_NONE {
+                found_offset = offset;
+            } else if found_offset != offset {
+                // Multiple different rbp offsets - can't pre-classify
+                return RBP_OFFSET_NONE;
+            }
+            i += 6;
+            continue;
+        }
+        i += 1;
+    }
+    found_offset
+}
+
+/// Check if a line is a conditional jump instruction.
+/// Uses byte-level dispatch on the second character to avoid 18 `starts_with` calls.
+pub(super) fn is_conditional_jump(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 3 || b[0] != b'j' {
+        return false;
+    }
+    // Dispatch on second byte to narrow candidates quickly
+    match b[1] {
+        b'e' => b[2] == b' ',                                         // je
+        b'l' => b[2] == b' ' || (b.len() >= 4 && b[2] == b'e' && b[3] == b' '),  // jl, jle
+        b'g' => b[2] == b' ' || (b.len() >= 4 && b[2] == b'e' && b[3] == b' '),  // jg, jge
+        b'b' => b[2] == b' ' || (b.len() >= 4 && b[2] == b'e' && b[3] == b' '),  // jb, jbe
+        b'a' => b[2] == b' ' || (b.len() >= 4 && b[2] == b'e' && b[3] == b' '),  // ja, jae
+        b's' => b[2] == b' ',                                         // js
+        b'o' => b[2] == b' ',                                         // jo
+        b'p' => b[2] == b' ',                                         // jp
+        b'z' => b[2] == b' ',                                         // jz
+        b'n' => {
+            // jne, jns, jno, jnp, jnz
+            if b.len() >= 4 {
+                match b[2] {
+                    b'e' | b's' | b'o' | b'p' | b'z' => b[3] == b' ',
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Parse `movq %src, %dst` and return %dst if %src matches expected_src.
+pub(super) fn parse_reg_to_reg_move<'a>(line: &'a str, expected_src: &str) -> Option<&'a str> {
+    for prefix in &["movq ", "movl "] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            if let Some((src, dst)) = rest.split_once(',') {
+                let src = src.trim();
+                let dst = dst.trim();
+                if src == expected_src && dst.starts_with('%') {
+                    return Some(dst);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if an instruction writes to a specific register as its destination.
+pub(super) fn instruction_writes_to(inst: &str, reg: &str) -> bool {
+    if let Some((_op, operands)) = inst.split_once(' ') {
+        if let Some((_src, dst)) = operands.rsplit_once(',') {
+            let dst = dst.trim();
+            if dst == reg || register_overlaps(dst, reg) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if an instruction can have its destination register replaced safely.
+pub(super) fn can_redirect_instruction(inst: &str) -> bool {
+    if inst.starts_with("movabsq ") {
+        return false;
+    }
+    if inst.starts_with(".") || inst.ends_with(":") {
+        return false;
+    }
+    true
+}
+
+/// Replace the destination register in an instruction.
+pub(super) fn replace_dest_register(inst: &str, old_reg: &str, new_reg: &str) -> Option<String> {
+    if !old_reg.starts_with("%r") || !new_reg.starts_with("%r") {
+        return None;
+    }
+
+    // Handle `xorq %reg, %reg` (zero idiom)
+    if let Some(rest) = inst.strip_prefix("xorq ") {
+        if let Some((src, dst)) = rest.split_once(',') {
+            let src = src.trim();
+            let dst = dst.trim();
+            if src == old_reg && dst == old_reg {
+                return Some(format!("xorq {}, {}", new_reg, new_reg));
+            }
+        }
+    }
+
+    for prefix in &["movq ", "movslq ", "leaq ", "movzbq "] {
+        if let Some(rest) = inst.strip_prefix(prefix) {
+            if let Some((src, dst)) = rest.rsplit_once(',') {
+                let src = src.trim();
+                let dst = dst.trim();
+                if dst == old_reg {
+                    if !src.contains(old_reg) {
+                        return Some(format!("{}{}, {}", prefix, src, new_reg));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+
+/// Parse a setCC instruction and return the condition code string.
+pub(super) fn parse_setcc(s: &str) -> Option<&str> {
+    if !s.starts_with("set") {
+        return None;
+    }
+    let rest = &s[3..];
+    let space_idx = rest.find(' ')?;
+    let cc = &rest[..space_idx];
+    match cc {
+        "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae"
+        | "s" | "ns" | "o" | "no" | "p" | "np" | "z" | "nz" => Some(cc),
+        _ => None,
+    }
+}
+
+/// Invert a condition code (e.g., "e" -> "ne", "l" -> "ge")
+pub(super) fn invert_cc(cc: &str) -> &str {
+    match cc {
+        "e" | "z" => "ne",
+        "ne" | "nz" => "e",
+        "l" => "ge",
+        "ge" => "l",
+        "le" => "g",
+        "g" => "le",
+        "b" => "ae",
+        "ae" => "b",
+        "be" => "a",
+        "a" => "be",
+        "s" => "ns",
+        "ns" => "s",
+        "o" => "no",
+        "no" => "o",
+        "p" => "np",
+        "np" => "p",
+        _ => cc,
+    }
+}
+
+/// Check if two register names overlap (e.g., %eax overlaps with %rax).
+pub(super) fn register_overlaps(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_family = register_family(a);
+    let b_family = register_family(b);
+    a_family.is_some() && a_family == b_family
+}
+
+/// Get the register family (0-15) for an x86 register name.
+pub(super) fn register_family(reg: &str) -> Option<u8> {
+    let id = register_family_fast(reg);
+    if id == REG_NONE { None } else { Some(id) }
+}
+
+/// Fast register family lookup using byte-level dispatch.
+/// Returns REG_NONE if the register is not recognized.
+///
+/// Handles all x86-64 GP register aliases:
+///   64-bit: %rax..%rdi, %r8..%r15
+///   32-bit: %eax..%edi, %r8d..%r15d
+///   16-bit: %ax..%di,   %r8w..%r15w
+///    8-bit: %al..%dil,  %r8b..%r15b, %ah/%bh/%ch/%dh
+#[inline]
+pub(super) fn register_family_fast(reg: &str) -> RegId {
+    let b = reg.as_bytes();
+    let len = b.len();
+    if len < 3 || b[0] != b'%' {
+        return REG_NONE;
+    }
+    // Dispatch on the prefix character after '%' to find the family.
+    // 64-bit (%r..) and 32-bit (%e..) prefixes use a shared lookup on b[2..],
+    // since %rax/%eax, %rcx/%ecx, etc. share the same suffix→family mapping.
+    match b[1] {
+        b'r' | b'e' => {
+            if len < 4 {
+                // len==3: only %r8, %r9 are valid
+                return if b[1] == b'r' { reg_digit_to_id(b[2]) } else { REG_NONE };
+            }
+            // For len>=4, map (b[2], b[3]) to family id.
+            // This covers %rax/%eax, %rcx/%ecx, etc. and %r10..%r15.
+            match (b[2], b[3]) {
+                (b'a', b'x') => 0,  // %rax / %eax
+                (b'c', b'x') => 1,  // %rcx / %ecx
+                (b'd', b'x') => 2,  // %rdx / %edx
+                (b'd', b'i') => 7,  // %rdi / %edi
+                (b'b', b'x') => 3,  // %rbx / %ebx
+                (b'b', b'p') => 5,  // %rbp / %ebp
+                (b's', b'p') => 4,  // %rsp / %esp
+                (b's', b'i') => 6,  // %rsi / %esi
+                (b'8', _)    => 8,  // %r8d / %r8w / %r8b
+                (b'9', _)    => 9,  // %r9d / %r9w / %r9b
+                (b'1', b'0') => 10, (b'1', b'1') => 11, (b'1', b'2') => 12,
+                (b'1', b'3') => 13, (b'1', b'4') => 14, (b'1', b'5') => 15,
+                _ => REG_NONE,
+            }
+        }
+        // 16-bit / 8-bit short forms: %ax, %al, %ah, %cx, %cl, etc.
+        b'a' => if matches!(b[2], b'x' | b'l' | b'h') { 0 } else { REG_NONE },
+        b'c' => if matches!(b[2], b'x' | b'l' | b'h') { 1 } else { REG_NONE },
+        b'd' => match b[2] { b'i' => 7, b'x' | b'l' | b'h' => 2, _ => REG_NONE },
+        b'b' => match b[2] { b'p' => 5, b'x' | b'l' | b'h' => 3, _ => REG_NONE },
+        b's' => match b[2] { b'p' => 4, b'i' => 6, _ => REG_NONE },
+        _ => REG_NONE,
+    }
+}
+
+/// Map a single ASCII digit byte to a register family id (8 or 9), or REG_NONE.
+#[inline]
+pub(super) fn reg_digit_to_id(digit: u8) -> RegId {
+    match digit { b'8' => 8, b'9' => 9, _ => REG_NONE }
+}
+
+/// Register name table indexed by [size][family_id].
+/// Sizes: 0=Q/SLQ(64-bit), 1=L(32-bit), 2=W(16-bit), 3=B(8-bit).
+pub(super) const REG_NAMES: [[&str; 16]; 4] = [
+    // Q / SLQ (64-bit)
+    ["%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi",
+     "%r8",  "%r9",  "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"],
+    // L (32-bit)
+    ["%eax",  "%ecx",  "%edx",  "%ebx",  "%esp",  "%ebp",  "%esi",  "%edi",
+     "%r8d",  "%r9d",  "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d"],
+    // W (16-bit)
+    ["%ax",   "%cx",   "%dx",   "%bx",   "%sp",   "%bp",   "%si",   "%di",
+     "%r8w",  "%r9w",  "%r10w", "%r11w", "%r12w", "%r13w", "%r14w", "%r15w"],
+    // B (8-bit)
+    ["%al",  "%cl",  "%dl",  "%bl",  "%spl", "%bpl", "%sil", "%dil",
+     "%r8b", "%r9b", "%r10b","%r11b","%r12b","%r13b","%r14b","%r15b"],
+];
+
+/// Convert a register family ID and move size to the register name string.
+#[inline]
+pub(super) fn reg_id_to_name(id: RegId, size: MoveSize) -> &'static str {
+    debug_assert!(id <= 15, "invalid register family id: {}", id);
+    let row = match size {
+        MoveSize::Q | MoveSize::SLQ => 0,
+        MoveSize::L => 1,
+        MoveSize::W => 2,
+        MoveSize::B => 3,
+    };
+    REG_NAMES[row][id as usize]
+}
