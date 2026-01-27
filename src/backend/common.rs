@@ -649,6 +649,9 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
             if g.is_extern || g.section.is_some() {
                 continue;
             }
+            if g.is_thread_local {
+                continue; // TLS takes precedence: emit in .tdata/.tbss, not .rodata
+            }
             if matches!(g.init, GlobalInit::Zero) || g.size == 0 {
                 continue;
             }
