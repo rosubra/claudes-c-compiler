@@ -1,9 +1,11 @@
-Task: Fix x86 kernel miscompilation in kernel/sched/core.c
+Task: Fix x86 kernel miscompilation in mm/page_alloc.c
 
-The delta debugging tool identified that kernel/sched/core.c compiled with our
-compiler causes a boot failure. The kernel panics with a NULL pointer dereference
-in count_open_files, called from dup_fd -> sane_fdtable_size during the first
-kernel_clone in rest_init. The miscompilation in sched/core.c is causing
-corrupted state that leads to this crash.
+The delta debugging tool identified that mm/page_alloc.c compiled with our
+compiler causes a boot hang (223s timeout). The page allocator is one of the
+kernel's most critical subsystems. Investigating the miscompilation to find
+and fix the underlying compiler bug.
+
+Note: kernel/sched/core.c was already fixed by recent stack_layout changes.
+The original lock name was for sched/core.c but is now repurposed for page_alloc.c.
 
 Status: in_progress
