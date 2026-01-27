@@ -8,18 +8,20 @@
 /// - Binary operations with type-aware signedness semantics
 /// - sizeof/alignof via sema's type resolution
 ///
+/// Shared pure-evaluation logic (literal eval, builtin folding, sub-int promotion,
+/// binary operation arithmetic) lives in `common::const_eval` and `common::const_arith`,
+/// called by both this module and `ir::lowering::const_eval`.
+///
 /// The lowerer's const_eval.rs handles additional lowering-specific cases:
 /// - Global address expressions (&x, func, arr)
 /// - func_state const local values
 /// - Pointer arithmetic on global addresses
 /// These remain in the lowerer since they require IR-level state.
-///
-/// This is Step 5 of the typed-AST plan (high_sema_expansion_typed_ast.txt):
-/// unify constant expression evaluation between sema and lowering.
 
 use crate::common::types::CType;
 use crate::common::types::AddressSpace;
 use crate::common::const_arith;
+use crate::common::const_eval as shared_const_eval;
 use crate::ir::ir::IrConst;
 use crate::frontend::parser::ast::*;
 use super::type_context::TypeContext;
@@ -73,45 +75,11 @@ impl<'a> SemaConstEval<'a> {
         }
 
         match expr {
-            // Integer literals: preserve the C type width so that
-            // ctype_from_ir_const can infer the correct CType.
-            // IntLiteral has C type `int` (32-bit) when the value fits, otherwise `long`.
-            // This matters for operations like (1 << 31) / N where 32-bit vs 64-bit
-            // determines whether the shift result is negative (INT_MIN) or positive.
-            // Note: the lexer may produce IntLiteral for values > i32::MAX (decimal
-            // literals without suffix), so we must range-check before using I32.
-            Expr::IntLiteral(val, _) => {
-                if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
-                    Some(IrConst::I32(*val as i32))
-                } else {
-                    Some(IrConst::I64(*val))
-                }
-            }
-            Expr::LongLiteral(val, _) => {
-                Some(IrConst::I64(*val))
-            }
-            // UIntLiteral must stay as I64 to preserve the unsigned value.
-            // IrConst::I32 is signed and would misrepresent values > i32::MAX
-            // (e.g., 0xFFFFFFFA as uint = 4294967290, not -6).
-            Expr::UIntLiteral(val, _) => {
-                Some(IrConst::I64(*val as i64))
-            }
-            Expr::ULongLiteral(val, _) => {
-                Some(IrConst::I64(*val as i64))
-            }
-            Expr::CharLiteral(ch, _) => {
-                Some(IrConst::I32(*ch as i32))
-            }
-
-            // Float literals
-            Expr::FloatLiteral(val, _) => {
-                Some(IrConst::F64(*val))
-            }
-            Expr::FloatLiteralF32(val, _) => {
-                Some(IrConst::F32(*val as f32))
-            }
-            Expr::FloatLiteralLongDouble(val, bytes, _) => {
-                Some(IrConst::long_double_with_bytes(*val, *bytes))
+            // Literals: delegate to shared evaluation
+            Expr::IntLiteral(..) | Expr::LongLiteral(..) | Expr::UIntLiteral(..)
+            | Expr::ULongLiteral(..) | Expr::CharLiteral(..) | Expr::FloatLiteral(..)
+            | Expr::FloatLiteralF32(..) | Expr::FloatLiteralLongDouble(..) => {
+                return shared_const_eval::eval_literal(expr);
             }
 
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
@@ -119,18 +87,12 @@ impl<'a> SemaConstEval<'a> {
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
-                // C integer promotion (C11 6.3.1.1): sub-int types are promoted
-                // to int before arithmetic. For unsigned sub-int types (unsigned
-                // char/short), the I8/I16 bit pattern must be zero-extended to i32
-                // (not sign-extended) before negation. Without this, I16(-1)
-                // representing unsigned short 65535 would be negated as -(-1) = 1
-                // instead of -(65535) = -65535.
-                let promoted = self.promote_sub_int_for_unary(inner, val);
+                let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned(inner));
                 const_arith::negate_const(promoted)
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
-                let promoted = self.promote_sub_int_for_unary(inner, val);
+                let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned(inner));
                 const_arith::bitnot_const(promoted)
             }
 
@@ -148,16 +110,19 @@ impl<'a> SemaConstEval<'a> {
                 // Priority: (1) pre-annotated expr_types from sema (O(1), preserves
                 // unsigned info), (2) ctype_from_ir_const (O(1), but loses unsigned),
                 // (3) infer_expr_ctype (expensive, full type inference).
-                // Using expr_types first is critical for correct signedness on casts
-                // like (unsigned int)(0x80000000) >> 2 -- ctype_from_ir_const would
-                // map the IrConst::I64 to signed Long, losing the unsigned cast.
                 let lhs_ctype = self.lookup_expr_type(lhs)
                     .or_else(|| Self::ctype_from_ir_const(&l))
                     .or_else(|| self.infer_expr_ctype(lhs));
                 let rhs_ctype = self.lookup_expr_type(rhs)
                     .or_else(|| Self::ctype_from_ir_const(&r))
                     .or_else(|| self.infer_expr_ctype(rhs));
-                self.eval_const_binop(op, &l, &r, lhs_ctype.as_ref(), rhs_ctype.as_ref())
+                let lhs_size = lhs_ctype.as_ref().map_or(4, |ct| self.ctype_size(ct).max(4));
+                let lhs_unsigned = lhs_ctype.as_ref().map_or(false, |ct| ct.is_unsigned());
+                let rhs_size = rhs_ctype.as_ref().map_or(4, |ct| self.ctype_size(ct).max(4));
+                let rhs_unsigned = rhs_ctype.as_ref().map_or(false, |ct| ct.is_unsigned());
+                shared_const_eval::eval_binop_with_types(
+                    op, &l, &r, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned,
+                )
             }
 
             // Cast expressions with proper bit-width tracking
@@ -302,123 +267,9 @@ impl<'a> SemaConstEval<'a> {
             // Handle compile-time builtin function calls in constant expressions.
             Expr::FunctionCall(func, args, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
-                    match name.as_str() {
-                        "__builtin_choose_expr" if args.len() >= 3 => {
-                            let cond = self.eval_const_expr(&args[0])?;
-                            if cond.is_nonzero() {
-                                self.eval_const_expr(&args[1])
-                            } else {
-                                self.eval_const_expr(&args[2])
-                            }
-                        }
-                        "__builtin_constant_p" => {
-                            let is_const = if let Some(arg) = args.first() {
-                                self.eval_const_expr(arg).is_some()
-                            } else {
-                                false
-                            };
-                            Some(IrConst::I32(if is_const { 1 } else { 0 }))
-                        }
-                        "__builtin_expect" | "__builtin_expect_with_probability" => {
-                            if let Some(arg) = args.first() {
-                                self.eval_const_expr(arg)
-                            } else {
-                                None
-                            }
-                        }
-                        "__builtin_bswap16" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u16;
-                            Some(IrConst::I32(v.swap_bytes() as i32))
-                        }
-                        "__builtin_bswap32" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            Some(IrConst::I32(v.swap_bytes() as i32))
-                        }
-                        "__builtin_bswap64" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            Some(IrConst::I64(v.swap_bytes() as i64))
-                        }
-                        // __builtin_clz / __builtin_clzl / __builtin_clzll
-                        "__builtin_clz" | "__builtin_clzl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            Some(IrConst::I32(v.leading_zeros() as i32))
-                        }
-                        "__builtin_clzll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            Some(IrConst::I32(v.leading_zeros() as i32))
-                        }
-                        // __builtin_ctz / __builtin_ctzl / __builtin_ctzll
-                        "__builtin_ctz" | "__builtin_ctzl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            if v == 0 { Some(IrConst::I32(32)) }
-                            else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
-                        }
-                        "__builtin_ctzll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            if v == 0 { Some(IrConst::I32(64)) }
-                            else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
-                        }
-                        // __builtin_popcount / __builtin_popcountl / __builtin_popcountll
-                        "__builtin_popcount" | "__builtin_popcountl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            Some(IrConst::I32(v.count_ones() as i32))
-                        }
-                        "__builtin_popcountll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            Some(IrConst::I32(v.count_ones() as i32))
-                        }
-                        // __builtin_ffs / __builtin_ffsl / __builtin_ffsll
-                        "__builtin_ffs" | "__builtin_ffsl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            if v == 0 { Some(IrConst::I32(0)) }
-                            else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
-                        }
-                        "__builtin_ffsll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            if v == 0 { Some(IrConst::I32(0)) }
-                            else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
-                        }
-                        // __builtin_parity / __builtin_parityl / __builtin_parityll
-                        "__builtin_parity" | "__builtin_parityl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u32;
-                            Some(IrConst::I32((v.count_ones() % 2) as i32))
-                        }
-                        "__builtin_parityll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as u64;
-                            Some(IrConst::I32((v.count_ones() % 2) as i32))
-                        }
-                        // __builtin_clrsb / __builtin_clrsbl / __builtin_clrsbll
-                        "__builtin_clrsb" | "__builtin_clrsbl" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()? as i32;
-                            // clrsb = leading_zeros of (val ^ (val << 1)) - 1
-                            // or equivalently, leading redundant sign bits minus 1
-                            let result = if v < 0 { (!v as u32).leading_zeros() as i32 - 1 }
-                                         else { (v as u32).leading_zeros() as i32 - 1 };
-                            Some(IrConst::I32(result))
-                        }
-                        "__builtin_clrsbll" => {
-                            let val = self.eval_const_expr(args.first()?)?;
-                            let v = val.to_i64()?;
-                            let result = if v < 0 { (!v as u64).leading_zeros() as i32 - 1 }
-                                         else { (v as u64).leading_zeros() as i32 - 1 };
-                            Some(IrConst::I32(result))
-                        }
-                        _ => None,
-                    }
+                    shared_const_eval::eval_builtin_call(
+                        name.as_str(), args, &|e| self.eval_const_expr(e),
+                    )
                 } else {
                     None
                 }
@@ -441,44 +292,9 @@ impl<'a> SemaConstEval<'a> {
             }
             _ => {
                 let val = self.eval_const_expr(expr)?;
-                let bits = match &val {
-                    IrConst::F32(v) => *v as i64 as u64,
-                    IrConst::F64(v) => *v as i64 as u64,
-                    _ => val.to_i64().unwrap_or(0) as u64,
-                };
-                Some((bits, true))
+                Some(shared_const_eval::irconst_to_bits(&val))
             }
         }
-    }
-
-    /// Evaluate a binary operation on constant operands.
-    /// Uses both LHS and RHS types for C's usual arithmetic conversions (C11 6.3.1.8),
-    /// except for shifts where only the LHS type determines the result type (C11 6.5.7).
-    /// Delegates arithmetic to the shared implementation in `common::const_arith`.
-    fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ctype: Option<&CType>, rhs_ctype: Option<&CType>) -> Option<IrConst> {
-        let lhs_size = lhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
-        let lhs_unsigned = lhs_ctype.map_or(false, |ct| ct.is_unsigned());
-        let rhs_unsigned = rhs_ctype.map_or(false, |ct| ct.is_unsigned());
-
-        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
-
-        // For shifts (C11 6.5.7): result type is the promoted LHS type only.
-        // For other ops: apply C's usual arithmetic conversions using both operand types.
-        let (is_32bit, is_unsigned) = if is_shift {
-            (lhs_size <= 4, lhs_unsigned)
-        } else {
-            let rhs_size = rhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
-            let result_size = lhs_size.max(rhs_size);
-            let is_unsigned = if lhs_size == rhs_size {
-                lhs_unsigned || rhs_unsigned
-            } else if lhs_size > rhs_size {
-                lhs_unsigned
-            } else {
-                rhs_unsigned
-            };
-            (result_size <= 4, is_unsigned)
-        };
-        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned, lhs_unsigned, rhs_unsigned)
     }
 
     /// Evaluate the offsetof pattern: &((type*)0)->member
@@ -624,35 +440,6 @@ impl<'a> SemaConstEval<'a> {
     /// Get the size in bytes for a CType.
     fn ctype_size(&self, ctype: &CType) -> usize {
         ctype.size_ctx(&self.types.struct_layouts)
-    }
-
-    /// Promote a sub-int IrConst (I8/I16) to I32 for unary arithmetic,
-    /// using unsigned zero-extension when the expression has an unsigned type.
-    ///
-    /// C11 6.3.1.1: Integer promotion converts unsigned char/short to int by
-    /// zero-extending, and signed char/short by sign-extending. Without this,
-    /// negate_const(I16(-1)) for unsigned short 65535 would compute -(-1) = 1
-    /// instead of -(65535) = -65535.
-    fn promote_sub_int_for_unary(&self, expr: &Expr, val: IrConst) -> IrConst {
-        match &val {
-            IrConst::I8(v) => {
-                let is_unsigned = self.is_expr_unsigned(expr);
-                if is_unsigned {
-                    IrConst::I32(*v as u8 as i32)
-                } else {
-                    IrConst::I32(*v as i32)
-                }
-            }
-            IrConst::I16(v) => {
-                let is_unsigned = self.is_expr_unsigned(expr);
-                if is_unsigned {
-                    IrConst::I32(*v as u16 as i32)
-                } else {
-                    IrConst::I32(*v as i32)
-                }
-            }
-            _ => val,
-        }
     }
 
     /// Check if an expression has an unsigned type, using the expr_types cache

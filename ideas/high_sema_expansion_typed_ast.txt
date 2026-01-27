@@ -87,6 +87,13 @@ Step 5.5: (DONE) Unify shared const_eval arithmetic into common/const_arith.rs
         - Removed unused SemaResult.warnings Vec, dead driver parse error check,
           duplicated implicit declaration warning in lowerer
         - Zero regressions across all three backends (x86, ARM, RISC-V)
+Step 5.6: (DONE) Extract shared const_eval functions into common/const_eval.rs
+        - Extracted eval_literal, eval_builtin_call (14 builtins), promote_sub_int,
+          irconst_to_bits, eval_binop_with_types into common/const_eval.rs
+        - Both sema::const_eval and lowering::const_eval delegate to shared functions
+        - Eliminated ~400 lines of near-identical code (literals, builtins, promotion,
+          binop wrapper)
+        - Zero regressions across all three backends (x86, ARM, RISC-V)
 Step 6: Add actual type error diagnostics in sema
 Step 7: Simplify lowering to assume types are correct
 

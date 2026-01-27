@@ -69,6 +69,18 @@ const MAX_ALWAYS_INLINE_BLOCKS: usize = 200;
 /// 3. GCC always inlines these trivial static inline functions
 const MAX_TINY_INLINE_INSTRUCTIONS: usize = 5;
 
+/// Maximum instructions for a `static` (non-`inline`) function to be eligible
+/// for inlining. GCC at -O2 inlines small static functions even without the
+/// `inline` keyword. This is critical for correctness: if a static function
+/// references an undefined symbol in a conditionally-compiled code path, GCC
+/// eliminates the reference by inlining, but without inlining we get a linker
+/// error. Example: kernel's pxp_fw_dependencies_completed() references
+/// intel_pxp_gsccs_is_ready_for_sessions() which is not compiled in some configs.
+const MAX_STATIC_NONINLINE_INSTRUCTIONS: usize = 30;
+
+/// Maximum blocks for a `static` (non-`inline`) function to be eligible.
+const MAX_STATIC_NONINLINE_BLOCKS: usize = 4;
+
 /// Budget for always_inline callees per caller. Limits total instructions
 /// inlined from always_inline callees to prevent stack frame bloat.
 /// CCC spills every SSA value to stack (~8 bytes each), so inlining 2000+
@@ -867,7 +879,14 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             && func.blocks[0].instructions.iter().all(|inst| {
                 matches!(inst, Instruction::Alloca { .. })
             });
-        if !is_always_inline && !is_trivially_empty {
+        // Check if this is a small static (non-inline) function eligible for inlining.
+        // GCC at -O2 inlines small static functions even without the `inline` keyword.
+        // This prevents linker errors from undefined references in dead code paths.
+        let inst_count_for_static: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
+        let is_small_static = func.is_static && !func.is_inline
+            && inst_count_for_static <= MAX_STATIC_NONINLINE_INSTRUCTIONS
+            && func.blocks.len() <= MAX_STATIC_NONINLINE_BLOCKS;
+        if !is_always_inline && !is_trivially_empty && !is_small_static {
             if !func.is_static || !func.is_inline {
                 if debug_callee && func.name.contains("write16") {
                     eprintln!("[INLINE_DEBUG] {} skipped: is_static={}, is_inline={}, is_declaration={}",

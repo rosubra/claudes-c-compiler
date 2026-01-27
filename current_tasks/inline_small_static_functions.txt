@@ -17,4 +17,4 @@ Fix:
   as inlining candidates. Use a conservative threshold (e.g., MAX_STATIC_INLINE_INSTRUCTIONS)
   to only inline functions that are small enough to be beneficial.
 
-Status: in_progress
+Status: completed
