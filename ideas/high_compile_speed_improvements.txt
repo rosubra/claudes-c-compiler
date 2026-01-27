@@ -1,0 +1,55 @@
+Compile Speed Improvements - Profiling Results and Opportunities
+================================================================
+
+Profiled on sqlite3.c (2550 functions, 694K tokens, 22MB asm output).
+Current bottleneck breakdown (from perf profiling):
+
+1. EXTERNAL ASSEMBLER (~26% of total time, ~0.7s)
+   The compiler shells out to `as` (x86_64-linux-gnu-as) to assemble text
+   assembly into object files. This is the single biggest time consumer.
+
+   FIX: Implement a native assembler that directly emits machine code.
+   This would skip: text assembly generation (0.5s codegen), pipe to
+   external process, and the assembler's own parsing of text.
+   The native_elf_writer.txt idea covers this. Expected improvement: ~30-40%.
+
+2. ALLOCATION OVERHEAD (7.7% of total, ~0.2s)
+   malloc/free/realloc take 7.7% of samples. Major callers:
+   - ir::analysis::build_cfg (Vec<Vec<usize>> for pred/succ lists)
+   - gvn::process_block (FxHashMap operations)
+   - mem2reg::rename_block
+   - passes::div_by_const
+
+   FIX: Use arena allocation or bump allocators for per-function data.
+   Pre-allocate and reuse CFG data structures across functions within
+   the same pass. Use SmallVec<[usize; 4]> for pred/succ lists (most
+   blocks have <=4 predecessors/successors).
+
+3. STRING COMPARISON (3.39% of total, ~0.09s)
+   memcmp from str::contains and pattern matching. Major callers:
+   - Peephole dead store elimination (O(n^2) str::contains on asm lines)
+   - Parser typedef lookup (FIXED: now uses FxHashSet)
+   - Preprocessor macro expansion (FxHashSet<String> lookups)
+   - Backend codegen symbol lookups
+
+   FIX: Intern strings into a global string table. Use u32 symbol IDs
+   everywhere instead of String keys. This eliminates hashing and
+   comparing multi-byte strings in hot paths.
+
+4. GVN PASS COST (0.11s total across iterations)
+   GVN is the most expensive single optimization pass. Each invocation
+   builds CFG + dominators from scratch.
+
+   FIX: Cache CFG/dominator analysis between GVN, LICM, and if_convert
+   (they run consecutively with no CFG-modifying pass between them).
+   Could save ~30% of the per-iteration pass cost.
+
+5. PEEPHOLE OPTIMIZER (1.47% on eliminate_dead_stores)
+   The dead store elimination in the peephole has O(n^2) behavior due
+   to scanning assembly lines for pattern matches.
+
+   FIX: Use a hash-based approach to index store locations, enabling
+   O(n) dead store elimination instead of O(n^2).
+
+Status: Items 1-5 identified via perf profiling. Item 1 (native assembler)
+is by far the highest-impact change but also the largest engineering effort.
