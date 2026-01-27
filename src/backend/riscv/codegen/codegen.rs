@@ -12,11 +12,19 @@ use crate::backend::inline_asm::emit_inline_asm_common;
 use crate::backend::regalloc::{self, PhysReg, RegAllocConfig};
 
 /// RISC-V callee-saved registers available for register allocation.
-/// s0 is the frame pointer; s2-s6 are used as temporaries in emit_call_reg_args.
+/// s0 is the frame pointer; s2-s6 are used as temporaries in emit_call_reg_args
+/// (they are added to used_callee_saved when needed, not allocated by regalloc).
 /// Available for allocation: s1, s7-s11 (6 registers).
 /// PhysReg encoding: 1=s1, 7=s7, 8=s8, 9=s9, 10=s10, 11=s11.
 const RISCV_CALLEE_SAVED: [PhysReg; 6] = [
     PhysReg(1), PhysReg(7), PhysReg(8), PhysReg(9), PhysReg(10), PhysReg(11),
+];
+
+/// The callee-saved registers used as temporaries in emit_call_reg_args.
+/// PhysReg(2)=s2, PhysReg(3)=s3, PhysReg(4)=s4, PhysReg(5)=s5, PhysReg(6)=s6.
+/// These are used when a function call has >= 4 GP register arguments.
+const CALL_TEMP_CALLEE_SAVED: [PhysReg; 5] = [
+    PhysReg(2), PhysReg(3), PhysReg(4), PhysReg(5), PhysReg(6),
 ];
 
 /// Map a PhysReg index to its RISC-V register name.
@@ -26,6 +34,36 @@ fn callee_saved_name(reg: PhysReg) -> &'static str {
         6 => "s6", 7 => "s7", 8 => "s8", 9 => "s9", 10 => "s10", 11 => "s11",
         _ => unreachable!("invalid RISC-V callee-saved register index"),
     }
+}
+
+/// Scan all call/call_indirect instructions in a function and return the maximum
+/// number of GP register arguments across all calls. This is used to determine
+/// which callee-saved temporaries (s2-s6) emit_call_reg_args will use, so that
+/// they can be saved/restored in the prologue/epilogue.
+fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize {
+    use crate::backend::call_abi::classify_call_args;
+    use crate::backend::call_abi::CallArgClass;
+
+    let mut max_gp = 0usize;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            let (args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic) = match inst {
+                Instruction::Call { args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, .. } => {
+                    (args, arg_types, struct_arg_sizes, struct_arg_classes, *is_variadic)
+                }
+                Instruction::CallIndirect { args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, .. } => {
+                    (args, arg_types, struct_arg_sizes, struct_arg_classes, *is_variadic)
+                }
+                _ => continue,
+            };
+            let classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, config);
+            let gp_count = classes.iter().filter(|c| matches!(c, CallArgClass::IntReg { .. })).count();
+            if gp_count > max_gp {
+                max_gp = gp_count;
+            }
+        }
+    }
+    max_gp
 }
 
 /// Scan inline asm instructions in a function and collect any callee-saved
@@ -670,6 +708,23 @@ impl ArchCodegen for RiscvCodegen {
             &mut self.reg_assignments, &mut self.used_callee_saved,
         );
         self.f128_load_sources.clear();
+
+        // Scan all calls in the function to find the maximum number of GP register
+        // arguments. emit_call_reg_args uses callee-saved s2-s6 as staging temporaries
+        // when there are >= 4 GP register args. We must add those to used_callee_saved
+        // so they are saved/restored in the prologue/epilogue.
+        let max_gp = max_gp_reg_args_in_calls(func, &self.call_abi_config());
+        // temp_regs = ["t3", "t4", "t5", "s2", "s3", "s4", "s5", "s6"]
+        // s2 is used when max_gp >= 4, s3 when >= 5, etc.
+        if max_gp > 3 {
+            let num_s_regs_needed = (max_gp - 3).min(CALL_TEMP_CALLEE_SAVED.len());
+            for i in 0..num_s_regs_needed {
+                let reg = CALL_TEMP_CALLEE_SAVED[i];
+                if !self.used_callee_saved.contains(&reg) {
+                    self.used_callee_saved.push(reg);
+                }
+            }
+        }
 
         let space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size, align| {
             // RISC-V uses negative offsets from s0 (frame pointer)
