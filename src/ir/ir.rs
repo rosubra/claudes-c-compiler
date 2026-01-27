@@ -109,6 +109,27 @@ pub enum GlobalInit {
 }
 
 impl GlobalInit {
+    /// Visit every symbol name referenced by this initializer.
+    /// Calls `f` with each global/label name found in GlobalAddr, GlobalAddrOffset,
+    /// and GlobalLabelDiff variants, recursing into Compound children.
+    pub fn for_each_ref<F: FnMut(&str)>(&self, f: &mut F) {
+        match self {
+            GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
+                f(name);
+            }
+            GlobalInit::GlobalLabelDiff(label1, label2, _) => {
+                f(label1);
+                f(label2);
+            }
+            GlobalInit::Compound(fields) => {
+                for field in fields {
+                    field.for_each_ref(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Returns true if this initializer contains relocations (addresses of globals/labels).
     /// Used to decide between .rodata (no relocations) and .data.rel.ro (has relocations).
     pub fn has_relocations(&self) -> bool {
@@ -1247,6 +1268,144 @@ impl Instruction {
             | Instruction::InlineAsm { .. }
             | Instruction::StackRestore { .. } => None,
         }
+    }
+
+    /// Collect all Value IDs used (as operands, not defined) by this instruction.
+    /// This is the canonical implementation used by inlining validation and other passes.
+    /// Note: mem2reg handles Load/Store ptrs specially in its own match before calling this
+    /// on other instruction types, so it skips them in the catch-all arm.
+    pub fn used_values(&self) -> Vec<u32> {
+        let mut used = Vec::new();
+        match self {
+            Instruction::Alloca { .. } => {}
+            Instruction::Load { ptr, .. } => {
+                used.push(ptr.0);
+            }
+            Instruction::Store { val, ptr, .. } => {
+                push_operand_value(val, &mut used);
+                used.push(ptr.0);
+            }
+            Instruction::DynAlloca { size, .. } => {
+                push_operand_value(size, &mut used);
+            }
+            Instruction::BinOp { lhs, rhs, .. } => {
+                push_operand_value(lhs, &mut used);
+                push_operand_value(rhs, &mut used);
+            }
+            Instruction::UnaryOp { src, .. } => {
+                push_operand_value(src, &mut used);
+            }
+            Instruction::Cmp { lhs, rhs, .. } => {
+                push_operand_value(lhs, &mut used);
+                push_operand_value(rhs, &mut used);
+            }
+            Instruction::Call { args, .. } => {
+                for arg in args { push_operand_value(arg, &mut used); }
+            }
+            Instruction::CallIndirect { func_ptr, args, .. } => {
+                push_operand_value(func_ptr, &mut used);
+                for arg in args { push_operand_value(arg, &mut used); }
+            }
+            Instruction::GetElementPtr { base, offset, .. } => {
+                used.push(base.0);
+                push_operand_value(offset, &mut used);
+            }
+            Instruction::Cast { src, .. } | Instruction::Copy { src, .. } => {
+                push_operand_value(src, &mut used);
+            }
+            Instruction::GlobalAddr { .. } | Instruction::LabelAddr { .. }
+            | Instruction::Fence { .. } | Instruction::StackSave { .. } => {}
+            Instruction::Memcpy { dest, src, .. } => {
+                used.push(dest.0);
+                used.push(src.0);
+            }
+            Instruction::VaArg { va_list_ptr, .. } => {
+                used.push(va_list_ptr.0);
+            }
+            Instruction::VaStart { va_list_ptr } | Instruction::VaEnd { va_list_ptr } => {
+                used.push(va_list_ptr.0);
+            }
+            Instruction::VaCopy { dest_ptr, src_ptr } => {
+                used.push(dest_ptr.0);
+                used.push(src_ptr.0);
+            }
+            Instruction::AtomicRmw { ptr, val, .. } => {
+                push_operand_value(ptr, &mut used);
+                push_operand_value(val, &mut used);
+            }
+            Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
+                push_operand_value(ptr, &mut used);
+                push_operand_value(expected, &mut used);
+                push_operand_value(desired, &mut used);
+            }
+            Instruction::AtomicLoad { ptr, .. } => {
+                push_operand_value(ptr, &mut used);
+            }
+            Instruction::AtomicStore { ptr, val, .. } => {
+                push_operand_value(ptr, &mut used);
+                push_operand_value(val, &mut used);
+            }
+            Instruction::Phi { incoming, .. } => {
+                for (op, _) in incoming {
+                    push_operand_value(op, &mut used);
+                }
+            }
+            Instruction::GetReturnF64Second { .. }
+            | Instruction::GetReturnF32Second { .. }
+            | Instruction::GetReturnF128Second { .. } => {}
+            Instruction::SetReturnF64Second { src }
+            | Instruction::SetReturnF32Second { src }
+            | Instruction::SetReturnF128Second { src } => {
+                push_operand_value(src, &mut used);
+            }
+            Instruction::InlineAsm { outputs, inputs, .. } => {
+                for (_, ptr, _) in outputs {
+                    used.push(ptr.0);
+                }
+                for (_, op, _) in inputs {
+                    push_operand_value(op, &mut used);
+                }
+            }
+            Instruction::Intrinsic { dest_ptr, args, .. } => {
+                if let Some(ptr) = dest_ptr {
+                    used.push(ptr.0);
+                }
+                for arg in args {
+                    push_operand_value(arg, &mut used);
+                }
+            }
+            Instruction::Select { cond, true_val, false_val, .. } => {
+                push_operand_value(cond, &mut used);
+                push_operand_value(true_val, &mut used);
+                push_operand_value(false_val, &mut used);
+            }
+            Instruction::StackRestore { ptr } => {
+                used.push(ptr.0);
+            }
+        }
+        used
+    }
+}
+
+/// Push a Value ID from an Operand into the collection, if it is a Value (not a Const).
+fn push_operand_value(op: &Operand, used: &mut Vec<u32>) {
+    if let Operand::Value(v) = op {
+        used.push(v.0);
+    }
+}
+
+impl Terminator {
+    /// Collect all Value IDs used by this terminator.
+    pub fn used_values(&self) -> Vec<u32> {
+        let mut used = Vec::new();
+        match self {
+            Terminator::Return(Some(op)) => push_operand_value(op, &mut used),
+            Terminator::CondBranch { cond, .. } => push_operand_value(cond, &mut used),
+            Terminator::IndirectBranch { target, .. } => push_operand_value(target, &mut used),
+            Terminator::Switch { val, .. } => push_operand_value(val, &mut used),
+            _ => {}
+        }
+        used
     }
 }
 

@@ -578,11 +578,10 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
     // Build reference lists per global (from initializers).
     let mut global_refs_lists: Vec<Vec<u32>> = Vec::with_capacity(module.globals.len());
     for global in &module.globals {
-        let mut string_refs = Vec::new();
-        collect_global_init_refs_vec(&global.init, &mut string_refs);
-        let id_refs: Vec<u32> = string_refs.iter()
-            .map(|r| get_or_create_id(r, &mut name_to_id, &mut next_id))
-            .collect();
+        let mut id_refs = Vec::new();
+        global.init.for_each_ref(&mut |name| {
+            id_refs.push(get_or_create_id(name, &mut name_to_id, &mut next_id));
+        });
         global_refs_lists.push(id_refs);
     }
 
@@ -756,7 +755,13 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
     }
 
     for global in &module.globals {
-        collect_global_init_addr_taken_indexed(&global.init, &name_to_id, &mut address_taken);
+        global.init.for_each_ref(&mut |name| {
+            if let Some(&id) = name_to_id.get(name) {
+                if (id as usize) < address_taken.len() {
+                    address_taken[id as usize] = true;
+                }
+            }
+        });
     }
 
     // Drop the borrow on module strings so we can mutate module below.
@@ -845,26 +850,10 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
     }
 }
 
-/// Collect symbol references from a global initializer into a Vec.
-fn collect_global_init_refs_vec(init: &GlobalInit, refs: &mut Vec<String>) {
-    match init {
-        GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
-            refs.push(name.clone());
-        }
-        GlobalInit::GlobalLabelDiff(label1, label2, _) => {
-            refs.push(label1.clone());
-            refs.push(label2.clone());
-        }
-        GlobalInit::Compound(fields) => {
-            for field in fields {
-                collect_global_init_refs_vec(field, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Collect symbol references from a global initializer into a HashSet (borrowed strings).
+/// Collect symbol references from a global initializer into a HashSet of borrowed strings.
+/// This requires an explicit lifetime annotation since the borrowed `&str` references come
+/// from the `GlobalInit`'s owned String fields, which is what `GlobalInit::for_each_ref`
+/// cannot express through its closure-based API.
 fn collect_global_init_refs_set<'a>(init: &'a GlobalInit, refs: &mut FxHashSet<&'a str>) {
     match init {
         GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
@@ -877,42 +866,6 @@ fn collect_global_init_refs_set<'a>(init: &'a GlobalInit, refs: &mut FxHashSet<&
         GlobalInit::Compound(fields) => {
             for field in fields {
                 collect_global_init_refs_set(field, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Index-based address-taken collection from global initializers.
-/// Uses name-to-id mapping and a bit vector instead of String hash set.
-fn collect_global_init_addr_taken_indexed(
-    init: &GlobalInit,
-    name_to_id: &FxHashMap<&str, u32>,
-    addr_taken: &mut Vec<bool>,
-) {
-    match init {
-        GlobalInit::GlobalAddr(name) | GlobalInit::GlobalAddrOffset(name, _) => {
-            if let Some(&id) = name_to_id.get(name.as_str()) {
-                if (id as usize) < addr_taken.len() {
-                    addr_taken[id as usize] = true;
-                }
-            }
-        }
-        GlobalInit::GlobalLabelDiff(label1, label2, _) => {
-            if let Some(&id) = name_to_id.get(label1.as_str()) {
-                if (id as usize) < addr_taken.len() {
-                    addr_taken[id as usize] = true;
-                }
-            }
-            if let Some(&id) = name_to_id.get(label2.as_str()) {
-                if (id as usize) < addr_taken.len() {
-                    addr_taken[id as usize] = true;
-                }
-            }
-        }
-        GlobalInit::Compound(fields) => {
-            for field in fields {
-                collect_global_init_addr_taken_indexed(field, name_to_id, addr_taken);
             }
         }
         _ => {}

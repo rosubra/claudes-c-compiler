@@ -238,7 +238,7 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
                 }
                 // Any other use of the alloca value disqualifies it
                 _ => {
-                    for used_val in instruction_used_values(inst) {
+                    for used_val in inst.used_values() {
                         if candidate_set.contains(&used_val) {
                             disqualified.insert(used_val);
                         }
@@ -248,7 +248,7 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         }
 
         // Check terminator uses
-        for used_val in terminator_used_values(&block.terminator) {
+        for used_val in block.terminator.used_values() {
             if candidate_set.contains(&used_val) {
                 disqualified.insert(used_val);
             }
@@ -270,148 +270,6 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         // Only promote allocas that are actually used (have loads or stores)
         .filter(|info| !info.def_blocks.is_empty() || !info.use_blocks.is_empty())
         .collect()
-}
-
-/// Get all Value IDs used by an instruction (excluding Load ptr and Store ptr
-/// which are handled specially for alloca tracking).
-fn instruction_used_values(inst: &Instruction) -> Vec<u32> {
-    let mut used = Vec::new();
-    match inst {
-        // Load ptr and Store ptr uses are handled by the caller.
-        // Store val must still be tracked for disqualification.
-        Instruction::Load { .. } | Instruction::Alloca { .. } => {}
-        Instruction::Store { val, .. } => {
-            add_operand_values(val, &mut used);
-        }
-        Instruction::DynAlloca { size, .. } => {
-            add_operand_values(size, &mut used);
-        }
-        Instruction::BinOp { lhs, rhs, .. } => {
-            add_operand_values(lhs, &mut used);
-            add_operand_values(rhs, &mut used);
-        }
-        Instruction::UnaryOp { src, .. } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::Cmp { lhs, rhs, .. } => {
-            add_operand_values(lhs, &mut used);
-            add_operand_values(rhs, &mut used);
-        }
-        Instruction::Call { args, .. } => {
-            for arg in args { add_operand_values(arg, &mut used); }
-        }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
-            add_operand_values(func_ptr, &mut used);
-            for arg in args { add_operand_values(arg, &mut used); }
-        }
-        Instruction::GetElementPtr { base, offset, .. } => {
-            used.push(base.0);
-            add_operand_values(offset, &mut used);
-        }
-        Instruction::Cast { src, .. } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::Copy { src, .. } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::GlobalAddr { .. } => {}
-        Instruction::Memcpy { dest, src, .. } => {
-            used.push(dest.0);
-            used.push(src.0);
-        }
-        Instruction::VaArg { va_list_ptr, .. } => {
-            used.push(va_list_ptr.0);
-        }
-        Instruction::VaStart { va_list_ptr } => {
-            used.push(va_list_ptr.0);
-        }
-        Instruction::VaEnd { va_list_ptr } => {
-            used.push(va_list_ptr.0);
-        }
-        Instruction::VaCopy { dest_ptr, src_ptr } => {
-            used.push(dest_ptr.0);
-            used.push(src_ptr.0);
-        }
-        Instruction::AtomicRmw { ptr, val, .. } => {
-            add_operand_values(ptr, &mut used);
-            add_operand_values(val, &mut used);
-        }
-        Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
-            add_operand_values(ptr, &mut used);
-            add_operand_values(expected, &mut used);
-            add_operand_values(desired, &mut used);
-        }
-        Instruction::AtomicLoad { ptr, .. } => {
-            add_operand_values(ptr, &mut used);
-        }
-        Instruction::AtomicStore { ptr, val, .. } => {
-            add_operand_values(ptr, &mut used);
-            add_operand_values(val, &mut used);
-        }
-        Instruction::Fence { .. } => {}
-        Instruction::Phi { incoming, .. } => {
-            for (op, _) in incoming {
-                add_operand_values(op, &mut used);
-            }
-        }
-        Instruction::LabelAddr { .. } => {}
-        Instruction::GetReturnF64Second { .. } => {}
-        Instruction::GetReturnF32Second { .. } => {}
-        Instruction::GetReturnF128Second { .. } => {}
-        Instruction::SetReturnF64Second { src } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::SetReturnF32Second { src } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::SetReturnF128Second { src } => {
-            add_operand_values(src, &mut used);
-        }
-        Instruction::InlineAsm { outputs, inputs, .. } => {
-            for (_, ptr, _) in outputs {
-                used.push(ptr.0);
-            }
-            for (_, op, _) in inputs {
-                add_operand_values(op, &mut used);
-            }
-        }
-        Instruction::Intrinsic { dest_ptr, args, .. } => {
-            if let Some(ptr) = dest_ptr {
-                used.push(ptr.0);
-            }
-            for arg in args {
-                add_operand_values(arg, &mut used);
-            }
-        }
-        Instruction::Select { cond, true_val, false_val, .. } => {
-            add_operand_values(cond, &mut used);
-            add_operand_values(true_val, &mut used);
-            add_operand_values(false_val, &mut used);
-        }
-        Instruction::StackSave { .. } => {}
-        Instruction::StackRestore { ptr } => {
-            used.push(ptr.0);
-        }
-    }
-    used
-}
-
-fn terminator_used_values(term: &Terminator) -> Vec<u32> {
-    let mut used = Vec::new();
-    match term {
-        Terminator::Return(Some(op)) => add_operand_values(op, &mut used),
-        Terminator::CondBranch { cond, .. } => add_operand_values(cond, &mut used),
-        Terminator::IndirectBranch { target, .. } => add_operand_values(target, &mut used),
-        Terminator::Switch { val, .. } => add_operand_values(val, &mut used),
-        _ => {}
-    }
-    used
-}
-
-fn add_operand_values(op: &Operand, used: &mut Vec<u32>) {
-    if let Operand::Value(v) = op {
-        used.push(v.0);
-    }
 }
 
 /// Determine where phi nodes need to be inserted.

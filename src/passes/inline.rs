@@ -655,7 +655,7 @@ fn validate_function_values(func: &IrFunction, last_inlined_callee: &str) {
     let mut errors = Vec::new();
     for (block_idx, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
-            for v in instruction_used_values(inst) {
+            for v in inst.used_values() {
                 if !defined.contains(&v) {
                     errors.push(format!(
                         "  block[{}] (label .L{}) inst[{}]: uses undefined Value({}), inst={:?}",
@@ -664,7 +664,7 @@ fn validate_function_values(func: &IrFunction, last_inlined_callee: &str) {
                 }
             }
         }
-        for v in terminator_used_values(&block.terminator) {
+        for v in block.terminator.used_values() {
             if !defined.contains(&v) {
                 errors.push(format!(
                     "  block[{}] (label .L{}) terminator: uses undefined Value({})",
@@ -705,95 +705,6 @@ fn short_inst_name(inst: &Instruction) -> &'static str {
         Instruction::Select { .. } => "Select",
         _ => "Other",
     }
-}
-
-/// Collect all Value IDs used (as operands, not defined) by an instruction.
-fn instruction_used_values(inst: &Instruction) -> Vec<u32> {
-    let mut used = Vec::new();
-    match inst {
-        Instruction::Store { val, ptr, .. } => {
-            if let Operand::Value(v) = val { used.push(v.0); }
-            used.push(ptr.0);
-        }
-        Instruction::Load { ptr, .. } => {
-            used.push(ptr.0);
-        }
-        Instruction::BinOp { lhs, rhs, .. } => {
-            if let Operand::Value(v) = lhs { used.push(v.0); }
-            if let Operand::Value(v) = rhs { used.push(v.0); }
-        }
-        Instruction::UnaryOp { src, .. } => {
-            if let Operand::Value(v) = src { used.push(v.0); }
-        }
-        Instruction::Cmp { lhs, rhs, .. } => {
-            if let Operand::Value(v) = lhs { used.push(v.0); }
-            if let Operand::Value(v) = rhs { used.push(v.0); }
-        }
-        Instruction::Call { args, .. } => {
-            for a in args {
-                if let Operand::Value(v) = a { used.push(v.0); }
-            }
-        }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
-            if let Operand::Value(v) = func_ptr { used.push(v.0); }
-            for a in args {
-                if let Operand::Value(v) = a { used.push(v.0); }
-            }
-        }
-        Instruction::GetElementPtr { base, offset, .. } => {
-            used.push(base.0);
-            if let Operand::Value(v) = offset { used.push(v.0); }
-        }
-        Instruction::Cast { src, .. } => {
-            if let Operand::Value(v) = src { used.push(v.0); }
-        }
-        Instruction::Copy { src, .. } => {
-            if let Operand::Value(v) = src { used.push(v.0); }
-        }
-        Instruction::Memcpy { dest, src, .. } => {
-            used.push(dest.0);
-            used.push(src.0);
-        }
-        Instruction::Phi { incoming, .. } => {
-            for (op, _) in incoming {
-                if let Operand::Value(v) = op { used.push(v.0); }
-            }
-        }
-        Instruction::Select { cond, true_val, false_val, .. } => {
-            if let Operand::Value(v) = cond { used.push(v.0); }
-            if let Operand::Value(v) = true_val { used.push(v.0); }
-            if let Operand::Value(v) = false_val { used.push(v.0); }
-        }
-        Instruction::Intrinsic { dest_ptr, args, .. } => {
-            if let Some(v) = dest_ptr { used.push(v.0); }
-            for a in args {
-                if let Operand::Value(v) = a { used.push(v.0); }
-            }
-        }
-        _ => {} // Alloca, GlobalAddr, Fence, etc. don't use values as operands
-    }
-    used
-}
-
-/// Collect all Value IDs used by a terminator.
-fn terminator_used_values(term: &Terminator) -> Vec<u32> {
-    let mut used = Vec::new();
-    match term {
-        Terminator::Return(Some(op)) => {
-            if let Operand::Value(v) = op { used.push(v.0); }
-        }
-        Terminator::CondBranch { cond, .. } => {
-            if let Operand::Value(v) = cond { used.push(v.0); }
-        }
-        Terminator::IndirectBranch { target, .. } => {
-            if let Operand::Value(v) = target { used.push(v.0); }
-        }
-        Terminator::Switch { val, .. } => {
-            if let Operand::Value(v) = val { used.push(v.0); }
-        }
-        _ => {}
-    }
-    used
 }
 
 /// Information about a callee function eligible for inlining.
