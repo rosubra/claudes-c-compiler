@@ -132,23 +132,9 @@ impl RiscvCodegen {
 
     // ---- F128 store/load helpers ----
 
-    /// Get the full IEEE f128 low/high u64 halves for an F128 operand.
-    /// For LongDouble constants, converts x87 bytes to f128 directly (full precision).
-    /// For runtime values, returns None (caller must use __extenddftf2).
-    pub(super) fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
-        if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
-            let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
-            let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
-            let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
-            Some((lo, hi))
-        } else {
-            None
-        }
-    }
-
     /// Store an F128 value (16 bytes) to a direct stack slot.
     pub(super) fn emit_f128_store_to_slot(&mut self, val: &Operand, slot: StackSlot) {
-        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+        if let Some((lo, hi)) = crate::backend::cast::f128_const_halves(val) {
             // Full-precision constant: store both halves directly.
             self.state.emit_fmt(format_args!("    li t0, {}", lo as i64));
             self.emit_store_to_s0("t0", slot.0, "sd");
@@ -215,7 +201,7 @@ impl RiscvCodegen {
 
     /// Store an F128 value to the address in t5.
     pub(super) fn emit_f128_store_to_addr_in_t5(&mut self, val: &Operand) {
-        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+        if let Some((lo, hi)) = crate::backend::cast::f128_const_halves(val) {
             self.state.emit_fmt(format_args!("    li t0, {}", lo as i64));
             self.state.emit("    sd t0, 0(t5)");
             self.state.emit_fmt(format_args!("    li t0, {}", hi as i64));

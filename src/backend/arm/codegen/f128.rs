@@ -96,22 +96,9 @@ impl ArmCodegen {
         self.state.emit("    bl __extenddftf2");
     }
 
-    /// Get the full IEEE f128 low/high u64 halves for an F128 constant.
-    /// Returns None for non-constant operands.
-    pub(super) fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
-        if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
-            let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
-            let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
-            let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
-            Some((lo, hi))
-        } else {
-            None
-        }
-    }
-
     /// Store an F128 value (16 bytes) to a direct stack slot.
     pub(super) fn emit_f128_store_to_slot(&mut self, val: &Operand, slot: StackSlot) {
-        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+        if let Some((lo, hi)) = crate::backend::cast::f128_const_halves(val) {
             // Full-precision constant: store both halves directly.
             self.emit_load_imm64("x0", lo as i64);
             self.emit_store_to_sp("x0", slot.0, "str");
@@ -195,7 +182,7 @@ impl ArmCodegen {
 
     /// Store an F128 value to an address in x17.
     pub(super) fn emit_f128_store_to_addr_in_x17(&mut self, val: &Operand) {
-        if let Some((lo, hi)) = Self::f128_const_halves(val) {
+        if let Some((lo, hi)) = crate::backend::cast::f128_const_halves(val) {
             self.state.emit("    mov x16, x17"); // save addr
             self.emit_load_imm64("x0", lo as i64);
             self.state.emit("    str x0, [x16]");

@@ -168,22 +168,6 @@ impl BigUint {
         }
     }
 
-    /// Divide in place by divisor, return remainder.
-    #[allow(dead_code)]
-    fn div_u32(&mut self, divisor: u32) -> u32 {
-        let mut rem: u64 = 0;
-        for limb in self.limbs.iter_mut().rev() {
-            let val = (rem << 32) | (*limb as u64);
-            *limb = (val / divisor as u64) as u32;
-            rem = val % divisor as u64;
-        }
-        // Strip leading zero limbs
-        while self.limbs.len() > 1 && *self.limbs.last().unwrap() == 0 {
-            self.limbs.pop();
-        }
-        rem as u32
-    }
-
     /// Shift left by n bits.
     fn shl(&mut self, n: u32) {
         if n == 0 || self.is_zero() {
@@ -265,32 +249,7 @@ impl BigUint {
             }
         }
 
-        // TODO: implement proper rounding using has_bits_below(shift)
-
         (val, shift as i32)
-    }
-
-    /// Check if any bits are set below bit position `pos`.
-    #[allow(dead_code)]
-    fn has_bits_below(&self, pos: u32) -> bool {
-        let word_idx = (pos / 32) as usize;
-        let bit_idx = pos % 32;
-
-        // Check partial word
-        if word_idx < self.limbs.len() && bit_idx > 0 {
-            if self.limbs[word_idx] & ((1u32 << bit_idx) - 1) != 0 {
-                return true;
-            }
-        }
-
-        // Check full words below
-        for i in 0..word_idx.min(self.limbs.len()) {
-            if self.limbs[i] != 0 {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Divide self by other (big integer), returning quotient. Self is modified to become quotient.

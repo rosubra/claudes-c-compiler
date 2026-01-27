@@ -1,30 +1,18 @@
 High-Impact Runtime Performance Improvements
 Priority: HIGH
 
-Profiling zlib shows our generated code is ~8x slower than GCC (-O2).
-The main bottlenecks are:
+Profiling zlib shows our generated code is slower than GCC (-O2).
+Remaining bottlenecks (items 1-2 have been fixed):
 
-1. STACK-CENTRIC CODEGEN MODEL
-   Our codegen generates ~5x more assembly than GCC for the same source.
-   Root cause: every IR value gets a stack slot, and most operations
-   route through load-from-stack -> compute -> store-to-stack.
+1. STACK-CENTRIC CODEGEN MODEL -- DONE
+   Caller-saved registers (r11, r10, r8, r9 on x86) are now used for values
+   that don't span function calls, eliminating most stack traffic in hot loops.
+   Callee-saved register allocation was already done (rbx, r12-r15).
+   ARM and RISC-V still need caller-saved register allocation.
 
-   Key metric for deflate.c:
-   - Our compiler: 23,500 lines of assembly, 9,889 stack loads, 9,889 stack stores
-   - GCC -O2: 4,864 lines of assembly
-
-   Fix: The register allocator only uses 5 callee-saved registers (rbx, r12-r15).
-   It should also use caller-saved registers (rdi, rsi, rdx, r8-r11) in regions
-   without function calls. This is the single biggest performance opportunity.
-
-2. STRUCT FIELD ACCESS OVERHEAD
-   Every struct field access (ptr + offset) generates:
-     movq %rdi, %rax         ; load ptr
-     movq $180, %rcx          ; load constant offset
-     addq %rcx, %rax          ; add
-   Instead of: leaq 180(%rdi), %rax   (1 instruction)
-
-   Fix: Detect GEP with constant offset and emit leaq/add-immediate.
+2. STRUCT FIELD ACCESS OVERHEAD -- DONE
+   GEP folding now merges constant-offset GetElementPtr with loads/stores,
+   emitting base+offset addressing modes. Extended to non-alloca pointer bases.
 
 3. LOOP INDUCTION VARIABLE STRENGTH REDUCTION
    Array accesses in loops compute index*stride every iteration:
@@ -49,16 +37,11 @@ The main bottlenecks are:
    Fix: Better peephole patterns, or teach the register allocator
    to avoid the accumulator roundtrip for register-to-register ops.
 
-These are ordered by estimated impact. Item 1 alone could provide 2-4x speedup.
-
-Relationship to other ideas:
-- register_allocator.txt: describes remaining register allocator work (item 1)
-- high_value_location_abstraction.txt: ValueLocation enum for items 1 and 5
-- optimization_passes_future.txt: lists strength reduction as future pass (item 3)
+Items 3-5 are the remaining performance bottlenecks.
 
 Key files:
 - src/backend/regalloc.rs (current linear scan allocator)
 - src/backend/liveness.rs (live interval computation)
 - src/backend/x86/codegen/codegen.rs (GEP emission, instruction selection)
-- src/backend/x86/codegen/peephole.rs (redundant move elimination)
+- src/backend/x86/codegen/peephole/ (redundant move elimination)
 - src/passes/simplify.rs (algebraic simplification, redundant cast elimination)

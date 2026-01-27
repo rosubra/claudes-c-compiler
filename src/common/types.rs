@@ -1154,13 +1154,6 @@ impl CType {
         matches!(self, CType::Pointer(inner, _) if matches!(inner.as_ref(), CType::Function(_)))
     }
 
-    /// Whether this is a pointer-to-function-pointer: Pointer(Pointer(Function(_))).
-    pub fn is_ptr_to_function_pointer(&self) -> bool {
-        matches!(self, CType::Pointer(inner, _)
-            if matches!(inner.as_ref(), CType::Pointer(inner2, _)
-                if matches!(inner2.as_ref(), CType::Function(_))))
-    }
-
     /// Get the pointee type if this is a Pointer.
     pub fn pointee(&self) -> Option<&CType> {
         match self {

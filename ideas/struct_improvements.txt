@@ -1,32 +1,23 @@
 Struct/union feature improvements needed:
 
+Remaining work:
 1. Struct copy/assignment (s1 = s2): Need to emit memcpy-style code
    for struct-to-struct assignment. Currently only field-by-field access works.
 
-2. Struct passing to functions: DONE for all three backends (x86, ARM, RISC-V).
-   Small structs (<=16 bytes) passed by value in GP registers.
-   Large structs (>16 bytes) passed on the stack (MEMORY class).
-
-3. Struct return values: Functions returning structs need the hidden first
+2. Struct return values: Functions returning structs need the hidden first
    parameter (sret) ABI handling.
 
-4. Designated initializers: Most cases now work including:
-   - .a[1]=1, 7 (continuation after nested designator into array field)
-   - .t.a[1] = {1,2,3} (nested struct + array index + brace-list value)
-   - Compound literal with designators: (struct s){ {.a[1]=2,8} }
-   - Compound literals now use full emit_struct_init path
-   Still needs work: very deep nesting edge cases.
-
-5. Nested struct initialization: Basic cases work. Multi-dimensional arrays of
+3. Nested struct initialization: Basic cases work. Multi-dimensional arrays of
    char * pointers (e.g., char *c[2][1][1][1][3]) need more work.
 
-6. Anonymous structs/unions as members.
+4. Anonymous structs/unions as members.
 
-7. Bitfield access (partially working but needs proper mask/shift).
+5. Bitfield access (partially working but needs proper mask/shift).
 
-8. Array members in structs (e.g., struct { int arr[10]; }).
+6. Array members in structs (e.g., struct { int arr[10]; }).
    Need proper layout and GEP for arr[i] within the struct.
 
-9. Struct layout scoping: FIXED. Local struct definitions are properly scoped;
-   a local struct with the same tag name as a global struct shadows the global
-   layout within its scope, and the global layout is restored when the scope exits.
+Completed:
+- Struct passing to functions (all three backends: x86, ARM, RISC-V)
+- Designated initializers (most cases including nested, compound literals)
+- Struct layout scoping (local struct defs properly shadow globals)

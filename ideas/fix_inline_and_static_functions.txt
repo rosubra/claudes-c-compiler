@@ -6,18 +6,6 @@ Remaining issues with static/inline functions:
    This is likely a parser/codegen scope issue with variable declarations
    inside nested blocks.
 
-2. KERNEL CRITICAL: Our compiler emits standalone definitions for `static inline`
-   functions instead of inlining them. This causes objtool validation failures
-   in the Linux kernel. For example, the kernel's `stac()` inline function
-   (which does a STAC instruction) is emitted as a standalone function. objtool
-   then flags it with "return with UACCESS enabled" because a standalone stac()
-   function returns without a matching clac(). GCC never emits these functions
-   at all - it always inlines them. This is the #1 blocker for kernel boot
-   after the Spectre mitigation flags have been fixed.
-
-   Impact: Every kernel .c file includes headers with these inline functions,
-   so ALL compiled files fail objtool validation.
-
-   Fix: Implement basic inlining for `static inline` functions, or at minimum
-   don't emit standalone definitions for functions that have only been called
-   (never had their address taken).
+2. DONE: Static inline function inlining is now implemented. always_inline,
+   small static inline, and small static functions are all inlined. The kernel
+   objtool validation issue is resolved.

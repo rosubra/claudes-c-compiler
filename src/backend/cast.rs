@@ -7,7 +7,7 @@
 //! mapping for F128 soft-float arithmetic and comparisons (ARM, RISC-V).
 
 use crate::common::types::IrType;
-use crate::ir::ir::{IrBinOp, IrCmpOp};
+use crate::ir::ir::{IrBinOp, IrCmpOp, IrConst, Operand};
 
 /// Classification of type casts. All three backends use the same control flow
 /// to decide which kind of cast to emit; only the actual instructions differ.
@@ -245,5 +245,19 @@ pub fn f128_cmp_libcall(op: IrCmpOp) -> (&'static str, F128CmpKind) {
         IrCmpOp::Sle | IrCmpOp::Ule => ("__letf2", F128CmpKind::LeZero),
         IrCmpOp::Sgt | IrCmpOp::Ugt => ("__gttf2", F128CmpKind::GtZero),
         IrCmpOp::Sge | IrCmpOp::Uge => ("__getf2", F128CmpKind::GeZero),
+    }
+}
+
+/// Extract the IEEE f128 low/high u64 halves from an F128 constant operand.
+/// Converts the x87 80-bit extended format to IEEE binary128 format.
+/// Returns None for non-constant operands (caller must use runtime conversion).
+pub fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
+    if let Operand::Const(IrConst::LongDouble(_, x87_bytes)) = op {
+        let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(x87_bytes);
+        let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
+        let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
+        Some((lo, hi))
+    } else {
+        None
     }
 }

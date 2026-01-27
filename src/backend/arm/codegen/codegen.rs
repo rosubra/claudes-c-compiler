@@ -787,18 +787,6 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit store to an arbitrary base register with offset, handling large offsets via x17.
-    #[allow(dead_code)]
-    fn emit_store_to_reg(&mut self, src: &str, base: &str, offset: i64, instr: &str) {
-        if Self::is_valid_imm_offset(offset, instr, src) {
-            self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, src, base, offset));
-        } else {
-            self.load_large_imm("x17", offset);
-            self.state.emit_fmt(format_args!("    add x17, {}, x17", base));
-            self.state.emit_fmt(format_args!("    {} {}, [x17]", instr, src));
-        }
-    }
-
     /// Load an immediate into a register using the most efficient sequence.
     /// Handles all 64-bit values including negatives via MOVZ/MOVK or MOVN/MOVK.
     pub(super) fn load_large_imm(&mut self, reg: &str, val: i64) {

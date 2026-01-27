@@ -128,7 +128,7 @@ pub trait TypeConvertContext {
 ///
 /// Returns `Some(index)` where the core begins, or `None` if no function
 /// pointer/function declarator is present.
-pub fn find_function_pointer_core(derived: &[DerivedDeclarator]) -> Option<usize> {
+fn find_function_pointer_core(derived: &[DerivedDeclarator]) -> Option<usize> {
     for i in 0..derived.len() {
         // Look for Pointer followed by FunctionPointer
         if matches!(&derived[i], DerivedDeclarator::Pointer) {
@@ -153,7 +153,7 @@ pub fn find_function_pointer_core(derived: &[DerivedDeclarator]) -> Option<usize
 /// Convert a ParamDecl list to a list of (CType, Option<name>) pairs.
 ///
 /// Uses the provided `TypeConvertContext` to resolve each parameter's type.
-pub fn convert_param_decls_to_ctypes(
+fn convert_param_decls_to_ctypes(
     ctx: &dyn TypeConvertContext,
     params: &[ParamDecl],
 ) -> Vec<(CType, Option<String>)> {

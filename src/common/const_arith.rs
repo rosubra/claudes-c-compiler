@@ -16,7 +16,7 @@ use crate::frontend::parser::ast::BinOp;
 /// Wrap an i64 result to 32-bit width if `is_32bit` is true, otherwise return as-is.
 /// This handles the C semantics of truncating arithmetic results to `int` width.
 #[inline]
-pub fn wrap_result(v: i64, is_32bit: bool) -> i64 {
+fn wrap_result(v: i64, is_32bit: bool) -> i64 {
     if is_32bit { v as i32 as i64 } else { v }
 }
 
@@ -24,7 +24,7 @@ pub fn wrap_result(v: i64, is_32bit: bool) -> i64 {
 /// Converts operands to the appropriate unsigned type, applies the operation,
 /// and sign-extends the result back to i64.
 #[inline]
-pub fn unsigned_op(l: i64, r: i64, is_32bit: bool, op: fn(u64, u64) -> u64) -> i64 {
+fn unsigned_op(l: i64, r: i64, is_32bit: bool, op: fn(u64, u64) -> u64) -> i64 {
     if is_32bit {
         op(l as u32 as u64, r as u32 as u64) as u32 as i64
     } else {
@@ -34,7 +34,7 @@ pub fn unsigned_op(l: i64, r: i64, is_32bit: bool, op: fn(u64, u64) -> u64) -> i
 
 /// Convert a boolean to i64 (1 for true, 0 for false).
 #[inline]
-pub fn bool_to_i64(b: bool) -> i64 {
+fn bool_to_i64(b: bool) -> i64 {
     if b { 1 } else { 0 }
 }
 
@@ -51,7 +51,7 @@ pub fn bool_to_i64(b: bool) -> i64 {
 /// - lowering uses IrType: `(ir_type.size() <= 4, ir_type.is_unsigned())`
 ///
 /// Returns `Some(IrConst::I64(result))` or `None` for division by zero.
-pub fn eval_const_binop_int(op: &BinOp, l: i64, r: i64, is_32bit: bool, is_unsigned: bool) -> Option<IrConst> {
+fn eval_const_binop_int(op: &BinOp, l: i64, r: i64, is_32bit: bool, is_unsigned: bool) -> Option<IrConst> {
     let result = match op {
         BinOp::Add => wrap_result(l.wrapping_add(r), is_32bit),
         BinOp::Sub => wrap_result(l.wrapping_sub(r), is_32bit),
@@ -252,7 +252,7 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
 /// C type, used to correctly zero-extend or sign-extend when widening to i128.
 /// Per C11 6.3.1.3, converting unsigned long long to __int128 preserves the value
 /// (zero-extends), while converting signed long long sign-extends.
-pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool, lhs_unsigned: bool, rhs_unsigned: bool) -> Option<IrConst> {
+fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool, lhs_unsigned: bool, rhs_unsigned: bool) -> Option<IrConst> {
     // When widening a non-I128 operand to 128-bit, use the operand's own signedness
     // to decide zero-extend vs sign-extend. This is critical for cases like:
     //   (i128)x << 64 | 0xFEDCBA9876543210ULL

@@ -739,13 +739,6 @@ impl LineStore {
         self.entries.len()
     }
 
-    /// Check if the store is empty.
-    #[inline]
-    #[allow(dead_code)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Replace a line with new text. Stores the replacement in the side buffer.
     pub(super) fn replace(&mut self, idx: usize, new_text: String) {
         let rep_idx = self.replacements.len();

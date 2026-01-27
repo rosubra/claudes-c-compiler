@@ -92,40 +92,11 @@ fn is_callee_saved_reg(reg: RegId) -> bool {
     matches!(reg, 3 | 12 | 13 | 14 | 15)
 }
 
-/// Returns all string patterns that could reference a given register family in asm text.
-/// For example, register family 13 (r13) can appear as %r13, %r13d, %r13w, %r13b.
-/// Note: This is now only used as a fallback; the fast path uses LineInfo.reg_refs.
-#[allow(dead_code)]
-fn reg_family_patterns(reg: RegId) -> &'static [&'static str] {
-    match reg {
-        3 => &["%rbx", "%ebx", "%bx", "%bl", "%bh"],
-        12 => &["%r12", "%r12d", "%r12w", "%r12b"],
-        13 => &["%r13", "%r13d", "%r13w", "%r13b"],
-        14 => &["%r14", "%r14d", "%r14w", "%r14b"],
-        15 => &["%r15", "%r15d", "%r15w", "%r15b"],
-        _ => &[],
-    }
-}
-
 /// Check if a line of assembly text references a given register family.
-/// Uses the pre-computed reg_refs bitmask for O(1) lookup when available.
+/// Uses the pre-computed reg_refs bitmask for O(1) lookup.
 #[inline]
 fn line_references_reg_fast(info: &LineInfo, reg: RegId) -> bool {
     info.reg_refs & (1u16 << reg) != 0
-}
-
-/// Check if a line of assembly text references a given register family.
-/// Fallback for lines where reg_refs wasn't pre-computed (shouldn't happen
-/// in normal flow since classify_line now sets reg_refs for all instruction kinds).
-#[allow(dead_code)]
-fn line_references_reg(line: &str, reg: RegId) -> bool {
-    let patterns = reg_family_patterns(reg);
-    for pat in patterns {
-        if line.contains(pat) {
-            return true;
-        }
-    }
-    false
 }
 
 fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [LineInfo]) {

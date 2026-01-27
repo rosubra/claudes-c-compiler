@@ -71,9 +71,6 @@ impl SymbolTable {
         None
     }
 
-    pub fn lookup_current_scope(&self, name: &str) -> Option<&Symbol> {
-        self.scopes.last()?.symbols.get(name)
-    }
 }
 
 impl Default for SymbolTable {
