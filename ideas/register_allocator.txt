@@ -1,29 +1,22 @@
-Register allocator -- DONE (all 3 backends)
+Register Allocator Improvements
+===============================
 
-Three-phase linear scan register allocator:
-1. Callee-saved registers for call-spanning values
-2. Caller-saved registers for non-call-spanning values
-3. Callee-saved spillover for non-call-spanning values that overflowed Phase 2
+The three-phase linear scan allocator is implemented on all three backends:
+- x86-64: rbx, r12-r15 (callee) + r11, r10, r8, r9 (caller) = 9 registers
+- AArch64: x20-x28 (callee) + x13, x14 (caller) = 11 registers
+- RISC-V: s1, s7-s11 (callee) = 6 registers
 
-Implemented for:
-- x86-64: rbx, r12-r15 (5 callee) + r11, r10, r8, r9 (4 caller) = 9 registers
-- AArch64: x20-x28 (9 callee) + x13, x14 (2 caller) = 11 registers
-- RISC-V: s1, s7-s11 (6 callee) = 6 registers
-
-Liveness analysis uses backward dataflow iteration and supports loops.
-ARM integration skips variadic functions to avoid callee-save/VA-save area conflicts.
+Liveness analysis uses backward dataflow iteration with loop awareness.
+ARM skips variadic functions to avoid callee-save/VA-save area conflicts.
 
 Remaining improvements:
-1. Eliminate write-through: currently every store goes to both stack AND register.
-   Skip the stack store when the value is register-allocated and has no other
-   readers (requires use-def chains or a smarter analysis).
-2. Register-to-register operations: instead of rax/rcx accumulator model,
-   emit operations directly on callee-saved registers (e.g., addq %r12, %rbx
-   instead of movq %r12, %rax / addq %rbx, %rcx / ... / movq %rax, %r15).
-3. Spill/reload insertion: currently values that don't fit spill to the existing
-   stack slot. A proper spill/reload would move values between registers and
-   stack at optimal points.
-4. Call-clobber handling: currently functions with inline asm or atomics bail out.
-   Should instead insert saves around clobbering instructions.
-5. ARM variadic support: currently skipped; need to handle callee-save area
-   placement relative to VA register save areas.
+1. Eliminate write-through: skip the stack store when the value is
+   register-allocated and has no other readers.
+2. Register-to-register operations: emit ops directly on callee-saved
+   registers instead of routing through the accumulator.
+3. Spill/reload insertion: move values between registers and stack at
+   optimal points instead of falling back to the stack slot.
+4. Call-clobber handling: insert saves around clobbering instructions
+   instead of bailing out for functions with inline asm or atomics.
+5. ARM variadic support: handle callee-save area placement relative
+   to VA register save areas.

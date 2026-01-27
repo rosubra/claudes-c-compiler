@@ -1,58 +1,31 @@
-Compile Speed Improvements - Profiling Results and Opportunities
-================================================================
+Compile Speed Improvements
+===========================
+Priority: HIGH
 
 Profiled on sqlite3.c (2550 functions, 694K tokens, 22MB asm output).
-Current bottleneck breakdown (from perf profiling):
 
-1. EXTERNAL ASSEMBLER (~26% of total time, ~0.7s)
-   The compiler shells out to `as` (x86_64-linux-gnu-as) to assemble text
-   assembly into object files. This is the single biggest time consumer.
+Remaining bottlenecks:
 
-   FIX: Implement a native assembler that directly emits machine code.
-   This would skip: text assembly generation (0.5s codegen), pipe to
-   external process, and the assembler's own parsing of text.
-   The native_elf_writer.txt idea covers this. Expected improvement: ~30-40%.
+1. EXTERNAL ASSEMBLER (~26% of total time)
+   The compiler shells out to gcc/as for assembling text assembly into
+   object files. This is the single biggest time consumer.
+   Fix: Native assembler + ELF writer (see native_elf_writer.txt).
+   Expected improvement: ~30-40%.
 
-2. ALLOCATION OVERHEAD (7.7% of total, ~0.2s)
-   malloc/free/realloc take 7.7% of samples. Major callers:
-   - ir::analysis::build_cfg (Vec<Vec<usize>> for pred/succ lists) [FIXED: now uses FlatAdj CSR format]
-   - gvn::process_block (FxHashMap operations)
-   - mem2reg::rename_block
-   - passes::div_by_const
+2. ALLOCATION OVERHEAD (~7.7% of total)
+   malloc/free/realloc from ir::analysis::build_cfg, GVN, mem2reg.
+   Partially fixed: build_cfg uses FlatAdj CSR format, CFG/dominator
+   analysis is shared across GVN/LICM/IVSR via CfgAnalysis.
+   Further: arena/bump allocators, reuse Vec buffers across functions.
 
-   PARTIALLY FIXED: build_cfg now uses FlatAdj (CSR format) with u32 indices,
-   reducing per-call allocations from 2*n+2 to 4. CFG/dominator analysis is now
-   shared across GVN/LICM/IVSR via CfgAnalysis (eliminates redundant build_cfg +
-   compute_dominators calls). Further improvements possible:
-   - Use arena allocation or bump allocators for per-function data
-   - Reuse Vec buffers across function invocations
+3. STRING COMPARISON (~3.4% of total)
+   memcmp in peephole dead store elimination (O(n^2) str::contains),
+   preprocessor macro expansion, backend symbol lookups.
+   Parser typedef lookup fixed (FxHashSet).
+   Fix: String interning with u32 symbol IDs.
 
-3. STRING COMPARISON (3.39% of total, ~0.09s)
-   memcmp from str::contains and pattern matching. Major callers:
-   - Peephole dead store elimination (O(n^2) str::contains on asm lines)
-   - Parser typedef lookup (FIXED: now uses FxHashSet)
-   - Preprocessor macro expansion (FxHashSet<String> lookups)
-   - Backend codegen symbol lookups
+4. PEEPHOLE OPTIMIZER (~1.5%)
+   Dead store elimination has O(n^2) behavior scanning assembly lines.
+   Fix: Hash-based store location index for O(n) dead store elimination.
 
-   FIX: Intern strings into a global string table. Use u32 symbol IDs
-   everywhere instead of String keys. This eliminates hashing and
-   comparing multi-byte strings in hot paths.
-
-4. GVN PASS COST (0.11s total across iterations)
-   GVN is the most expensive single optimization pass. Each invocation
-   builds CFG + dominators from scratch.
-
-   FIXED: CfgAnalysis struct caches CFG/dominator/dom_tree analysis and
-   shares it across GVN, LICM, and IVSR within each pipeline iteration.
-   Eliminates 2 redundant build_cfg + compute_dominators calls per function
-   per iteration.
-
-5. PEEPHOLE OPTIMIZER (1.47% on eliminate_dead_stores)
-   The dead store elimination in the peephole has O(n^2) behavior due
-   to scanning assembly lines for pattern matches.
-
-   FIX: Use a hash-based approach to index store locations, enabling
-   O(n) dead store elimination instead of O(n^2).
-
-Status: Items 1-5 identified via perf profiling. Item 1 (native assembler)
-is by far the highest-impact change but also the largest engineering effort.
+The native assembler (item 1) is by far the highest-impact change.

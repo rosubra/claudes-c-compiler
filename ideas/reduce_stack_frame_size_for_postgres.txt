@@ -1,39 +1,23 @@
-Reduce Stack Frame Size for PostgreSQL plpgsql Recursion
-========================================================
-Date: 2026-01-26
+Reduce Stack Frame Size for PostgreSQL
+=======================================
 
-PROBLEM
--------
-PostgreSQL's plpgsql test "recursion_test(4,3)" fails with "stack depth
-limit exceeded" at max_stack_depth=2048kB. The issue is that our compiled
-code uses significantly larger stack frames than GCC, causing the cumulative
-stack depth to exceed the limit in deeply nested call chains.
+PostgreSQL's plpgsql "recursion_test(4,3)" fails with "stack depth limit
+exceeded" at max_stack_depth=2048kB. Our stack frames are ~3.8x larger
+than GCC's.
 
-ROOT CAUSES
------------
+Root causes:
 1. Every SSA temporary gets an 8-byte stack slot, even for i32/i16/i8 types.
-   A simple `int a = b + c` generates 3-4 separate 8-byte slots (for the
-   loads, the add result, and the store), while GCC uses 4-byte movl
-   instructions with tighter packing.
+2. Intermediate SSA values from expression evaluation each get their own slot.
 
-2. Intermediate SSA values from expression evaluation each get their own
-   slot. For `a[i].field`, we generate separate slots for: load a, load i,
-   GEP computation, field offset GEP, and the load result. GCC computes
-   these in-register without spilling.
-
-REMAINING FIXES (ordered by impact and feasibility)
-----------------------------------------------------
-1. Use 4-byte slots for i32 and smaller types (HIGH IMPACT, MEDIUM EFFORT)
+Remaining fixes:
+1. Use 4-byte slots for i32 and smaller types (HIGH IMPACT)
    - Change slot_size computation in calculate_stack_space_common
-   - Requires changes to store/load paths in all 3 backends to use movl
-   - Could reduce frame sizes by ~40% for typical C code
+   - Requires changes to store/load paths in all 3 backends
+   - Could reduce frame sizes by ~40%
 
 2. Skip slot allocation for single-use values consumed immediately (HIGH IMPACT)
-   - If a value is defined at instruction N and only used at instruction N+1,
-     it doesn't need a stack slot (the value stays in %rax between instructions)
-   - Requires tracking "immediate consumers" during stack space calculation
-   - Could eliminate 30-50% of slots in typical functions
+   - If a value is defined at instruction N and only used at N+1, it doesn't
+     need a stack slot (stays in accumulator register)
+   - Could eliminate 30-50% of slots
 
-3. DONE: Caller-saved register allocation now implemented on x86.
-   Caller-saved registers (r11, r10, r8, r9) used for values not spanning
-   function calls. ARM and RISC-V still need this.
+Note: Caller-saved register allocation is now done on all three backends.

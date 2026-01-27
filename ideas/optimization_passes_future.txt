@@ -1,39 +1,29 @@
-Future optimization passes to implement:
+Future Optimization Passes
+===========================
+Priority: MEDIUM
 
-Note: SSA is now implemented. These passes can proceed.
-
-The following passes are implemented and working:
-- Constant folding (constant_fold.rs)
-- Copy propagation (copy_prop.rs)
-- Dead code elimination (dce.rs)
-- Dominator-based GVN / CSE (gvn.rs) - walks dominator tree with scoped hash
-  tables; value-numbers BinOp, UnaryOp, Cmp, Cast, and GetElementPtr
-- Algebraic simplification + strength reduction (simplify.rs)
-  - Includes: mul/div/rem by power-of-2 -> shift/and,
-    redundant Cast elimination, GEP zero-offset elimination
-- CFG simplification (cfg_simplify.rs) - dead block removal, jump threading
-- LICM (licm.rs) - loop-invariant code motion, hoists pure computations
-  to loop preheaders. Uses natural loop detection via back edges + dominators.
-  Runs at -O2 and above.
-- x86-64 peephole optimizer (peephole.rs in backend/x86/codegen/)
-- Function inlining (inline.rs) - always_inline, small static/static-inline
-  functions. Includes IPCP (interprocedural constant propagation).
-- If-conversion (if_convert.rs) - converts simple if-then-else to conditional moves
-- Integer narrowing (narrow.rs) - narrows operations to smaller integer widths
-- Division by constant strength reduction (div_by_const.rs) - replaces div/idiv
-  by constants with multiply-and-shift sequences (2.2x speedup on div-heavy code)
+Currently implemented passes:
+- constant_fold.rs        Constant folding and propagation
+- copy_prop.rs            Copy propagation
+- dce.rs                  Dead code elimination
+- gvn.rs                  Dominator-based GVN/CSE
+- simplify.rs             Algebraic simplification, strength reduction
+- cfg_simplify.rs         Dead block removal, jump threading
+- licm.rs                 Loop-invariant code motion
+- inline.rs               Function inlining (always_inline + small static)
+- if_convert.rs           Diamond if-then-else to conditional moves
+- narrow.rs               Integer narrowing
+- div_by_const.rs         Division by constant strength reduction
+- ipcp.rs                 Interprocedural constant propagation
+- iv_strength_reduce.rs   Induction variable strength reduction
 
 Shared infrastructure:
-- ir/analysis.rs: CFG construction, dominator tree (Cooper-Harvey-Kennedy),
-  dominance frontiers, dom tree children. Used by both mem2reg and GVN.
+- ir/analysis.rs: CFG, dominator tree (Cooper-Harvey-Kennedy), dominance
+  frontiers. Used by mem2reg, GVN, LICM, IVSR.
 
 Next passes to add:
-1. SCCP (Sparse Conditional Constant Propagation): Propagate constants through
-   the CFG, taking branch conditions into account. More powerful than simple
-   constant folding + copy propagation.
+1. SCCP (Sparse Conditional Constant Propagation): propagate constants
+   through the CFG taking branch conditions into account.
 
-2. Strength reduction in loops: Replace expensive operations (mul) with
-   cheaper ones (add) for loop induction variables. LICM is now done;
-   strength reduction would further help loop performance.
-
-Priority: MEDIUM (existing passes handle the most impactful cases)
+2. Loop strength reduction extensions: extend iv_strength_reduce to handle
+   pointer-based induction variables and more complex patterns.

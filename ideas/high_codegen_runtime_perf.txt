@@ -1,57 +1,32 @@
-High-Impact Runtime Performance Improvements
+Runtime Performance Improvements
+=================================
 Priority: HIGH
 
-Profiling zlib shows our generated code is slower than GCC (-O2).
-Remaining bottlenecks (items 1-2 have been fixed):
+Remaining bottlenecks (profiled on zlib vs GCC -O2):
 
-1. STACK-CENTRIC CODEGEN MODEL -- DONE
-   Caller-saved registers (r11, r10, r8, r9 on x86) are now used for values
-   that don't span function calls, eliminating most stack traffic in hot loops.
-   Callee-saved register allocation was already done (rbx, r12-r15).
-   Phase 3 "callee-saved spillover" now also assigns unused callee-saved
-   registers to high-priority non-call-spanning values that overflow the
-   caller-saved pool. This is critical for call-free hot loops (hash, sort,
-   matrix multiply) where all 5+4=9 registers are now available. ~15% speedup
-   on compute-heavy benchmarks. All three backends benefit.
-
-2. STRUCT FIELD ACCESS OVERHEAD -- DONE
-   GEP folding now merges constant-offset GetElementPtr with loads/stores,
-   emitting base+offset addressing modes. Extended to non-alloca pointer bases.
-
-3. LOOP INDUCTION VARIABLE STRENGTH REDUCTION
+1. LOOP INDUCTION VARIABLE STRENGTH REDUCTION
    Array accesses in loops compute index*stride every iteration:
      movslq i, %rax; shlq $2, %rax; addq base, %rax; movl (%rax), ...
-   Instead of incrementing a pointer: addq $4, %rdi; movl (%rdi), ...
+   Should increment a pointer instead: addq $4, %rdi; movl (%rdi), ...
+   Fix: Loop strength reduction pass (iv_strength_reduce.rs exists but
+   may need extension for pointer-based induction variables).
 
-   Fix: Add a loop strength reduction pass that converts i*stride+base
-   to an incremented pointer.
-
-4. REDUNDANT SIGN EXTENSIONS
+2. REDUNDANT SIGN EXTENSIONS
    The lowering emits Cast i32->i64 for array indices even when the
-   value is already 64-bit. The codegen then emits redundant movslq/cltq.
+   value is already 64-bit. Codegen emits redundant movslq/cltq.
    The peephole catches some but not all cases.
-
    Fix: Track value widths in the IR and eliminate redundant casts.
 
-5. REDUNDANT REGISTER-REGISTER MOVES
-   Many patterns like: movq %rax, %r14; movq %r14, %r15
-   These arise because the codegen model routes through %rax as
-   accumulator, then copies to callee-saved registers.
-
+3. REDUNDANT REGISTER-REGISTER MOVES
+   Patterns like: movq %rax, %r14; movq %r14, %r15
+   Arise because codegen routes through %rax as accumulator, then
+   copies to callee-saved registers.
    Fix: Better peephole patterns, or teach the register allocator
    to avoid the accumulator roundtrip for register-to-register ops.
 
-6. XOR-ZEROING AND TEST-FOR-ZERO -- DONE
-   Replaced all `movq $0, %reg` with `xorl %ereg, %ereg` (2 bytes vs 7,
-   breaks register dependencies on modern CPUs) and all `cmp $0, %reg`
-   with `test %reg, %reg` (shorter encoding). On SQLite this eliminates
-   ~25K suboptimal instructions.
-
-Items 3-5 are the remaining performance bottlenecks.
-
 Key files:
-- src/backend/regalloc.rs (current linear scan allocator)
-- src/backend/liveness.rs (live interval computation)
-- src/backend/x86/codegen/codegen.rs (GEP emission, instruction selection)
-- src/backend/x86/codegen/peephole/ (redundant move elimination)
-- src/passes/simplify.rs (algebraic simplification, redundant cast elimination)
+- src/backend/regalloc.rs
+- src/backend/liveness.rs
+- src/backend/x86/codegen/peephole/
+- src/passes/simplify.rs
+- src/passes/iv_strength_reduce.rs

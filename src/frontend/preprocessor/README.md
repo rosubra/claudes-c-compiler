@@ -19,12 +19,17 @@ preprocessing into the lexer but means macro source locations are lost.
   infinite loops (C11 6.10.3.4).
 - **conditionals.rs** - `ConditionalStack`: tracks `#if`/`#ifdef`/`#elif`/`#else`/
   `#endif` nesting. Includes a simple constant expression evaluator for `#if`.
+- **expr_eval.rs** - Expression evaluator for `#if` directive constant expressions.
+- **includes.rs** - Include file resolution: searches `-I` paths then system paths.
 - **builtin_macros.rs** - Defines GCC-compatible builtin function-like macros
   (e.g., `__builtin_va_start`, `__builtin_types_compatible_p`).
-- **utils.rs** - Shared helpers for literal skipping (`skip_literal_bytes`,
-  `copy_literal_bytes_to_string`, `copy_literal_bytes_raw`), identifier
-  byte classification (`is_ident_start_byte`, `is_ident_cont_byte`), and
-  zero-copy string extraction (`bytes_to_str`). All hot-path scanning
+- **predefined_macros.rs** - Target-specific and standard predefined macros
+  (`__x86_64__`, `__LINE__`, `__FILE__`, `__GNUC__`, etc.).
+- **pragmas.rs** - `#pragma` directive handling (`#pragma once`, `#pragma pack`, etc.).
+- **text_processing.rs** - Text manipulation helpers for line joining, comment
+  stripping, and directive parsing.
+- **utils.rs** - Shared helpers for literal skipping, identifier byte
+  classification, and zero-copy string extraction. All hot-path scanning
   operates on byte slices (`&[u8]`) to avoid `Vec<char>` allocation overhead.
 
 ### Important design notes

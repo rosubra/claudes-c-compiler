@@ -713,7 +713,7 @@ impl Lowerer {
     /// Map a function's return CType to the IR type used for the call instruction.
     /// Complex types return in FP registers (F64 for both ComplexFloat and ComplexDouble),
     /// not as Ptr which is what IrType::from_ctype gives.
-    fn func_return_ir_type(ret_ctype: &CType, returns_cld_in_regs: bool) -> IrType {
+    fn func_return_ir_type(ret_ctype: &CType, _returns_cld_in_regs: bool) -> IrType {
         match ret_ctype {
             // Complex float: on x86-64, both F32 parts packed into xmm0 as F64
             // On ARM/RISC-V, real part in first FP reg as F32

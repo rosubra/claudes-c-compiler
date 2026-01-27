@@ -1,50 +1,24 @@
-HIGH PRIORITY: Introduce ValueLocation abstraction for eventual register allocation
+ValueLocation Abstraction for Codegen
+======================================
+Priority: HIGH
 
-STATUS: Phase 2 (push/pop elimination) completed. Next steps below.
-
-Completed:
-- Phase 1: Added RegCache struct to state.rs tracking accumulator register contents
-  across all 3 backends. Skips redundant loads when value is already in accumulator.
-- Phase 2: Eliminated push/pop accumulator pattern in x86 codegen:
-  - Added operand_to_rcx() to load operands directly into %rcx
-  - Added const_as_imm32() for immediate operand detection
-  - Rewrote emit_int_binop: uses immediate operands for add/sub/mul/shift/and/or/xor
-    with constant RHS, loads RHS directly to %rcx for register operands (no push/pop)
-  - Rewrote emit_cmp: uses cmpq $imm, %rax for constant comparisons, loads RHS
-    to %rcx directly for register operands
-  - Rewrote emit_float_binop: loads lhs to rax->xmm0, rhs to rcx->xmm1 (no push/pop)
-  - Rewrote emit_float_cmp: same pattern, no push/pop
-  - Rewrote emit_slot_addr_to_secondary + emit_add_secondary_to_acc: loads base
-    address directly to %rcx instead of push/pop dance (GEP optimization)
-  - Rewrote emit_acc_to_secondary: movq %rax, %rcx instead of pushq %rax
-  - Test results: x86 2923/2991 (97.7%), ARM 2813/2869 (98.0%), RISC-V 2833/2861 (99.0%)
+Phase 1 (RegCache) and Phase 2 (push/pop elimination for x86) are complete.
 
 Remaining work:
-1. Introduce a ValueLocation enum:
-     enum ValueLocation {
-         Stack(StackSlot),
-         Register(PhysReg),  // for future use
-     }
+
+1. Introduce ValueLocation enum:
+     enum ValueLocation { Stack(StackSlot), Register(PhysReg) }
 2. Change value_locations to HashMap<u32, ValueLocation>
 3. Update emit_load_operand / emit_store_result to dispatch on ValueLocation
-4. Extend RegCache to also track the secondary register (rcx/x1/t1)
+4. Extend RegCache to track the secondary register (rcx/x1/t1)
 5. Add invalidate_value() for targeted invalidation on stores
-6. Apply same push/pop elimination to ARM and RISC-V backends
-7. Remaining x86 push/pop patterns to eliminate:
-   - i128 binop prep (prep_i128_binop): saves lhs rax:rdx, loads rhs
-   - i128 mul register rearrangement
-   - i128 divrem register rearrangement
-   - Inline asm output store scratch save/restore
-   - Variadic function pointer call AL save/restore
+6. Apply push/pop elimination to ARM and RISC-V backends
+7. Remaining x86 push/pop patterns: i128 binop prep, i128 mul/divrem
+   register rearrangement, inline asm output scratch, variadic call AL
 
 Key files:
-- src/backend/state.rs (CodegenState, StackSlot, RegCache, RegCacheEntry)
-- src/backend/generation.rs (cache invalidation strategy in generate_instruction)
-- src/backend/x86/codegen/codegen.rs (operand_to_rax, operand_to_rcx, const_as_imm32)
-- src/backend/arm/codegen/codegen.rs (operand_to_x0, store_x0_to)
-- src/backend/riscv/codegen/codegen.rs (operand_to_t0, store_t0_to)
-
-Relationship to ideas/register_allocator.txt:
-That idea describes the full register allocator. This idea is the prerequisite
-abstraction step. Phases 1 (RegCache) and 2 (push/pop elimination) are the
-first two concrete steps toward it.
+- src/backend/state.rs (CodegenState, StackSlot, RegCache)
+- src/backend/generation.rs (cache invalidation)
+- src/backend/x86/codegen/codegen.rs
+- src/backend/arm/codegen/codegen.rs
+- src/backend/riscv/codegen/codegen.rs
