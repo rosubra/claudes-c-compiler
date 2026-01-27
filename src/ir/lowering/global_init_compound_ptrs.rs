@@ -185,6 +185,8 @@ impl Lowerer {
                     }
                     current_field_idx = *anon_field_idx + 1;
                     item_idx += 1;
+                    // For unions, only initialize the first (or designated) member
+                    if layout.is_union && desig_name.is_none() { break; }
                     continue;
                 }
                 None => break,
@@ -199,6 +201,7 @@ impl Lowerer {
                 );
                 current_field_idx = field_idx + 1;
                 item_idx += 1;
+                if layout.is_union && desig_name.is_none() { break; }
                 continue;
             }
 
@@ -216,6 +219,7 @@ impl Lowerer {
                         );
                         item_idx += consumed;
                         current_field_idx = field_idx + 1;
+                        if layout.is_union && desig_name.is_none() { break; }
                         continue;
                     }
                 }
@@ -227,6 +231,7 @@ impl Lowerer {
             );
             current_field_idx = field_idx + 1;
             item_idx += 1;
+            if layout.is_union && desig_name.is_none() { break; }
         }
     }
 
@@ -364,6 +369,8 @@ impl Lowerer {
                             );
                             current_field_idx += 1;
                             item_idx += 1;
+                            // For unions, only initialize the first member
+                            if layout.is_union { break; }
                         }
                     }
                 }
@@ -521,6 +528,8 @@ impl Lowerer {
                     }
                     current_field_idx = *anon_field_idx + 1;
                     item_idx += 1;
+                    // For unions, only initialize the first (or designated) member
+                    if sub_layout.is_union && desig_name.is_none() { break; }
                     continue;
                 }
                 None => break,
@@ -544,6 +553,7 @@ impl Lowerer {
                     }
                     current_field_idx = field_idx + 1;
                     item_idx += 1;
+                    if sub_layout.is_union && desig_name.is_none() { break; }
                     continue;
                 }
             }
@@ -564,6 +574,7 @@ impl Lowerer {
                         );
                         item_idx += consumed;
                         current_field_idx = field_idx + 1;
+                        if sub_layout.is_union && desig_name.is_none() { break; }
                         continue;
                     }
                 }
@@ -582,6 +593,7 @@ impl Lowerer {
             }
             current_field_idx = field_idx + 1;
             item_idx += 1;
+            if sub_layout.is_union && desig_name.is_none() { break; }
         }
     }
 

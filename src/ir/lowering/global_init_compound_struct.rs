@@ -402,6 +402,31 @@ impl Lowerer {
         total_size: usize,
     ) -> GlobalInit {
         ptr_ranges.sort_by_key(|&(off, _)| off);
+        // Deduplicate overlapping pointer ranges that can arise from:
+        // 1. Duplicate designated initializers for the same field (C allows
+        //    later designators to override earlier ones, e.g.,
+        //    `.matches = f, MACRO_THAT_ALSO_SETS_MATCHES`)
+        // 2. Union branches with pointer fields at different offsets where
+        //    multiple branches are recorded due to sequential field processing
+        // For same-offset duplicates, keep the last entry (C last-designator-wins).
+        // For overlapping ranges at different offsets, keep the first (already placed).
+        let mut deduped: Vec<(usize, GlobalInit)> = Vec::new();
+        for (off, init) in ptr_ranges {
+            if let Some(last) = deduped.last_mut() {
+                if off == last.0 {
+                    // Same offset: last-designator-wins (replace previous)
+                    *last = (off, init);
+                    continue;
+                }
+                let last_end = last.0 + 8;
+                if off < last_end {
+                    // Overlapping different offsets: skip (keep first)
+                    continue;
+                }
+            }
+            deduped.push((off, init));
+        }
+        let ptr_ranges = deduped;
         let mut elements: Vec<GlobalInit> = Vec::new();
         let mut pos = 0;
         for (ptr_off, ref addr_init) in &ptr_ranges {

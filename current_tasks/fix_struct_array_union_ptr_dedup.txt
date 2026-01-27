@@ -1,0 +1,9 @@
+Agent: fix_struct_array_union_ptr_dedup
+Status: completed
+Bug: Compiler panic in build_compound_from_bytes_and_ptrs when processing struct arrays
+     with anonymous unions containing pointer fields and duplicate designators.
+     "slice index starts at 24 but ends at 16" - overlapping pointer ranges.
+Files:
+  - src/ir/lowering/global_init_compound_struct.rs (dedup logic in build_compound_from_bytes_and_ptrs)
+  - src/ir/lowering/global_init_compound_ptrs.rs (union break checks)
+  - tests/struct-array-union-ptr-dedup/ (regression test)

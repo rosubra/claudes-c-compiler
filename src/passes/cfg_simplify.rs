@@ -2,11 +2,12 @@
 //!
 //! Simplifies the control flow graph by:
 //! 1. Folding `CondBranch` with a known-constant condition to `Branch`
-//! 2. Converting `CondBranch` where both targets are the same to `Branch`
-//! 3. Threading jump chains: if block A branches to empty block B which just
+//! 2. Folding `Switch` with a known-constant value to `Branch` (matching case or default)
+//! 3. Converting `CondBranch` where both targets are the same to `Branch`
+//! 4. Threading jump chains: if block A branches to empty block B which just
 //!    branches to C, redirect A to branch directly to C (only when safe)
-//! 4. Removing dead (unreachable) blocks that have no predecessors
-//! 5. Simplifying trivial phi nodes (single-entry or all-same-value) to Copy
+//! 5. Removing dead (unreachable) blocks that have no predecessors
+//! 6. Simplifying trivial phi nodes (single-entry or all-same-value) to Copy
 //!
 //! This pass runs to a fixpoint, since one simplification can enable others.
 //! Phi nodes in successor blocks are updated when edges are redirected.
@@ -46,6 +47,7 @@ pub(crate) fn simplify_cfg(func: &mut IrFunction) -> usize {
     loop {
         let mut changed = 0;
         changed += fold_constant_cond_branches(func);
+        changed += fold_constant_switches(func);
         changed += simplify_redundant_cond_branches(func);
         changed += thread_jump_chains(func);
         changed += remove_dead_blocks(func);
@@ -134,6 +136,86 @@ fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
             for inst in &mut block.instructions {
                 if let Instruction::Phi { incoming, .. } = inst {
                     incoming.retain(|(_, label)| *label != block_label);
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// Fold `Switch` with a known-constant value into an unconditional `Branch`.
+///
+/// After inlining + constant folding + copy propagation, a Switch may have a
+/// constant value (e.g., `Switch { val: Const(37), cases: [...], default }`).
+/// This arises when `always_inline` functions containing switch statements are
+/// inlined at call sites with constant arguments. The switch value becomes a
+/// known constant, so we can resolve the target at compile time.
+///
+/// This is critical for the Linux kernel's `cpucap_is_possible()` pattern:
+/// a switch on a capability number that should resolve at compile time but
+/// otherwise generates a large runtime comparison chain against a constant.
+///
+/// When folding, we clean up phi nodes in all not-taken target blocks by
+/// removing entries referencing the current block, since those edges no
+/// longer exist.
+fn fold_constant_switches(func: &mut IrFunction) -> usize {
+    // First pass: collect the folding decisions.
+    // Each entry: (block_index, taken_target, not_taken_targets, block_label)
+    let mut folds: Vec<(usize, BlockId, Vec<BlockId>, BlockId)> = Vec::new();
+
+    for (idx, block) in func.blocks.iter().enumerate() {
+        if let Terminator::Switch { val, cases, default } = &block.terminator {
+            if let Operand::Const(c) = val {
+                if let Some(switch_int) = c.to_i64() {
+                    // Find the matching case, or fall through to default
+                    let taken = cases.iter()
+                        .find(|(cv, _)| *cv == switch_int)
+                        .map(|(_, label)| *label)
+                        .unwrap_or(*default);
+
+                    // Collect all not-taken targets (unique, excluding taken)
+                    let mut not_taken = Vec::new();
+                    if *default != taken && !not_taken.contains(default) {
+                        not_taken.push(*default);
+                    }
+                    for (_, label) in cases {
+                        if *label != taken && !not_taken.contains(label) {
+                            not_taken.push(*label);
+                        }
+                    }
+
+                    folds.push((idx, taken, not_taken, block.label));
+                }
+            }
+        }
+    }
+
+    if folds.is_empty() {
+        return 0;
+    }
+
+    let count = folds.len();
+
+    // Apply the folds: change terminators to unconditional branches
+    for &(idx, taken, _, _) in &folds {
+        func.blocks[idx].terminator = Terminator::Branch(taken);
+    }
+
+    // Build label->index map for O(1) block lookups during phi cleanup
+    let label_to_idx = build_label_to_idx(func);
+
+    // Clean up phi nodes in not-taken target blocks.
+    // Remove phi entries that reference the folding block, since those edges
+    // no longer exist.
+    for (_, _, ref not_taken, block_label) in &folds {
+        for not_taken_target in not_taken {
+            if let Some(&block_idx) = label_to_idx.get(not_taken_target) {
+                let block = &mut func.blocks[block_idx];
+                for inst in &mut block.instructions {
+                    if let Instruction::Phi { incoming, .. } = inst {
+                        incoming.retain(|(_, label)| *label != *block_label);
+                    }
                 }
             }
         }
@@ -1084,6 +1166,197 @@ mod tests {
                     "Copy source should be Const(0)");
             }
             other => panic!("Expected Copy instruction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fold_constant_switch() {
+        // Switch { val: Const(37), cases: [(10,.L1),(20,.L2),(30,.L3)], default: .L4 }
+        // should fold to Branch(.L4) since 37 doesn't match any case.
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![],
+            terminator: Terminator::Switch {
+                val: Operand::Const(IrConst::I64(37)),
+                cases: vec![(10, BlockId(1)), (20, BlockId(2)), (30, BlockId(3))],
+                default: BlockId(4),
+            },
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(100)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(200)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(300)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(4),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(-1)))),
+            source_spans: Vec::new(),
+        });
+
+        let count = simplify_cfg(&mut func);
+        assert!(count > 0, "Should have made simplifications");
+        // Block 0 should now branch directly to default (Block 4)
+        assert!(matches!(func.blocks[0].terminator, Terminator::Branch(BlockId(4))),
+            "Switch on constant 37 should fold to Branch(default=Block4)");
+        // Dead blocks should be eliminated
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(1)),
+            "Block 1 (case 10) should be dead");
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(2)),
+            "Block 2 (case 20) should be dead");
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(3)),
+            "Block 3 (case 30) should be dead");
+    }
+
+    #[test]
+    fn test_fold_constant_switch_matching_case() {
+        // Switch { val: Const(20), cases: [(10,.L1),(20,.L2),(30,.L3)], default: .L4 }
+        // should fold to Branch(.L2) since 20 matches case 20.
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![],
+            terminator: Terminator::Switch {
+                val: Operand::Const(IrConst::I64(20)),
+                cases: vec![(10, BlockId(1)), (20, BlockId(2)), (30, BlockId(3))],
+                default: BlockId(4),
+            },
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(100)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(200)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(300)))),
+            source_spans: Vec::new(),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(4),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(-1)))),
+            source_spans: Vec::new(),
+        });
+
+        let count = simplify_cfg(&mut func);
+        assert!(count > 0, "Should have made simplifications");
+        // Block 0 should now branch directly to case 20 (Block 2)
+        assert!(matches!(func.blocks[0].terminator, Terminator::Branch(BlockId(2))),
+            "Switch on constant 20 should fold to Branch(Block2)");
+        // Other case blocks should be dead
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(1)),
+            "Block 1 (case 10) should be dead");
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(3)),
+            "Block 3 (case 30) should be dead");
+        assert!(!func.blocks.iter().any(|b| b.label == BlockId(4)),
+            "Block 4 (default) should be dead");
+    }
+
+    #[test]
+    fn test_fold_constant_switch_phi_cleanup() {
+        // Switch with a phi in the default block. When folding the switch
+        // to take a case branch, the phi entry for the switch block must be
+        // removed from the not-taken default block.
+        //
+        // Block 0: cond branch to Block 1 or Block 3
+        // Block 1: constant switch -> case 10: Block 2, default: Block 3
+        // Block 2: return 42
+        // Block 3: phi from Block 0 and Block 1, return phi result
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+
+        // Block 0: cond branch to Block 1 (switch) or Block 3 (default directly)
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Copy { dest: Value(1), src: Operand::Const(IrConst::I32(1)) },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Value(Value(1)),
+                true_label: BlockId(1),
+                false_label: BlockId(3),
+            },
+            source_spans: Vec::new(),
+        });
+
+        // Block 1: constant switch - value 10 matches case 10 -> Block 2
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![],
+            terminator: Terminator::Switch {
+                val: Operand::Const(IrConst::I64(10)),
+                cases: vec![(10, BlockId(2))],
+                default: BlockId(3),
+            },
+            source_spans: Vec::new(),
+        });
+
+        // Block 2: the taken case
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(42)))),
+            source_spans: Vec::new(),
+        });
+
+        // Block 3: default block with phi - has entries from Block 0 and Block 1
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![
+                Instruction::Phi {
+                    dest: Value(0),
+                    ty: IrType::I32,
+                    incoming: vec![
+                        (Operand::Const(IrConst::I32(1)), BlockId(0)),
+                        (Operand::Const(IrConst::I32(2)), BlockId(1)),
+                    ],
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(0)))),
+            source_spans: Vec::new(),
+        });
+
+        let count = simplify_cfg(&mut func);
+        assert!(count > 0, "Should have made simplifications");
+
+        // Block 3 must still exist (reachable from Block 0's false branch)
+        let block3 = func.blocks.iter().find(|b| b.label == BlockId(3)).unwrap();
+        // Block 3's phi should NOT have an entry from Block 1 (the switch was
+        // folded to take case 10 -> Block 2, so Block 1 no longer branches to Block 3)
+        match &block3.instructions[0] {
+            Instruction::Phi { incoming, .. } => {
+                assert!(!incoming.iter().any(|(_, label)| *label == BlockId(1)),
+                    "Phi should not have entry from Block 1 after switch fold");
+            }
+            Instruction::Copy { .. } => {
+                // After dead block elimination of Block 1, the phi may have been
+                // simplified to a Copy (single incoming from Block 0). This is fine.
+            }
+            other => panic!("Expected Phi or Copy instruction in Block 3, got {:?}", other),
         }
     }
 }
