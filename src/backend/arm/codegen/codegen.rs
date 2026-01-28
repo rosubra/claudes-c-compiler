@@ -2534,12 +2534,15 @@ impl ArchCodegen for ArmCodegen {
                     CallArgClass::F128Stack => {
                         match arg {
                             Operand::Const(c) => {
-                                let f64_val = match c {
-                                    IrConst::LongDouble(v, _) => *v,
-                                    IrConst::F64(v) => *v,
-                                    _ => c.to_f64().unwrap_or(0.0),
+                                // Use actual f128 bytes from LongDouble constant when available,
+                                // otherwise convert from f64 approximation.
+                                let bytes = match c {
+                                    IrConst::LongDouble(_, f128_bytes) => *f128_bytes,
+                                    _ => {
+                                        let f64_val = c.to_f64().unwrap_or(0.0);
+                                        crate::ir::ir::f64_to_f128_bytes(f64_val)
+                                    }
                                 };
-                                let bytes = crate::ir::ir::f64_to_f128_bytes(f64_val);
                                 let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
                                 let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
                                 self.emit_load_imm64("x0", lo as i64);
@@ -2548,24 +2551,58 @@ impl ArchCodegen for ArmCodegen {
                                 self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
                             }
                             Operand::Value(v) => {
-                                if let Some(&reg) = self.reg_assignments.get(&v.0) {
-                                    let reg_name = callee_saved_name(reg);
-                                    self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
-                                } else if let Some(slot) = self.state.get_slot(v.0) {
-                                    let adjusted = slot.0 + src_adjust;
-                                    if self.state.is_alloca(v.0) {
-                                        self.emit_add_sp_offset("x0", adjusted);
+                                // Try full-precision path via f128 tracking first.
+                                // This is critical for values returned from function calls
+                                // (e.g. __addtf3) where the full 128-bit result is stored
+                                // in a stack slot but the register only holds an f64 approx.
+                                let mut loaded_full = false;
+                                if let Some((src_id, offset, is_indirect)) = self.state.get_f128_source(v.0) {
+                                    if !is_indirect {
+                                        if let Some(src_slot) = self.state.get_slot(src_id) {
+                                            let adj = src_slot.0 + offset + src_adjust;
+                                            self.emit_load_from_sp("q0", adj, "ldr");
+                                            self.emit_store_to_raw_sp("q0", stack_offset, "str");
+                                            loaded_full = true;
+                                        }
                                     } else {
-                                        self.emit_load_from_sp("x0", adjusted, "ldr");
+                                        if let Some(src_slot) = self.state.get_slot(src_id) {
+                                            let adj = src_slot.0 + src_adjust;
+                                            self.emit_load_from_sp("x17", adj, "ldr");
+                                            if offset != 0 {
+                                                if offset > 0 && offset <= 4095 {
+                                                    self.state.emit_fmt(format_args!("    add x17, x17, #{}", offset));
+                                                } else {
+                                                    self.load_large_imm("x16", offset);
+                                                    self.state.emit("    add x17, x17, x16");
+                                                }
+                                            }
+                                            self.state.emit("    ldr q0, [x17]");
+                                            self.emit_store_to_raw_sp("q0", stack_offset, "str");
+                                            loaded_full = true;
+                                        }
                                     }
-                                } else {
-                                    self.state.emit("    mov x0, #0");
                                 }
-                                self.state.emit("    fmov d0, x0");
-                                self.state.emit("    stp x9, x10, [sp, #-16]!");
-                                self.state.emit("    bl __extenddftf2");
-                                self.state.emit("    ldp x9, x10, [sp], #16");
-                                self.emit_store_to_raw_sp("q0", stack_offset, "str");
+                                // Fallback: load f64 approximation and extend to f128
+                                if !loaded_full {
+                                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                                        let reg_name = callee_saved_name(reg);
+                                        self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
+                                    } else if let Some(slot) = self.state.get_slot(v.0) {
+                                        let adjusted = slot.0 + src_adjust;
+                                        if self.state.is_alloca(v.0) {
+                                            self.emit_add_sp_offset("x0", adjusted);
+                                        } else {
+                                            self.emit_load_from_sp("x0", adjusted, "ldr");
+                                        }
+                                    } else {
+                                        self.state.emit("    mov x0, #0");
+                                    }
+                                    self.state.emit("    fmov d0, x0");
+                                    self.state.emit("    stp x9, x10, [sp, #-16]!");
+                                    self.state.emit("    bl __extenddftf2");
+                                    self.state.emit("    ldp x9, x10, [sp], #16");
+                                    self.emit_store_to_raw_sp("q0", stack_offset, "str");
+                                }
                             }
                         }
                         stack_offset += 16;

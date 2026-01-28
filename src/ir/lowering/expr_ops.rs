@@ -394,7 +394,18 @@ impl Lowerer {
                     let inner_ty = self.infer_expr_type(inner);
                     let val = self.lower_expr(inner);
                     let cmp_val = self.mask_float_sign_for_truthiness(val, inner_ty);
-                    let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(zero), int_ty);
+                    // Use the inner expression's type for comparison when it is
+                    // a wide integer (I64/U64) on a 32-bit target. Otherwise a
+                    // 64-bit value like 0x1_0000_0000 would be truncated to 32
+                    // bits and incorrectly compare equal to zero. Float types
+                    // are excluded because mask_float_sign_for_truthiness already
+                    // reduces them to an I32 boolean on 32-bit targets.
+                    let cmp_ty = if !inner_ty.is_float() && inner_ty.size() > int_ty.size() { inner_ty } else { int_ty };
+                    let cmp_zero = match cmp_ty {
+                        IrType::I64 | IrType::U64 => IrConst::I64(0),
+                        _ => if int_ty == IrType::I32 { IrConst::I32(0) } else { IrConst::I64(0) },
+                    };
+                    let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(cmp_zero), cmp_ty);
                     Operand::Value(dest)
                 }
             }
