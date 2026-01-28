@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, CType, IrType};
+use crate::common::types::{AddressSpace, CType, IrType, widened_op_type};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -178,12 +178,13 @@ impl Lowerer {
 
         let is_unsigned = storage_ty.is_unsigned();
         let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
-        let result = self.emit_binop_val(ir_op, current_val, rhs_val, IrType::I64);
+        let wt = widened_op_type(IrType::I32);
+        let result = self.emit_binop_val(ir_op, current_val, rhs_val, wt);
 
         // C standard 6.3.1.2: when the target is _Bool, normalize the result
         // to 0 or 1 before storing into the bitfield.
         let store_val = if is_bool {
-            self.emit_bool_normalize_typed(Operand::Value(result), IrType::I64)
+            self.emit_bool_normalize_typed(Operand::Value(result), wt)
         } else {
             Operand::Value(result)
         };
@@ -439,9 +440,9 @@ impl Lowerer {
             else if ty == IrType::F64 || real_ty == IrType::F64 { IrType::F64 }
             else { IrType::F32 }
         } else {
-            IrType::I64
+            widened_op_type(IrType::I32)
         };
-        let op_ty = if common_ty.is_float() { common_ty } else { IrType::I64 };
+        let op_ty = if common_ty.is_float() { common_ty } else { widened_op_type(IrType::I32) };
 
         let rhs_promoted = self.emit_implicit_cast(real_part, real_ty, op_ty);
 
@@ -521,10 +522,8 @@ impl Lowerer {
         };
         let op_ty = if common_ty.is_float() {
             common_ty
-        } else if common_ty == IrType::I128 || common_ty == IrType::U128 {
-            common_ty
         } else {
-            IrType::I64
+            widened_op_type(common_ty)
         };
         (common_ty, op_ty)
     }
@@ -532,13 +531,18 @@ impl Lowerer {
     /// Promote a loaded value to the operation type for compound assignment.
     pub(super) fn promote_for_op(&mut self, loaded: Operand, val_ty: IrType, ir_ty: IrType, op_ty: IrType, common_ty: IrType, is_shift: bool) -> Operand {
         if val_ty != op_ty && op_ty.is_float() && !val_ty.is_float() {
-            let cast_from = if ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
+            // Int to float: cast from the widened int type
+            let wt = widened_op_type(ir_ty);
+            let cast_from = if ir_ty.is_unsigned() {
+                if wt == IrType::I32 { IrType::U32 } else { IrType::U64 }
+            } else {
+                wt
+            };
             Operand::Value(self.emit_cast_val(loaded, cast_from, op_ty))
         } else if val_ty != op_ty && val_ty.is_float() && op_ty.is_float() {
             Operand::Value(self.emit_cast_val(loaded, val_ty, op_ty))
         } else if !op_ty.is_float() && ir_ty.size() < op_ty.size() {
-            // Widen the LHS to the operation type (handles both sub-int to I64
-            // and I64/U64 to I128/U128 promotions).
+            // Widen the LHS to the operation type.
             if op_ty == IrType::I128 || op_ty == IrType::U128 {
                 // Widen to 128-bit: first promote to I64/U64, then cast to 128-bit
                 let from_64 = if ir_ty.is_unsigned() || common_ty.is_unsigned() {
@@ -568,7 +572,7 @@ impl Lowerer {
                 } else {
                     ir_ty
                 };
-                Operand::Value(self.emit_cast_val(loaded, from_ty, IrType::I64))
+                Operand::Value(self.emit_cast_val(loaded, from_ty, op_ty))
             }
         } else {
             loaded
@@ -578,9 +582,15 @@ impl Lowerer {
     /// Narrow a result from operation type back to the target type.
     pub(super) fn narrow_from_op(&mut self, result: Operand, target_ty: IrType, target_ir_ty: IrType, op_ty: IrType) -> Operand {
         if op_ty.is_float() && !target_ty.is_float() {
-            let cast_to = if target_ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
+            // Float to int: cast to widened int type first, then narrow if needed
+            let wt = widened_op_type(target_ir_ty);
+            let cast_to = if target_ir_ty.is_unsigned() {
+                if wt == IrType::I32 { IrType::U32 } else { IrType::U64 }
+            } else {
+                wt
+            };
             let dest = self.emit_cast_val(result, op_ty, cast_to);
-            if target_ir_ty.size() < 8 {
+            if target_ir_ty.size() < cast_to.size() {
                 Operand::Value(self.emit_cast_val(Operand::Value(dest), cast_to, target_ir_ty))
             } else {
                 Operand::Value(dest)
@@ -588,8 +598,7 @@ impl Lowerer {
         } else if op_ty.is_float() && target_ty.is_float() && op_ty != target_ty {
             Operand::Value(self.emit_cast_val(result, op_ty, target_ty))
         } else if !op_ty.is_float() && target_ir_ty.size() < op_ty.size() {
-            // Narrow from operation type to target type (handles both I64 to sub-int
-            // and I128/U128 to I64/U64 narrowing).
+            // Narrow from operation type to target type.
             if op_ty == IrType::I128 || op_ty == IrType::U128 {
                 // Truncate from 128-bit to the target type
                 let to_64 = if target_ir_ty.is_unsigned() { IrType::U64 } else { IrType::I64 };
@@ -600,7 +609,7 @@ impl Lowerer {
                     Operand::Value(narrowed)
                 }
             } else {
-                Operand::Value(self.emit_cast_val(result, IrType::I64, target_ir_ty))
+                Operand::Value(self.emit_cast_val(result, op_ty, target_ir_ty))
             }
         } else {
             result

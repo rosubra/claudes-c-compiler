@@ -5,7 +5,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType, widened_op_type};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -85,7 +85,8 @@ impl Lowerer {
                 let lhs_val = self.lower_expr(lhs);
                 let rhs_val = self.lower_expr(rhs);
                 let cmp_op = Self::binop_to_cmp(*op, true);
-                let dest = self.emit_cmp_val(cmp_op, lhs_val, rhs_val, IrType::I64);
+                let ptr_ty = crate::common::types::target_int_ir_type();
+                let dest = self.emit_cmp_val(cmp_op, lhs_val, rhs_val, ptr_ty);
                 return Operand::Value(dest);
             }
         }
@@ -195,32 +196,30 @@ impl Lowerer {
             (ft, false, ft)
         } else if is_shift {
             let promoted_lhs = Self::integer_promote(lhs_ty);
-            let shift_op_ty = if promoted_lhs == IrType::I128 || promoted_lhs == IrType::U128 {
-                promoted_lhs
-            } else {
-                IrType::I64
-            };
+            let shift_op_ty = widened_op_type(promoted_lhs);
             (shift_op_ty, promoted_lhs.is_unsigned(), promoted_lhs)
         } else {
             let ct = Self::common_type(lhs_ty, rhs_ty);
-            let ot = if ct == IrType::I128 || ct == IrType::U128 { ct } else { IrType::I64 };
+            let ot = widened_op_type(ct);
             (ot, ct.is_unsigned(), ct)
         };
 
         let (lhs_val, rhs_val) = if is_shift {
-            let shift_lhs_ty = if op_ty == IrType::I128 || op_ty == IrType::U128 { op_ty } else { IrType::I64 };
+            let shift_lhs_ty = widened_op_type(op_ty);
             let lhs_val = self.lower_expr_with_type(lhs, shift_lhs_ty);
-            let rhs_val = self.lower_expr_with_type(rhs, IrType::I64);
+            // Shift amount is always small; use widened type for consistency
+            let shift_rhs_ty = widened_op_type(IrType::I32);
+            let rhs_val = self.lower_expr_with_type(rhs, shift_rhs_ty);
             (lhs_val, rhs_val)
         } else {
             let mut lhs_val = self.lower_expr_with_type(lhs, op_ty);
             let mut rhs_val = self.lower_expr_with_type(rhs, op_ty);
-            if common_ty == IrType::U32 {
-                // Zero-extend both operands to ensure correct 64-bit unsigned semantics.
-                // All operand types (signed or unsigned, any width <= 32) need truncation
-                // to U32 so that 64-bit operations (like divq) see the correct 32-bit
-                // unsigned values. For example, -13U is stored as 0xFFFFFFFFFFFFFFF3
-                // in a 64-bit register; truncating to U32 gives 0x00000000FFFFFFF3.
+            if common_ty == IrType::U32 && !crate::common::types::target_is_32bit() {
+                // On 64-bit: zero-extend both operands to ensure correct 64-bit unsigned
+                // semantics. All operand types (signed or unsigned, any width <= 32) need
+                // truncation to U32 so that 64-bit operations (like divq) see the correct
+                // 32-bit unsigned values.
+                // On 32-bit: not needed since U32 operations are native width.
                 if lhs_ty.size() <= 4 {
                     let masked = self.emit_cast_val(lhs_val, IrType::I64, IrType::U32);
                     lhs_val = Operand::Value(masked);
@@ -294,8 +293,13 @@ impl Lowerer {
     }
 
     fn maybe_narrow_binop_result(&mut self, dest: Value, op: &BinOp, common_ty: IrType) -> Operand {
-        if (common_ty == IrType::U32 || common_ty == IrType::I32) && !op.is_comparison() {
-            let narrowed = self.emit_cast_val(Operand::Value(dest), IrType::I64, common_ty);
+        // Only narrow integer results; float operations use their exact type.
+        if common_ty.is_float() || common_ty.is_128bit() || op.is_comparison() {
+            return Operand::Value(dest);
+        }
+        let wt = widened_op_type(common_ty);
+        if common_ty != wt {
+            let narrowed = self.emit_cast_val(Operand::Value(dest), wt, common_ty);
             Operand::Value(narrowed)
         } else {
             Operand::Value(dest)
@@ -332,7 +336,7 @@ impl Lowerer {
                 }
                 let ty = self.get_expr_type(inner);
                 let inner_ty = self.infer_expr_type(inner);
-                let neg_ty = if ty.is_float() || ty.is_128bit() { ty } else { IrType::I64 };
+                let neg_ty = if ty.is_float() || ty.is_128bit() { ty } else { widened_op_type(ty) };
                 let val = self.lower_expr(inner);
                 // C integer promotion (C11 6.3.1.1): sign-extend (or zero-extend
                 // for unsigned) sub-int types to the operation width before negating.
@@ -359,7 +363,7 @@ impl Lowerer {
                 }
                 let inner_ty = self.infer_expr_type(inner);
                 let ty = self.get_expr_type(inner);
-                let not_ty = if ty.is_128bit() { ty } else { IrType::I64 };
+                let not_ty = if ty.is_128bit() { ty } else { widened_op_type(ty) };
                 let val = self.lower_expr(inner);
                 // C integer promotion: widen sub-int types before bitwise NOT,
                 // same as for Neg above. E.g. ~(signed char -13) must sign-extend
@@ -671,7 +675,9 @@ impl Lowerer {
         let current_val = self.extract_bitfield_from_addr(field_addr, storage_ty, bit_offset, bit_width);
 
         let ir_op = if is_inc { IrBinOp::Add } else { IrBinOp::Sub };
-        let result = self.emit_binop_val(ir_op, current_val.clone(), Operand::Const(IrConst::I64(1)), IrType::I64);
+        let wt = widened_op_type(IrType::I32);
+        let one = if wt == IrType::I32 { IrConst::I32(1) } else { IrConst::I64(1) };
+        let result = self.emit_binop_val(ir_op, current_val.clone(), Operand::Const(one), wt);
 
         self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, Operand::Value(result));
 
@@ -693,9 +699,12 @@ impl Lowerer {
         } else if ty == IrType::I128 || ty == IrType::U128 {
             (Operand::Const(IrConst::I128(1)), ty)
         } else {
-            // For regular integer types (I8..U64), use I64 for widening arithmetic.
+            // For regular integer types, use the widened operation type for arithmetic.
+            // On 64-bit, this is I64; on 32-bit, this is I32 (or I64 for I64/U64).
             // The caller truncates back to the variable's type after the operation.
-            (Operand::Const(IrConst::I64(1)), IrType::I64)
+            let wt = widened_op_type(ty);
+            let one = if wt == IrType::I32 { IrConst::I32(1) } else { IrConst::I64(1) };
+            (Operand::Const(one), wt)
         }
     }
 }

@@ -39,6 +39,34 @@ pub fn target_int_ir_type() -> IrType {
     if target_is_32bit() { IrType::I32 } else { IrType::I64 }
 }
 
+/// Return the operation type for widened integer arithmetic.
+/// On LP64 (64-bit), all integer operations are widened to I64 (the machine word).
+/// On ILP32 (i686), operations stay at their C type's natural width:
+/// - I32/U32 and smaller → I32 (machine word)
+/// - I64/U64 (long long) → I64 (requires register pairs)
+/// - I128/U128 → I128
+/// This replaces hardcoded `IrType::I64` in arithmetic lowering so that i686
+/// doesn't needlessly generate 64-bit operations for 32-bit C types.
+pub fn widened_op_type(common_ty: IrType) -> IrType {
+    // Float and 128-bit types are never widened; return them unchanged.
+    if common_ty.is_float() || common_ty == IrType::I128 || common_ty == IrType::U128
+       || common_ty == IrType::Void {
+        return common_ty;
+    }
+    if target_is_32bit() {
+        // On 32-bit: use the actual type width.
+        // I64/U64 stay I64; everything else uses I32 (machine word).
+        if common_ty == IrType::I64 || common_ty == IrType::U64 {
+            IrType::I64
+        } else {
+            IrType::I32
+        }
+    } else {
+        // On 64-bit: widen everything to I64 (machine word).
+        IrType::I64
+    }
+}
+
 /// Reference-counted string used for struct/union layout keys in CType.
 /// Cloning is a cheap reference count increment instead of a heap allocation.
 pub type RcStr = Rc<str>;

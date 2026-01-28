@@ -693,14 +693,14 @@ impl Lowerer {
         ptr_val
     }
 
-    /// Narrow call result if return type is sub-64-bit integer.
+    /// Narrow call result if return type is smaller than the widened operation type.
     /// 128-bit return values are already correctly handled.
     pub(super) fn maybe_narrow_call_result(&mut self, dest: Value, ret_ty: IrType) -> Operand {
-        if ret_ty != IrType::I64 && ret_ty != IrType::Ptr
+        let wt = crate::common::types::widened_op_type(ret_ty);
+        if ret_ty != wt && ret_ty != IrType::Ptr
             && ret_ty != IrType::Void && ret_ty.is_integer()
-            && ret_ty != IrType::I128 && ret_ty != IrType::U128
         {
-            let narrowed = self.emit_cast_val(Operand::Value(dest), IrType::I64, ret_ty);
+            let narrowed = self.emit_cast_val(Operand::Value(dest), wt, ret_ty);
             Operand::Value(narrowed)
         } else {
             Operand::Value(dest)

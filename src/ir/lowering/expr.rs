@@ -283,8 +283,9 @@ impl Lowerer {
     }
 
     pub(super) fn maybe_narrow(&mut self, val: Value, ty: IrType) -> Operand {
-        if ty == IrType::U32 || ty == IrType::I32 {
-            let narrowed = self.emit_cast_val(Operand::Value(val), IrType::I64, ty);
+        let wt = crate::common::types::widened_op_type(ty);
+        if ty != wt {
+            let narrowed = self.emit_cast_val(Operand::Value(val), wt, ty);
             Operand::Value(narrowed)
         } else {
             Operand::Value(val)
