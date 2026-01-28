@@ -118,6 +118,27 @@ const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 2000;
 /// (~8 bytes each), so we must be more conservative.
 const MAX_CALLER_INSTRUCTIONS_HARD_CAP: usize = 500;
 
+/// Absolute hard cap on caller instruction count for ALL inlining, including
+/// always_inline callees. When a caller exceeds this threshold, even
+/// __attribute__((always_inline)) callees are stopped — only tiny/small callees
+/// (handled by the first pass) continue to be inlined.
+///
+/// This prevents catastrophic stack frame bloat in functions like the kernel's
+/// shrink_folio_list (mm/vmscan.c), which calls hundreds of small always_inline
+/// helpers. CCC's accumulator-based codegen creates one stack slot per SSA value,
+/// so inlining 200+ always_inline calls can produce 2000+ multi-block values
+/// with wide liveness intervals, creating 16KB+ stack frames that overflow the
+/// kernel's 16KB stack.
+///
+/// GCC does not need this limit because its register allocator keeps most values
+/// in registers. CCC must cap inlining more aggressively to compensate.
+///
+/// Tiny/small callees (≤ MAX_SMALL_INLINE_INSTRUCTIONS) are exempt because:
+/// 1. They have negligible impact on code/stack size
+/// 2. Not inlining them can cause linker errors (conditional references to
+///    undefined symbols, inline asm "i" constraints, section mismatches)
+const MAX_CALLER_INSTRUCTIONS_ABSOLUTE_CAP: usize = 1000;
+
 /// Maximum iterations when tracing IR value chains (Load->Store->Copy->GEP->...)
 /// to resolve inline asm operands back to GlobalAddr or constant values.
 const MAX_TRACE_CHAIN_LENGTH: usize = 20;
@@ -190,6 +211,7 @@ pub fn run(module: &mut IrModule) -> usize {
                 .map(|b| b.instructions.len()).sum();
             let caller_too_large = caller_inst_count > MAX_CALLER_INSTRUCTIONS_AFTER_INLINE;
             let caller_at_hard_cap = caller_inst_count > MAX_CALLER_INSTRUCTIONS_HARD_CAP;
+            let caller_at_absolute_cap = caller_inst_count > MAX_CALLER_INSTRUCTIONS_ABSOLUTE_CAP;
 
             // Find call sites to inline in the current function.
             // When the caller has a custom section attribute, also consider callees
@@ -251,12 +273,19 @@ pub fn run(module: &mut IrModule) -> usize {
                             continue;
                         }
                     }
+                    // Absolute cap: when the caller is extremely large, stop ALL
+                    // inlining including always_inline to prevent kernel stack
+                    // overflow. CCC's accumulator codegen creates one stack slot
+                    // per SSA value (~8 bytes), so functions with 1000+ instructions
+                    // produce 8KB+ stack frames that overflow the kernel's 16KB stack.
+                    // Tiny/small callees are still allowed (handled in first pass
+                    // above) — they're critical for linker correctness and have
+                    // negligible stack impact.
+                    if caller_at_absolute_cap {
+                        continue;
+                    }
                     // Hard cap: when the caller is extremely large, stop normal
-                    // inlining to prevent kernel stack overflow. CCC's codegen
-                    // spills every SSA value to the stack, so functions with 1000+
-                    // instructions produce multi-KB frames. The kernel has only
-                    // 16KB stack with guard pages, and deep call chains (e.g.,
-                    // page allocator) can easily overflow.
+                    // inlining to prevent kernel stack overflow.
                     // Tiny callees are still allowed (handled in first pass above).
                     // always_inline callees MUST be inlined regardless of caller
                     // size — this is a C semantic requirement. Not inlining them

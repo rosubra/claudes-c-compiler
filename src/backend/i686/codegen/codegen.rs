@@ -309,6 +309,14 @@ impl I686Codegen {
             self.state.reg_cache.invalidate_acc();
         } else if let Some(slot) = self.state.get_slot(dest.0) {
             emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
+            // If this dest is a wide value (I64/U64/F64), zero the upper 4 bytes.
+            // Wide values occupy 8-byte slots, and other paths (e.g. Copy from
+            // IrConst::I64) may write all 8 bytes. If we only write the low 4,
+            // the upper half retains stack garbage, which corrupts truthiness
+            // checks that OR both halves (emit_wide_value_to_eax_ored).
+            if self.state.wide_values.contains(&dest.0) {
+                emit!(self.state, "    movl $0, {}(%ebp)", slot.0 + 4);
+            }
             self.state.reg_cache.set_acc(dest.0, false);
         }
     }
