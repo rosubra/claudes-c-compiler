@@ -281,7 +281,14 @@ impl InlineAsmEmitter for I686Codegen {
                         }
                     } else {
                         let load_instr = Self::i686_mov_load_for_type(ty);
-                        let dest = Self::dest_reg_for_type(reg, ty);
+                        // For zero/sign-extending loads (movzbl, movzwl, movsbl, movswl),
+                        // the destination must always be a 32-bit register.
+                        // Only plain mov (movb, movw) uses the sub-register destination.
+                        let dest = if Self::is_extending_load(load_instr) {
+                            Self::reg_to_32(reg)
+                        } else {
+                            Self::dest_reg_for_type(reg, ty)
+                        };
                         self.state.emit_fmt(format_args!("    {} {}(%ebp), %{}", load_instr, slot.0, dest));
                     }
                 }
@@ -324,7 +331,12 @@ impl InlineAsmEmitter for I686Codegen {
                     self.state.emit_fmt(format_args!("    {} {}(%ebp), %{}", load_instr, slot.0, reg));
                 } else {
                     let load_instr = Self::i686_mov_load_for_type(ty);
-                    let dest = Self::dest_reg_for_type(reg, ty);
+                    // For zero/sign-extending loads, destination must be 32-bit
+                    let dest = if Self::is_extending_load(load_instr) {
+                        Self::reg_to_32(reg)
+                    } else {
+                        Self::dest_reg_for_type(reg, ty)
+                    };
                     self.state.emit_fmt(format_args!("    {} {}(%ebp), %{}", load_instr, slot.0, dest));
                 }
             } else {
@@ -338,7 +350,12 @@ impl InlineAsmEmitter for I686Codegen {
                     self.state.emit_fmt(format_args!("    {} (%{}), %{}", load_instr, reg, reg));
                 } else {
                     let load_instr = Self::i686_mov_load_for_type(ty);
-                    let dest = Self::dest_reg_for_type(reg, ty);
+                    // For zero/sign-extending loads, destination must be 32-bit
+                    let dest = if Self::is_extending_load(load_instr) {
+                        Self::reg_to_32(reg)
+                    } else {
+                        Self::dest_reg_for_type(reg, ty)
+                    };
                     self.state.emit_fmt(format_args!("    {} (%{}), %{}", load_instr, reg, dest));
                 }
             }
@@ -576,6 +593,12 @@ impl I686Codegen {
             IrType::I16 | IrType::U16 => Self::reg_to_16(reg),
             _ => Self::reg_to_32(reg),
         }
+    }
+
+    /// Check if a load instruction is a zero/sign-extending load.
+    /// These instructions always require a 32-bit destination register.
+    fn is_extending_load(instr: &str) -> bool {
+        matches!(instr, "movzbl" | "movzwl" | "movsbl" | "movswl")
     }
 
     /// Get the appropriately-sized destination register name for a type.
