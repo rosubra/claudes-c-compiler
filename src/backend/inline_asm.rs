@@ -538,7 +538,7 @@ pub fn emit_inline_asm_common_impl(
         }
     }
 
-    // Assign scratch registers to operands that need them
+    // Assign scratch registers to operands that need them.
     for i in 0..total_operands {
         if !operands[i].reg.is_empty() {
             continue;
@@ -549,28 +549,26 @@ pub fn emit_inline_asm_common_impl(
             AsmOperandKind::X87St0 => { operands[i].reg = "st(0)".to_string(); continue; }
             AsmOperandKind::X87St1 => { operands[i].reg = "st(1)".to_string(); continue; }
             kind => {
-                let is_tied = if i >= outputs.len() {
-                    input_tied_to[i - outputs.len()].is_some()
-                } else {
-                    false
-                };
-                if !is_tied {
-                    let reg = emitter.assign_scratch_reg(kind, &specific_regs);
-                    if reg.is_empty() && constraint_has_memory_alt(&operands[i].constraint) {
-                        // All GP registers exhausted but constraint allows memory (e.g., "g").
-                        // Fall back to memory operand instead of conflicting with a
-                        // specific-register constraint. Use setup_memory_fallback to
-                        // set up a direct stack-slot reference for the value.
-                        operands[i].kind = AsmOperandKind::Memory;
-                        let val = if i >= outputs.len() {
-                            inputs[i - outputs.len()].1.clone()
-                        } else {
-                            Operand::Value(outputs[i].1)
-                        };
+                if i >= outputs.len() {
+                    let input_idx = i - outputs.len();
+                    let is_tied = input_tied_to[input_idx].is_some();
+                    if is_tied {
+                        continue;
+                    }
+                }
+                let reg = emitter.assign_scratch_reg(kind, &specific_regs);
+                if reg.is_empty() && constraint_has_memory_alt(&operands[i].constraint) {
+                    operands[i].kind = AsmOperandKind::Memory;
+                    if i < outputs.len() {
+                        let val = Operand::Value(outputs[i].1);
                         emitter.setup_memory_fallback(&mut operands[i], &val);
                     } else {
-                        operands[i].reg = reg;
+                        let input_idx = i - outputs.len();
+                        let val = inputs[input_idx].1.clone();
+                        emitter.setup_memory_fallback(&mut operands[i], &val);
                     }
+                } else {
+                    operands[i].reg = reg;
                 }
             }
         }

@@ -10,8 +10,13 @@ use super::codegen::X86Codegen;
 /// x86-64 scratch registers for inline asm "r" constraints (caller-saved, not rax/rsp/rbp).
 const X86_GP_SCRATCH: &[&str] = &["rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
 
-/// x86-64 scratch XMM registers for inline asm "x" constraints (SSE registers, caller-saved).
-const X86_XMM_SCRATCH: &[&str] = &["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
+/// x86-64 scratch XMM registers for inline asm "x" constraints.
+/// Includes all 16 SSE registers (xmm0-xmm15). xmm16-xmm31 require AVX-512
+/// EVEX encoding and must not be used without explicit AVX-512 support.
+const X86_XMM_SCRATCH: &[&str] = &[
+    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+    "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+];
 
 impl InlineAsmEmitter for X86Codegen {
     fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
@@ -202,15 +207,25 @@ impl InlineAsmEmitter for X86Codegen {
 
     fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         if matches!(kind, AsmOperandKind::FpReg) {
-            // Skip XMM registers that are claimed by clobbers or specific constraints
+            // Skip XMM registers that are claimed by clobbers or specific constraints.
+            // Only xmm0-xmm15 are valid without AVX-512; xmm16+ requires EVEX encoding.
             loop {
                 let idx = self.asm_xmm_scratch_idx;
                 self.asm_xmm_scratch_idx += 1;
-                let reg = if idx < X86_XMM_SCRATCH.len() {
-                    X86_XMM_SCRATCH[idx].to_string()
-                } else {
-                    format!("xmm{}", idx)
-                };
+                if idx >= X86_XMM_SCRATCH.len() {
+                    // All 16 XMM registers exhausted in the linear scan.
+                    // Wrap around and pick the first non-excluded register.
+                    // This allows register reuse between operands, which is
+                    // acceptable for inline asm (inputs read before outputs written).
+                    for r in X86_XMM_SCRATCH {
+                        if !excluded.iter().any(|e| e == *r) {
+                            return r.to_string();
+                        }
+                    }
+                    // Every XMM register is excluded (extremely unlikely).
+                    return "xmm0".to_string();
+                }
+                let reg = X86_XMM_SCRATCH[idx].to_string();
                 if !excluded.iter().any(|e| e == &reg) {
                     return reg;
                 }
@@ -227,14 +242,21 @@ impl InlineAsmEmitter for X86Codegen {
             // This shouldn't happen in practice with correct inline asm.
             "rax".to_string()
         } else {
-            // Skip registers that are claimed by specific-register constraints
+            // Skip registers that are claimed by specific-register constraints.
+            // x86-64 GP registers: rcx, rdx, rsi, rdi, r8-r15 (no r16+).
             loop {
                 let idx = self.asm_scratch_idx;
                 self.asm_scratch_idx += 1;
                 let reg = if idx < X86_GP_SCRATCH.len() {
                     X86_GP_SCRATCH[idx].to_string()
                 } else {
-                    format!("r{}", 12 + idx - X86_GP_SCRATCH.len())
+                    let extra = idx - X86_GP_SCRATCH.len();
+                    let gp_extra = extra + 12; // r12, r13, r14, r15
+                    if gp_extra > 15 {
+                        // All GP registers exhausted; fall back to rcx.
+                        return "rcx".to_string();
+                    }
+                    format!("r{}", gp_extra)
                 };
                 if !excluded.iter().any(|e| e == &reg) {
                     return reg;

@@ -332,12 +332,7 @@ impl Preprocessor {
                     "/usr/aarch64-linux-gnu/include",
                     "/usr/include/aarch64-linux-gnu",
                 ];
-                for p in &aarch64_paths {
-                    let path = PathBuf::from(p);
-                    if path.is_dir() {
-                        self.system_include_paths.insert(0, path);
-                    }
-                }
+                self.insert_arch_paths_after_bundled(&aarch64_paths);
                 // AArch64 uses IEEE 754 binary128 for long double (not x87 80-bit)
                 self.override_ldbl_binary128();
             }
@@ -386,12 +381,7 @@ impl Preprocessor {
                     "/usr/riscv64-linux-gnu/include",
                     "/usr/include/riscv64-linux-gnu",
                 ];
-                for p in &riscv_paths {
-                    let path = PathBuf::from(p);
-                    if path.is_dir() {
-                        self.system_include_paths.insert(0, path);
-                    }
-                }
+                self.insert_arch_paths_after_bundled(&riscv_paths);
                 // RISC-V uses IEEE 754 binary128 for long double (not x87 80-bit)
                 self.override_ldbl_binary128();
             }
@@ -474,17 +464,37 @@ impl Preprocessor {
                     "/usr/i686-linux-gnu/include",
                     "/usr/include/i386-linux-gnu",
                 ];
-                for p in &i686_paths {
-                    let path = PathBuf::from(p);
-                    if path.is_dir() {
-                        self.system_include_paths.insert(0, path);
-                    }
-                }
+                self.insert_arch_paths_after_bundled(&i686_paths);
                 // i686 uses the same x87 80-bit long double format as x86-64
                 // (LDBL macros are already set correctly), but sizeof differs (12 vs 16)
             }
             _ => {
                 // x86_64 is already the default
+            }
+        }
+    }
+
+    /// Insert architecture-specific include paths, keeping the bundled include
+    /// directory first so our simplified SSE/intrinsic headers take priority over
+    /// the system GCC cross-compiler headers (which use unsupported builtins).
+    fn insert_arch_paths_after_bundled(&mut self, arch_paths: &[&str]) {
+        // Find the index after the bundled include dir (if present).
+        // The bundled dir is always the first entry added by default_system_include_paths().
+        let insert_pos = if let Some(bundled) = Self::bundled_include_dir() {
+            self.system_include_paths
+                .iter()
+                .position(|p| *p == bundled)
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut offset = 0;
+        for p in arch_paths {
+            let path = PathBuf::from(p);
+            if path.is_dir() {
+                self.system_include_paths.insert(insert_pos + offset, path);
+                offset += 1;
             }
         }
     }

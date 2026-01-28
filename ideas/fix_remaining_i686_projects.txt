@@ -104,9 +104,12 @@ Known remaining issues:
    - Root cause: mode(TI) accepted on i686, causing 128-bit fe_51 code path
    - Fix: reject mode(TI) and __int128 on 32-bit targets (matches GCC behavior)
 
-4. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
-   - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
-   - Used in AES-NI key schedule (aesni_set_rk_128/192/256)
+4. mbedtls: Build succeeds, 5/7 tests pass (FIXED BUILD, partial runtime)
+   - FIXED: Build failure due to GCC cross-compiler emmintrin.h shadowing bundled headers
+   - FIXED: SSE intrinsic return values (pointer dereference pattern in emmintrin.h/wmmintrin.h)
+   - FIXED: DCE incorrectly removing pure intrinsics with dest_ptr side effects
+   - AES, CTR_DRBG, MD5, SHA256, RSA, ECP now pass
+   - Remaining: ARIA-ECB-128 and SHA-512 still fail (pre-existing i686 codegen issues)
 
 5. libffi: FIXED - all 6/6 tests pass (including closures)
    - Root cause: __CET__ was defined for i686 but i686-linux-gnu-gcc -m32
@@ -127,7 +130,7 @@ Priority investigation targets:
 - sqlite inlining bug: This is the highest-value fix (622 tests).
   The root cause is identified; need to fix codegen or inline pass.
 - mquickjs crashes: May share root cause with sqlite inlining bug.
-- mbedtls __builtin_ia32_pshufd: SSE2 intrinsic implementation.
+- mbedtls: ARIA-ECB and SHA-512 failures (pre-existing i686 codegen issues).
 
 Techniques:
 - Compare i686 assembly output against i686-linux-gnu-gcc for suspect functions

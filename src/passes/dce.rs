@@ -415,7 +415,7 @@ fn has_side_effects(inst: &Instruction) -> bool {
         // StackRestore modifies the stack pointer at runtime - must not be removed.
         // StackSave is kept alive by its use in StackRestore (normal DCE liveness).
         Instruction::StackRestore { .. }
-    ) || matches!(inst, Instruction::Intrinsic { op, .. } if !op.is_pure())
+    ) || matches!(inst, Instruction::Intrinsic { op, dest_ptr, .. } if !op.is_pure() || dest_ptr.is_some())
 }
 
 #[cfg(test)]

@@ -34,6 +34,11 @@ typedef char __v16qi __attribute__ ((__vector_size__ (16)));
 typedef signed char __v16qs __attribute__ ((__vector_size__ (16)));
 typedef unsigned char __v16qu __attribute__ ((__vector_size__ (16)));
 
+/* Helper to convert intrinsic result pointer to __m128i value.
+ * Our SSE builtins return a pointer to 16-byte result data.
+ * This macro dereferences that pointer to get the __m128i struct value. */
+#define __CCC_M128I_FROM_BUILTIN(expr) (*(__m128i *)(expr))
+
 /* === Load / Store === */
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -65,20 +70,18 @@ _mm_store_si128(__m128i *__p, __m128i __b)
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_set1_epi8(char __b)
 {
-    return (__m128i){ {
+    return __CCC_M128I_FROM_BUILTIN(
         __builtin_ia32_vec_init_v16qi(__b, __b, __b, __b,
                                       __b, __b, __b, __b,
                                       __b, __b, __b, __b,
-                                      __b, __b, __b, __b)
-    } };
+                                      __b, __b, __b, __b));
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_set1_epi32(int __i)
 {
-    return (__m128i){ {
-        __builtin_ia32_vec_init_v4si(__i, __i, __i, __i)
-    } };
+    return __CCC_M128I_FROM_BUILTIN(
+        __builtin_ia32_vec_init_v4si(__i, __i, __i, __i));
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -92,13 +95,13 @@ _mm_setzero_si128(void)
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_cmpeq_epi8(__m128i __a, __m128i __b)
 {
-    return (__m128i){ { __builtin_ia32_pcmpeqb128(__a, __b) } };
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpeqb128(__a, __b));
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_cmpeq_epi32(__m128i __a, __m128i __b)
 {
-    return (__m128i){ { __builtin_ia32_pcmpeqd128(__a, __b) } };
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpeqd128(__a, __b));
 }
 
 /* === Arithmetic === */
@@ -106,7 +109,7 @@ _mm_cmpeq_epi32(__m128i __a, __m128i __b)
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_subs_epu8(__m128i __a, __m128i __b)
 {
-    return (__m128i){ { __builtin_ia32_psubusb128(__a, __b) } };
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_psubusb128(__a, __b));
 }
 
 /* === Bitwise === */
@@ -136,29 +139,29 @@ _mm_xor_si128(__m128i __a, __m128i __b)
 
 /* Byte-level shift left (PSLLDQ): shift __a left by __N bytes, zero-fill */
 #define _mm_slli_si128(a, N) \
-    ((__m128i){ { __builtin_ia32_pslldqi128((a), (N)) } })
+    __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pslldqi128((a), (N)))
 
 /* Byte-level shift right (PSRLDQ): shift __a right by __N bytes, zero-fill */
 #define _mm_srli_si128(a, N) \
-    ((__m128i){ { __builtin_ia32_psrldqi128((a), (N)) } })
+    __CCC_M128I_FROM_BUILTIN(__builtin_ia32_psrldqi128((a), (N)))
 
 /* Bit-level shift left on each 64-bit element (PSLLQ) */
 #define _mm_slli_epi64(a, count) \
-    ((__m128i){ { __builtin_ia32_psllqi128((a), (count)) } })
+    __CCC_M128I_FROM_BUILTIN(__builtin_ia32_psllqi128((a), (count)))
 
 /* Bit-level shift right on each 64-bit element (PSRLQ) */
 #define _mm_srli_epi64(a, count) \
-    ((__m128i){ { __builtin_ia32_psrlqi128((a), (count)) } })
+    __CCC_M128I_FROM_BUILTIN(__builtin_ia32_psrlqi128((a), (count)))
 
 /* Shuffle 32-bit integers (PSHUFD) */
 #define _mm_shuffle_epi32(a, imm) \
-    ((__m128i){ { __builtin_ia32_pshufd128((a), (imm)) } })
+    __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pshufd128((a), (imm)))
 
 /* Load low 64 bits into lower half, zero upper half (MOVQ) */
 static __inline__ __m128i __attribute__((__always_inline__))
 _mm_loadl_epi64(__m128i const *__p)
 {
-    return (__m128i){ { __builtin_ia32_loadldi128(__p) } };
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_loadldi128(__p));
 }
 
 /* === Miscellaneous === */

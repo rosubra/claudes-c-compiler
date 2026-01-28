@@ -149,12 +149,25 @@ impl InlineAsmEmitter for I686Codegen {
 
     fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         if matches!(kind, AsmOperandKind::FpReg) {
-            let idx = self.asm_xmm_scratch_idx;
-            self.asm_xmm_scratch_idx += 1;
-            if idx < I686_XMM_SCRATCH.len() {
-                I686_XMM_SCRATCH[idx].to_string()
-            } else {
-                format!("xmm{}", idx)
+            // i686 only has xmm0-xmm7 (no xmm8-xmm15 without 64-bit mode).
+            // Skip excluded registers but cap at 8.
+            loop {
+                let idx = self.asm_xmm_scratch_idx;
+                self.asm_xmm_scratch_idx += 1;
+                if idx >= I686_XMM_SCRATCH.len() {
+                    // All 8 XMM registers exhausted; wrap around and pick
+                    // the first non-excluded register for reuse.
+                    for r in I686_XMM_SCRATCH {
+                        if !excluded.iter().any(|e| e == *r) {
+                            return r.to_string();
+                        }
+                    }
+                    return "xmm0".to_string();
+                }
+                let reg = I686_XMM_SCRATCH[idx].to_string();
+                if !excluded.iter().any(|e| e == &reg) {
+                    return reg;
+                }
             }
         } else {
             // All GP registers on i686 (including caller-saved)

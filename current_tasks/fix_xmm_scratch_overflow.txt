@@ -1,6 +1,6 @@
 Fix XMM scratch register overflow in x86 inline asm allocator
 
-Status: in_progress
+Status: done
 
 Problem:
 In src/backend/x86/codegen/asm_emitter.rs, the assign_scratch_reg() function
