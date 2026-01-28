@@ -194,12 +194,18 @@ impl InlineAsmEmitter for X86Codegen {
 
     fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         if matches!(kind, AsmOperandKind::FpReg) {
-            let idx = self.asm_xmm_scratch_idx;
-            self.asm_xmm_scratch_idx += 1;
-            if idx < X86_XMM_SCRATCH.len() {
-                X86_XMM_SCRATCH[idx].to_string()
-            } else {
-                format!("xmm{}", idx)
+            // Skip XMM registers that are claimed by clobbers or specific constraints
+            loop {
+                let idx = self.asm_xmm_scratch_idx;
+                self.asm_xmm_scratch_idx += 1;
+                let reg = if idx < X86_XMM_SCRATCH.len() {
+                    X86_XMM_SCRATCH[idx].to_string()
+                } else {
+                    format!("xmm{}", idx)
+                };
+                if !excluded.iter().any(|e| e == &reg) {
+                    return reg;
+                }
             }
         } else {
             // Skip registers that are claimed by specific-register constraints

@@ -10,6 +10,11 @@
 /// Matches the x86 register family numbering.
 pub(super) type RegId = u8;
 pub(super) const REG_NONE: RegId = 255;
+/// Maximum register family ID for general-purpose registers (rax..r15 = 0..15).
+/// MMX (16..23) and XMM (24..39) families are recognized by register_family_fast
+/// but are not tracked by the global store forwarding pass (which only handles GP
+/// register-to-register moves via reg_id_to_name).
+pub(super) const REG_GP_MAX: RegId = 15;
 
 /// Sentinel value for `rbp_offset` meaning "no %rbp reference" or "multiple/complex references".
 pub(super) const RBP_OFFSET_NONE: i32 = i32::MIN;
@@ -1141,6 +1146,8 @@ pub(super) fn register_family(reg: &str) -> Option<u8> {
 ///   32-bit: %eax..%edi, %r8d..%r15d
 ///   16-bit: %ax..%di,   %r8w..%r15w
 ///    8-bit: %al..%dil,  %r8b..%r15b, %ah/%bh/%ch/%dh
+/// Also handles MMX (%mm0..%mm7) and SSE (%xmm0..%xmm15) registers:
+///   GP families: 0-15, MMX families: 16-23, XMM families: 24-39.
 #[inline]
 pub(super) fn register_family_fast(reg: &str) -> RegId {
     let b = reg.as_bytes();
@@ -1181,6 +1188,20 @@ pub(super) fn register_family_fast(reg: &str) -> RegId {
         b'd' => match b[2] { b'i' => 7, b'x' | b'l' | b'h' => 2, _ => REG_NONE },
         b'b' => match b[2] { b'p' => 5, b'x' | b'l' | b'h' => 3, _ => REG_NONE },
         b's' => match b[2] { b'p' => 4, b'i' => 6, _ => REG_NONE },
+        // MMX registers: %mm0..%mm7 → families 16..23
+        b'm' if len == 4 && b[2] == b'm' && b[3] >= b'0' && b[3] <= b'7' => {
+            16 + (b[3] - b'0')
+        }
+        // XMM registers: %xmm0..%xmm15 → families 24..39
+        b'x' if len >= 5 && b[2] == b'm' && b[3] == b'm' => {
+            if len == 5 && b[4] >= b'0' && b[4] <= b'9' {
+                24 + (b[4] - b'0')
+            } else if len == 6 && b[4] == b'1' && b[5] >= b'0' && b[5] <= b'5' {
+                34 + (b[5] - b'0')  // xmm10..xmm15
+            } else {
+                REG_NONE
+            }
+        }
         _ => REG_NONE,
     }
 }

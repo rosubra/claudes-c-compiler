@@ -363,7 +363,13 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
             if i + 1 < len && !infos[i + 1].is_nop() {
                 if let LineKind::LoadRbp { reg: lr, offset: lo, size: ls } = infos[i + 1].kind {
                     if so == lo && ss == ls {
-                        if sr == lr {
+                        // Guard: only optimize when both registers are recognized.
+                        // REG_NONE means the register is not a known GP/MMX/XMM family
+                        // (e.g., unrecognized register names). Treating two REG_NONE
+                        // values as "same register" would incorrectly eliminate loads
+                        // between different non-GP registers (e.g., %mm0 store then
+                        // %mm2 load at same offset).
+                        if sr == lr && sr != REG_NONE {
                             // Same register: load is redundant
                             mark_nop(&mut infos[i + 1]);
                             changed = true;
@@ -1137,8 +1143,9 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                         reg_offsets[old_reg as usize].remove_val(entry.offset);
                     }
                 }
-                // Record the new mapping.
-                if reg != REG_NONE {
+                // Record the new mapping (GP registers only — MMX/XMM families
+                // are recognized but not tracked for register-to-register forwarding).
+                if reg != REG_NONE && reg <= REG_GP_MAX {
                     slot_entries.push(SlotEntry {
                         offset,
                         mapping: SlotMapping { reg_id: reg, size },
@@ -1188,7 +1195,7 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                     }
                 }
 
-                if load_reg != REG_NONE {
+                if load_reg != REG_NONE && load_reg <= REG_GP_MAX {
                     invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, load_reg);
                 }
                 prev_was_unconditional_jump = false;
@@ -1229,7 +1236,7 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             }
 
             LineKind::Pop { reg } => {
-                if reg != REG_NONE {
+                if reg != REG_NONE && reg <= REG_GP_MAX {
                     invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, reg);
                 }
                 prev_was_unconditional_jump = false;
@@ -1241,7 +1248,8 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
 
             LineKind::Other { dest_reg } => {
                 // Use pre-parsed destination register for fast invalidation.
-                if dest_reg != REG_NONE {
+                // Only GP registers (0..15) are tracked in reg_offsets.
+                if dest_reg != REG_NONE && dest_reg <= REG_GP_MAX {
                     invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, dest_reg);
                     // Some instructions with dest_reg=0 (rax) also clobber rdx (family 2):
                     // - div/idiv/mul: produce quotient in rax, remainder in rdx
