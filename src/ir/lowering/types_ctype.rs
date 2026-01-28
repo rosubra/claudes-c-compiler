@@ -124,20 +124,19 @@ impl Lowerer {
         // Case 1: explicit function pointer syntax - fptr_params is set
         if let Some(ref fptr_params) = param.fptr_params {
             let return_ctype = self.type_spec_to_ctype(&param.type_spec);
-            // Peel ALL Pointer layers from the return type.
-            // For `int (*f)(...)`, type_spec is Pointer(Int) -> 1 pointer layer -> return Int
-            // For `int (**fpp)(...)`, type_spec is Pointer(Pointer(Int)) -> 2 layers
-            //   The first layer is the (*name) indirection, extra layers are
-            //   pointer-to-function-pointer levels that wrap the result.
-            let mut actual_return = return_ctype;
-            let mut extra_ptr_layers = 0usize;
-            while let CType::Pointer(inner, _) = actual_return {
-                actual_return = *inner;
-                extra_ptr_layers += 1;
-            }
-            // First pointer layer is the function-pointer indirection (*name),
-            // remaining layers are pointer-to-function-pointer wrapping.
-            let wrap_layers = extra_ptr_layers.saturating_sub(1);
+            // The parser's `is_func_ptr` flag adds exactly one Pointer layer for
+            // the (*name) indirection. Peel that single layer; any remaining
+            // Pointer layers belong to the actual return type.
+            //
+            // Examples (type_spec → peel 1 → return type):
+            //   int (*f)(...)           → Pointer(Int) → Int
+            //   int *(*f)(...)          → Pointer(Pointer(Int)) → Pointer(Int)
+            //   struct Node *(*f)(...) → Pointer(Pointer(Struct)) → Pointer(Struct)
+            let actual_return = if let CType::Pointer(inner, _) = return_ctype {
+                *inner
+            } else {
+                return_ctype
+            };
 
             let param_types: Vec<(CType, Option<String>)> = fptr_params.iter()
                 .map(|p| (self.type_spec_to_ctype(&p.type_spec), p.name.clone()))
@@ -147,10 +146,7 @@ impl Lowerer {
                 params: param_types,
                 variadic: false,
             }));
-            let mut result = CType::Pointer(Box::new(func_type), AddressSpace::Default);
-            for _ in 0..wrap_layers {
-                result = CType::Pointer(Box::new(result), AddressSpace::Default);
-            }
+            let result = CType::Pointer(Box::new(func_type), AddressSpace::Default);
             return result;
         }
 
