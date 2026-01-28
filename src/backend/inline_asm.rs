@@ -377,6 +377,22 @@ pub fn emit_inline_asm_common_impl(
             }
         }
 
+        // For pure immediate-only constraints ("i", "n", etc.) that are still GpReg
+        // because the operand is a Value (not a Const), promote to Immediate with a
+        // placeholder value of 0. This happens in standalone bodies of static inline
+        // functions where "i" constraint parameters can't be resolved to constants.
+        // The standalone body is safe because: (1) always_inline functions are DCE'd
+        // if never called directly, and (2) .pushsection metadata with 0 won't be
+        // linked into the final binary. Without this, the backend would load the value
+        // into a register and substitute the register name (e.g., "x9") into data
+        // directives like .hword, causing linker errors ("undefined reference to x9").
+        if matches!(op.kind, AsmOperandKind::GpReg) && matches!(val, Operand::Value(_)) {
+            if constraint_is_immediate_only(constraint) {
+                op.imm_value = Some(0);
+                op.kind = AsmOperandKind::Immediate;
+            }
+        }
+
         operands.push(op);
     }
 
