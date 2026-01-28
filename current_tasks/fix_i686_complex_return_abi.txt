@@ -1,0 +1,22 @@
+Fix i686 complex type return ABI
+
+Problem:
+On i686, the compiler incorrectly handles return values for complex types:
+- ComplexDouble (16 bytes) and ComplexLongDouble (24 bytes) should use hidden pointer (sret)
+  return, but currently try to return in registers (F64/F128 via x87)
+- ComplexFloat (8 bytes) should return in EAX:EDX as integer bits, but currently
+  returns as F64 via x87 st(0) because uses_packed_complex_float() incorrectly returns true
+
+The GCC i686 ABI for complex returns:
+- Complex float (8 bytes): real in EAX, imag in EDX (as raw float bits)
+- Complex double (16 bytes): hidden pointer (sret), ret $4
+- Complex long double (24 bytes): hidden pointer (sret), ret $4
+
+Fix:
+1. returns_complex_long_double_in_regs() -> false for i686
+2. uses_packed_complex_float() -> false for i686
+3. Add sret_size for ComplexDouble on i686
+4. Fix ComplexFloat to use I64 return (EAX:EDX) on i686
+5. Fix try_complex_return and try_scalar_to_complex_return for i686
+
+Status: in_progress
