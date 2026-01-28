@@ -37,6 +37,10 @@ pub struct I686Codegen {
     /// On i686 cdecl, all parameters are stack-passed, so this equals the total
     /// bytes of all named parameters including F64/I64 which take 8 bytes each.
     va_named_stack_bytes: usize,
+    /// Scratch register allocation index for inline asm GP registers.
+    pub(super) asm_scratch_idx: usize,
+    /// Scratch register allocation index for inline asm XMM registers.
+    pub(super) asm_xmm_scratch_idx: usize,
 }
 
 // Callee-saved physical register indices for i686
@@ -83,6 +87,8 @@ impl I686Codegen {
             reg_assignments: FxHashMap::default(),
             used_callee_saved: Vec::new(),
             va_named_stack_bytes: 0,
+            asm_scratch_idx: 0,
+            asm_xmm_scratch_idx: 0,
         }
     }
 
@@ -782,6 +788,21 @@ impl I686Codegen {
         self.state.emit("    popl %esi");
         self.state.emit("    popl %ebx");
         self.state.reg_cache.invalidate_acc();
+    }
+
+    /// Emit comments for callee-saved registers clobbered by inline asm.
+    fn emit_callee_saved_clobber_annotations(&mut self, clobbers: &[String]) {
+        for clobber in clobbers {
+            let reg_name = match clobber.as_str() {
+                "ebx" | "bx" | "bl" | "bh" => Some("%ebx"),
+                "esi" | "si" => Some("%esi"),
+                "edi" | "di" => Some("%edi"),
+                _ => None,
+            };
+            if let Some(reg) = reg_name {
+                self.state.emit_fmt(format_args!("    # asm clobber {}", reg));
+            }
+        }
     }
 }
 
@@ -3530,13 +3551,13 @@ impl ArchCodegen for I686Codegen {
 
     // --- Inline asm ---
 
-    fn emit_inline_asm(&mut self, template: &str, _outputs: &[(String, Value, Option<String>)],
-                       _inputs: &[(String, Operand, Option<String>)], _clobbers: &[String],
-                       _operand_types: &[IrType], _goto_labels: &[(String, BlockId)],
-                       _input_symbols: &[Option<String>]) {
-        // Simplified inline asm emission for i686
-        // TODO: proper inline asm support
-        self.state.emit_fmt(format_args!("    {}", template));
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)],
+                       inputs: &[(String, Operand, Option<String>)], clobbers: &[String],
+                       operand_types: &[IrType], goto_labels: &[(String, BlockId)],
+                       input_symbols: &[Option<String>]) {
+        crate::backend::inline_asm::emit_inline_asm_common(self, template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols);
+        self.emit_callee_saved_clobber_annotations(clobbers);
+        self.state.reg_cache.invalidate_all();
     }
 
     fn emit_intrinsic(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {

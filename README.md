@@ -71,7 +71,7 @@ and PostgreSQL.
 | mbedTLS | AES, RSA, ECP, SHA, ARIA self-tests |
 | jq | All 12 tests on all architectures |
 | Linux kernel | Builds and boots on x86-64 and AArch64 |
-| PostgreSQL | x86: 215/216; ARM/RISC-V: builds and initdb works |
+| PostgreSQL | x86: 216/216; ARM: 216/216; RISC-V: builds, make check fails |
 
 ### Known limitations
 
@@ -83,9 +83,8 @@ and PostgreSQL.
 - **Complex numbers**: `_Complex` arithmetic has some edge-case failures.
 - **GNU extensions**: Partial `__attribute__` support. ARM NEON intrinsics are partially
   implemented (core 128-bit operations work; some SSE-equivalent stubs remain).
-- **i686**: The 32-bit x86 backend is new (~99.2% unit test pass rate).
-  5/12 projects pass (zlib, lua, libpng, jq, libuv). Remaining failures
-  are mainly due to inline assembly and SSE intrinsic support gaps.
+- **i686**: The 32-bit x86 backend is new. Inline assembly with full
+  operand substitution and register constraints is supported.
 
 ## Architecture
 
@@ -176,7 +175,7 @@ python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86
 
 - `src/` -- Compiler source code (Rust)
 - `include/` -- Bundled C headers (SSE/AVX intrinsic stubs)
-- `tests/` -- Test suite (~637 test directories)
+- `tests/` -- Test suite (~662 test directories)
 - `ideas/` -- Design docs and future work proposals
 - `current_tasks/` -- Active work items (lock files for coordination)
 - `completed_tasks/` -- Finished work items (for reference)

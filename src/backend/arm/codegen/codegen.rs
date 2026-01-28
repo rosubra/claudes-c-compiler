@@ -2284,8 +2284,14 @@ impl ArchCodegen for ArmCodegen {
                 IrBinOp::And => self.state.emit("    and w0, w1, w2"),
                 IrBinOp::Or => self.state.emit("    orr w0, w1, w2"),
                 IrBinOp::Xor => self.state.emit("    eor w0, w1, w2"),
-                IrBinOp::Shl => self.state.emit("    lsl w0, w1, w2"),
-                IrBinOp::AShr => self.state.emit("    asr w0, w1, w2"),
+                IrBinOp::Shl => {
+                    self.state.emit("    lsl w0, w1, w2");
+                    if !is_unsigned { self.state.emit("    sxtw x0, w0"); }
+                }
+                IrBinOp::AShr => {
+                    self.state.emit("    asr w0, w1, w2");
+                    if !is_unsigned { self.state.emit("    sxtw x0, w0"); }
+                }
                 IrBinOp::LShr => self.state.emit("    lsr w0, w1, w2"),
             }
         } else {
