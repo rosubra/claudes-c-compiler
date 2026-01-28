@@ -433,6 +433,47 @@ impl Lowerer {
                             }
                             current_idx += 1;
                         }
+                        // On targets where pointer size < element type size
+                        // (e.g., i686 with uint64_t[] arrays), each compound
+                        // element would emit only ptr_size bytes (4 on i686),
+                        // but the array element is wider (8 bytes). Convert to
+                        // byte+pointer representation so each element is padded
+                        // to the correct width.
+                        let ptr_size = crate::common::types::target_ptr_size();
+                        if base_type_size > ptr_size {
+                            let mut bytes = vec![0u8; total_size];
+                            let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new();
+                            for (idx, elem) in elements.into_iter().enumerate() {
+                                let byte_offset = idx * base_type_size;
+                                match elem {
+                                    GlobalInit::Zero => {
+                                        // Already zero in the byte buffer
+                                    }
+                                    GlobalInit::Scalar(ref c) => {
+                                        // Serialize scalar value into bytes
+                                        let val_bytes = c.to_le_bytes();
+                                        let len = val_bytes.len().min(base_type_size);
+                                        bytes[byte_offset..byte_offset + len]
+                                            .copy_from_slice(&val_bytes[..len]);
+                                    }
+                                    GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => {
+                                        // Record as a pointer relocation at this byte offset
+                                        ptr_ranges.push((byte_offset, elem));
+                                    }
+                                    GlobalInit::GlobalLabelDiff(lab1, lab2, _) => {
+                                        // Record label diff with correct byte size
+                                        ptr_ranges.push((byte_offset,
+                                            GlobalInit::GlobalLabelDiff(lab1, lab2, ptr_size)));
+                                    }
+                                    _ => {
+                                        // Fallback: treat as zero
+                                    }
+                                }
+                            }
+                            return Self::build_compound_from_bytes_and_ptrs(
+                                bytes, ptr_ranges, total_size,
+                            );
+                        }
                         return GlobalInit::Compound(elements);
                     }
 

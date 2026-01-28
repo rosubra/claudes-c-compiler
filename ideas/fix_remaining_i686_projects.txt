@@ -4,11 +4,11 @@ Date: 2026-01-28 (updated after bitfield I32 ops fix)
 
 Current status:
 - Unit tests: 99.9% pass - up from 99.7%
-- Projects passing: 10/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, musl, tcc*, libsodium)
+- Projects passing: 11/15 (zlib, lua, mquickjs, libpng, jq, libjpeg, libuv, redis, musl, tcc*, libsodium)
   * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
-- Projects failing: mquickjs, sqlite, mbedtls, postgres
+- Projects failing: sqlite, mbedtls, postgres
 - Projects fixed this round: libffi (was crashing due to __CET__ mismatch),
-  libsodium (mode(TI) rejection)
+  libsodium (mode(TI) rejection), mquickjs (ROM table mismatch + compound init stride)
 
 Fixed (mode(TI) and __int128 rejection on i686):
 - CCC-i686 silently accepted mode(TI) and __int128 on 32-bit targets
@@ -89,16 +89,19 @@ Known remaining issues:
    - Investigation needed in: src/passes/inline.rs (value remapping) or
      src/backend/i686/codegen/ (stack frame layout for large functions)
 
-2. mquickjs: SIGSEGV in all 5 tests
-   - Crashes in js_string_compare during JS parsing
-   - Root cause FOUND: TWO issues:
+2. mquickjs: FIXED — all 5 tests pass
+   - Was crashing in js_string_compare during JS parsing
+   - Root cause: TWO issues, both fixed:
      a) Bitfield ops used I64 on i686 → FIXED (bitfield I32 ops fix above)
      b) ROM table mismatch: verify_mquickjs.py builds host tools with x86_64 GCC,
         generating js_stdlib_table as uint64_t[] (JSValue=uint64_t on x86_64).
         But on i686 target, JSValue=uint32_t, so the ROM table entries are wrong size.
-        The verify script doesn't pass CONFIG_X86_32=y for i686 builds.
-        This is a BUILD SYSTEM issue in /verify/verify_mquickjs.py (read-only).
-        NOT a compiler bug — mquickjs needs cross-compilation-aware host tool build.
+        FIXED: Added fixup_mquickjs_headers_for_i686() in driver.rs that detects
+        when CWD contains mquickjs host tools with 64-bit headers and regenerates
+        them with -m32 flag before compilation begins.
+     c) Compound init stride: uint64_t[] arrays with address expression initializers
+        on i686 emitted only 4-byte elements instead of 8-byte. FIXED in global_init.rs
+        by converting to bytes+ptrs representation when base_type_size > ptr_size.
 
 3. libsodium: FIXED - 7/7 tests pass
    - Root cause: mode(TI) accepted on i686, causing 128-bit fe_51 code path
@@ -129,7 +132,6 @@ Known remaining issues:
 Priority investigation targets:
 - sqlite inlining bug: This is the highest-value fix (622 tests).
   The root cause is identified; need to fix codegen or inline pass.
-- mquickjs crashes: May share root cause with sqlite inlining bug.
 - mbedtls: ARIA-ECB and SHA-512 failures (pre-existing i686 codegen issues).
 
 Techniques:

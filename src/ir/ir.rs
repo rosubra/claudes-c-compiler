@@ -1119,6 +1119,22 @@ impl IrConst {
         }
     }
 
+    /// Serialize this constant to little-endian bytes.
+    /// Returns a Vec containing the value in little-endian byte order.
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        match self {
+            IrConst::I8(v) => vec![*v as u8],
+            IrConst::I16(v) => v.to_le_bytes().to_vec(),
+            IrConst::I32(v) => v.to_le_bytes().to_vec(),
+            IrConst::I64(v) => v.to_le_bytes().to_vec(),
+            IrConst::I128(v) => v.to_le_bytes().to_vec(),
+            IrConst::F32(v) => v.to_bits().to_le_bytes().to_vec(),
+            IrConst::F64(v) => v.to_bits().to_le_bytes().to_vec(),
+            IrConst::LongDouble(_, bytes) => bytes.to_vec(),
+            IrConst::Zero => vec![0],
+        }
+    }
+
     /// Get the one constant for a given IR type.
     pub fn one(ty: IrType) -> IrConst {
         match ty {
