@@ -104,11 +104,9 @@ pub(super) struct FunctionBuildState {
     pub switch_stack: Vec<SwitchFrame>,
     /// User-defined goto labels -> unique IR labels
     pub user_labels: FxHashMap<String, BlockId>,
-    /// Pre-scanned scope depths for user-defined labels.
-    /// Populated before lowering the function body so that `goto` can determine
-    /// how many scopes to clean up (only scopes above the target label's depth).
-    /// This solves the forward-reference problem: even if a label hasn't been
-    /// lowered yet, its scope depth is known from the pre-scan.
+    /// User-defined goto labels -> scope depth at label definition site.
+    /// Populated by a prescan of the function body before lowering, so that
+    /// `goto` cleanup emission can determine which scopes are actually exited.
     pub user_label_depths: FxHashMap<String, usize>,
     /// Scope stack for function-local variable undo tracking
     pub scope_stack: Vec<FuncScopeFrame>,

@@ -502,17 +502,27 @@ impl StructLayout {
                         placed_abs_bit = abs_bit_pos;
                     }
 
-                    // Compute this field's storage unit: the sizeof(type)-aligned byte
-                    // offset that contains this field's bits.
-                    // Per the SysV ABI, the storage unit is sizeof(type) bytes wide and
-                    // aligned to sizeof(type), NOT to the ABI alignment of the type.
-                    // On i686, long long has ABI alignment 4 but sizeof 8; the storage
-                    // unit must still be 8-byte aligned within the bitfield region.
-                    let field_storage_offset = if field_size > 0 {
-                        ((placed_abs_bit / 8) as usize) & !(field_size - 1)
+                    // Compute this field's storage unit: sizeof(type) bytes wide.
+                    //
+                    // When continuing an existing bitfield sequence, use sizeof(type)
+                    // alignment to find the storage unit containing the bit position.
+                    // This ensures consecutive bitfields pack into the same unit.
+                    //
+                    // When starting a new bitfield (fresh placement after non-bitfield
+                    // or after straddling), use the ABI alignment (field_align) to
+                    // determine the storage unit base. On x86-64 sizeof == align for
+                    // long long (both 8), so this doesn't matter. On i686, long long
+                    // has sizeof=8 but ABI alignment=4; a fresh long long bitfield
+                    // placed at byte 4 should have its storage unit at byte 4, not
+                    // byte 0 (which would overlap preceding fields).
+                    let storage_mask = if !in_bitfield || straddles {
+                        // New placement: use ABI alignment
+                        if field_align > 0 { field_align } else { 1 }
                     } else {
-                        (placed_abs_bit / 8) as usize
+                        // Continuation: use sizeof to find containing unit
+                        if field_size > 0 { field_size } else { 1 }
                     };
+                    let field_storage_offset = ((placed_abs_bit / 8) as usize) & !(storage_mask - 1);
                     let field_bit_in_storage = (placed_abs_bit - (field_storage_offset as u64) * 8) as u32;
 
                     field_layouts.push(StructFieldLayout {

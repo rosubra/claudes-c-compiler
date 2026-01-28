@@ -181,24 +181,16 @@ impl Lowerer {
     }
 
     pub(super) fn lower_goto_stmt(&mut self, label: &str) {
-        // Determine the target label's scope depth from the pre-scan.
-        // Only emit cleanup calls for scopes being exited (scopes deeper than
-        // the target label's scope depth). This prevents over-cleaning when
-        // jumping within the same scope or to a label in an enclosing scope.
-        let current_depth = self.func().scope_stack.len();
+        // Determine the target label's scope depth (populated by prescan_label_depths).
+        // Only emit cleanup calls for scopes being exited by the goto, i.e. scopes
+        // deeper than the target label's scope depth.
         let target_depth = self.func().user_label_depths
             .get(label)
             .copied()
-            // If the label wasn't found in the pre-scan (shouldn't happen for valid C,
-            // but could occur with __label__ or other edge cases), fall back to
-            // conservative behavior (clean all scopes).
+            // Fallback: if the label depth is unknown (shouldn't happen after prescan),
+            // conservatively clean up all scopes.
             .unwrap_or(0);
-        // Only clean scopes that are being exited: if current depth > target depth,
-        // clean scopes from current down to (but not including) target depth.
-        // If current depth <= target depth (jumping into a deeper or same scope),
-        // no cleanup is needed.
-        let cleanup_depth = if current_depth > target_depth { target_depth } else { current_depth };
-        let cleanups = self.collect_scope_cleanup_vars_above_depth(cleanup_depth);
+        let cleanups = self.collect_scope_cleanup_vars_above_depth(target_depth);
         self.emit_cleanup_calls(&cleanups);
         // If the function has VLA declarations, restore the saved stack pointer before
         // jumping. This ensures VLA stack space is reclaimed on backward jumps (e.g.,
