@@ -1,0 +1,21 @@
+Task: Fix i686 cdecl argument passing and type cast conversions
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+Two bugs in the i686 backend's function call and type conversion code:
+
+1. Argument passing: Sub-int types (I8, I16) were stored with narrow
+   mov instructions (movb, movw) instead of full 4-byte movl. The cdecl
+   ABI requires all stack arguments to be 4-byte aligned words. F64 and
+   I64/U64 arguments also need 8 bytes on the stack, not 4.
+
+2. Type cast conversions: The emit_cast_instrs method used manual
+   (from_ty, to_ty) pattern matching with many missing combinations.
+   Casts like I16->F32, I8->F64, U32->F32 (with high bit set) etc.
+   silently did nothing (fell through to the `_ => {}` catch-all).
+   Rewrote to use the shared classify_cast() framework that all other
+   backends use, ensuring complete coverage.
+
+Also fixed emit_param_ref to use classified parameter offsets instead
+of hardcoded 4-byte-per-param assumptions.
