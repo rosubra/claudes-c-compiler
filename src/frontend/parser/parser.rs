@@ -46,59 +46,73 @@ impl ModeKind {
     }
 }
 
+/// Bit masks for boolean flags in `ParsedDeclAttrs::flags`.
+///
+/// Each flag occupies one bit of a `u32`, matching the pattern used by
+/// `FunctionAttributes`, `Declaration`, and `DeclAttributes` in ast.rs.
+/// New flags can be added by defining the next power-of-two constant.
+pub(super) mod parsed_attr_flag {
+    // --- Storage-class specifiers ---
+    /// `typedef` keyword encountered.
+    pub const TYPEDEF: u32          = 1 << 0;
+    /// `static` keyword encountered.
+    pub const STATIC: u32           = 1 << 1;
+    /// `extern` keyword encountered.
+    pub const EXTERN: u32           = 1 << 2;
+    /// `_Thread_local` or `__thread` encountered.
+    pub const THREAD_LOCAL: u32     = 1 << 3;
+    /// `inline` keyword encountered.
+    pub const INLINE: u32           = 1 << 4;
+
+    // --- Type qualifiers ---
+    /// `const` qualifier encountered.
+    pub const CONST: u32            = 1 << 5;
+    /// `volatile` qualifier encountered.
+    pub const VOLATILE: u32         = 1 << 6;
+
+    // --- GCC function attributes ---
+    /// `__attribute__((constructor))` encountered.
+    pub const CONSTRUCTOR: u32      = 1 << 7;
+    /// `__attribute__((destructor))` encountered.
+    pub const DESTRUCTOR: u32       = 1 << 8;
+    /// `__attribute__((weak))` encountered.
+    pub const WEAK: u32             = 1 << 9;
+    /// `__attribute__((used))` encountered.
+    pub const USED: u32             = 1 << 10;
+    /// `__attribute__((gnu_inline))` encountered.
+    pub const GNU_INLINE: u32       = 1 << 11;
+    /// `__attribute__((always_inline))` encountered.
+    pub const ALWAYS_INLINE: u32    = 1 << 12;
+    /// `__attribute__((noinline))` encountered.
+    pub const NOINLINE: u32         = 1 << 13;
+    /// `__attribute__((noreturn))` or `_Noreturn` encountered.
+    pub const NORETURN: u32         = 1 << 14;
+    /// `__attribute__((error("...")))` encountered.
+    pub const ERROR_ATTR: u32       = 1 << 15;
+    /// `__attribute__((transparent_union))` encountered.
+    pub const TRANSPARENT_UNION: u32 = 1 << 16;
+    /// `__attribute__((fastcall))` encountered (i386 fastcall calling convention).
+    pub const FASTCALL: u32         = 1 << 17;
+}
+
 /// Accumulated storage-class specifiers, type qualifiers, and GCC attributes
 /// parsed during declaration/type-specifier processing.
 ///
 /// These fields are set by `parse_type_specifier` and `parse_gcc_attribute` as
 /// keywords/attributes are encountered, then consumed and reset by declaration
 /// builders in `declarations.rs`. Grouping them into a single struct replaces
-/// 26 scattered fields on `Parser`, enabling bulk reset via `Default::default()`
+/// scattered fields on `Parser`, enabling bulk reset via `Default::default()`
 /// and making the "set then consume" lifecycle explicit.
-#[derive(Default)]
+///
+/// Boolean attributes are stored as a packed bitfield (`flags`) for memory
+/// efficiency — 18 booleans collapse from 18 bytes into 4 bytes. Accessor
+/// methods provide the same API as the old struct fields.
 pub(super) struct ParsedDeclAttrs {
-    // --- Storage-class specifiers ---
-    /// `typedef` keyword encountered.
-    pub parsing_typedef: bool,
-    /// `static` keyword encountered.
-    pub parsing_static: bool,
-    /// `extern` keyword encountered.
-    pub parsing_extern: bool,
-    /// `_Thread_local` or `__thread` encountered.
-    pub parsing_thread_local: bool,
-    /// `inline` keyword encountered.
-    pub parsing_inline: bool,
+    /// Packed boolean flags — see `parsed_attr_flag` constants.
+    flags: u32,
 
-    // --- Type qualifiers ---
-    /// `const` qualifier encountered.
-    pub parsing_const: bool,
-    /// `volatile` qualifier encountered.
-    pub parsing_volatile: bool,
     /// `__seg_gs` or `__seg_fs` qualifier encountered.
     pub parsing_address_space: AddressSpace,
-
-    // --- GCC function attributes ---
-    /// `__attribute__((constructor))` encountered.
-    pub parsing_constructor: bool,
-    /// `__attribute__((destructor))` encountered.
-    pub parsing_destructor: bool,
-    /// `__attribute__((weak))` encountered.
-    pub parsing_weak: bool,
-    /// `__attribute__((used))` encountered.
-    pub parsing_used: bool,
-    /// `__attribute__((gnu_inline))` encountered.
-    pub parsing_gnu_inline: bool,
-    /// `__attribute__((always_inline))` encountered.
-    pub parsing_always_inline: bool,
-    /// `__attribute__((noinline))` encountered.
-    pub parsing_noinline: bool,
-    /// `__attribute__((noreturn))` or `_Noreturn` encountered.
-    pub parsing_noreturn: bool,
-    /// `__attribute__((error("...")))` encountered.
-    pub parsing_error_attr: bool,
-    /// `__attribute__((transparent_union))` encountered.
-    pub parsing_transparent_union: bool,
-    /// `__attribute__((fastcall))` encountered (i386 fastcall calling convention).
-    pub parsing_fastcall: bool,
 
     // --- GCC attributes with values ---
     /// `__attribute__((alias("target")))` target symbol name.
@@ -119,6 +133,106 @@ pub(super) struct ParsedDeclAttrs {
     pub parsed_alignas_type: Option<TypeSpecifier>,
     /// `__attribute__((aligned(sizeof(type))))` type (for deferred sizeof).
     pub parsed_alignment_sizeof_type: Option<TypeSpecifier>,
+}
+
+impl Default for ParsedDeclAttrs {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            parsing_address_space: AddressSpace::default(),
+            parsing_alias_target: None,
+            parsing_visibility: None,
+            parsing_section: None,
+            parsing_cleanup_fn: None,
+            parsing_vector_size: None,
+            parsed_alignas: None,
+            parsed_alignas_type: None,
+            parsed_alignment_sizeof_type: None,
+        }
+    }
+}
+
+impl ParsedDeclAttrs {
+    // --- flag getters ---
+
+    #[inline] pub fn parsing_typedef(&self) -> bool          { self.flags & parsed_attr_flag::TYPEDEF != 0 }
+    #[inline] pub fn parsing_static(&self) -> bool           { self.flags & parsed_attr_flag::STATIC != 0 }
+    #[inline] pub fn parsing_extern(&self) -> bool           { self.flags & parsed_attr_flag::EXTERN != 0 }
+    #[inline] pub fn parsing_thread_local(&self) -> bool     { self.flags & parsed_attr_flag::THREAD_LOCAL != 0 }
+    #[inline] pub fn parsing_inline(&self) -> bool           { self.flags & parsed_attr_flag::INLINE != 0 }
+    #[inline] pub fn parsing_const(&self) -> bool            { self.flags & parsed_attr_flag::CONST != 0 }
+    #[inline] pub fn parsing_volatile(&self) -> bool         { self.flags & parsed_attr_flag::VOLATILE != 0 }
+    #[inline] pub fn parsing_constructor(&self) -> bool      { self.flags & parsed_attr_flag::CONSTRUCTOR != 0 }
+    #[inline] pub fn parsing_destructor(&self) -> bool       { self.flags & parsed_attr_flag::DESTRUCTOR != 0 }
+    #[inline] pub fn parsing_weak(&self) -> bool             { self.flags & parsed_attr_flag::WEAK != 0 }
+    #[inline] pub fn parsing_used(&self) -> bool             { self.flags & parsed_attr_flag::USED != 0 }
+    #[inline] pub fn parsing_gnu_inline(&self) -> bool       { self.flags & parsed_attr_flag::GNU_INLINE != 0 }
+    #[inline] pub fn parsing_always_inline(&self) -> bool    { self.flags & parsed_attr_flag::ALWAYS_INLINE != 0 }
+    #[inline] pub fn parsing_noinline(&self) -> bool         { self.flags & parsed_attr_flag::NOINLINE != 0 }
+    #[inline] pub fn parsing_noreturn(&self) -> bool         { self.flags & parsed_attr_flag::NORETURN != 0 }
+    #[inline] pub fn parsing_error_attr(&self) -> bool       { self.flags & parsed_attr_flag::ERROR_ATTR != 0 }
+    #[inline] pub fn parsing_transparent_union(&self) -> bool { self.flags & parsed_attr_flag::TRANSPARENT_UNION != 0 }
+    #[inline] pub fn parsing_fastcall(&self) -> bool         { self.flags & parsed_attr_flag::FASTCALL != 0 }
+
+    // --- flag setters ---
+
+    #[inline] pub fn set_typedef(&mut self, v: bool)          { self.set_flag(parsed_attr_flag::TYPEDEF, v) }
+    #[inline] pub fn set_static(&mut self, v: bool)           { self.set_flag(parsed_attr_flag::STATIC, v) }
+    #[inline] pub fn set_extern(&mut self, v: bool)           { self.set_flag(parsed_attr_flag::EXTERN, v) }
+    #[inline] pub fn set_thread_local(&mut self, v: bool)     { self.set_flag(parsed_attr_flag::THREAD_LOCAL, v) }
+    #[inline] pub fn set_inline(&mut self, v: bool)           { self.set_flag(parsed_attr_flag::INLINE, v) }
+    #[inline] pub fn set_const(&mut self, v: bool)            { self.set_flag(parsed_attr_flag::CONST, v) }
+    #[inline] pub fn set_volatile(&mut self, v: bool)         { self.set_flag(parsed_attr_flag::VOLATILE, v) }
+    #[inline] pub fn set_constructor(&mut self, v: bool)      { self.set_flag(parsed_attr_flag::CONSTRUCTOR, v) }
+    #[inline] pub fn set_destructor(&mut self, v: bool)       { self.set_flag(parsed_attr_flag::DESTRUCTOR, v) }
+    #[inline] pub fn set_weak(&mut self, v: bool)             { self.set_flag(parsed_attr_flag::WEAK, v) }
+    #[inline] pub fn set_used(&mut self, v: bool)             { self.set_flag(parsed_attr_flag::USED, v) }
+    #[inline] pub fn set_gnu_inline(&mut self, v: bool)       { self.set_flag(parsed_attr_flag::GNU_INLINE, v) }
+    #[inline] pub fn set_always_inline(&mut self, v: bool)    { self.set_flag(parsed_attr_flag::ALWAYS_INLINE, v) }
+    #[inline] pub fn set_noinline(&mut self, v: bool)         { self.set_flag(parsed_attr_flag::NOINLINE, v) }
+    #[inline] pub fn set_noreturn(&mut self, v: bool)         { self.set_flag(parsed_attr_flag::NORETURN, v) }
+    #[inline] pub fn set_error_attr(&mut self, v: bool)       { self.set_flag(parsed_attr_flag::ERROR_ATTR, v) }
+    #[inline] pub fn set_transparent_union(&mut self, v: bool) { self.set_flag(parsed_attr_flag::TRANSPARENT_UNION, v) }
+    #[inline] pub fn set_fastcall(&mut self, v: bool)         { self.set_flag(parsed_attr_flag::FASTCALL, v) }
+
+    #[inline]
+    fn set_flag(&mut self, mask: u32, v: bool) {
+        if v { self.flags |= mask; } else { self.flags &= !mask; }
+    }
+}
+
+impl std::fmt::Debug for ParsedDeclAttrs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedDeclAttrs")
+            .field("parsing_typedef", &self.parsing_typedef())
+            .field("parsing_static", &self.parsing_static())
+            .field("parsing_extern", &self.parsing_extern())
+            .field("parsing_thread_local", &self.parsing_thread_local())
+            .field("parsing_inline", &self.parsing_inline())
+            .field("parsing_const", &self.parsing_const())
+            .field("parsing_volatile", &self.parsing_volatile())
+            .field("parsing_address_space", &self.parsing_address_space)
+            .field("parsing_constructor", &self.parsing_constructor())
+            .field("parsing_destructor", &self.parsing_destructor())
+            .field("parsing_weak", &self.parsing_weak())
+            .field("parsing_used", &self.parsing_used())
+            .field("parsing_gnu_inline", &self.parsing_gnu_inline())
+            .field("parsing_always_inline", &self.parsing_always_inline())
+            .field("parsing_noinline", &self.parsing_noinline())
+            .field("parsing_noreturn", &self.parsing_noreturn())
+            .field("parsing_error_attr", &self.parsing_error_attr())
+            .field("parsing_transparent_union", &self.parsing_transparent_union())
+            .field("parsing_fastcall", &self.parsing_fastcall())
+            .field("parsing_alias_target", &self.parsing_alias_target)
+            .field("parsing_visibility", &self.parsing_visibility)
+            .field("parsing_section", &self.parsing_section)
+            .field("parsing_cleanup_fn", &self.parsing_cleanup_fn)
+            .field("parsing_vector_size", &self.parsing_vector_size)
+            .field("parsed_alignas", &self.parsed_alignas)
+            .field("parsed_alignas_type", &self.parsed_alignas_type)
+            .field("parsed_alignment_sizeof_type", &self.parsed_alignment_sizeof_type)
+            .finish()
+    }
 }
 
 /// Recursive descent parser for C.
@@ -454,14 +568,14 @@ impl Parser {
                             loop {
                                 match self.peek() {
                                     TokenKind::Identifier(name) if name == "constructor" || name == "__constructor__" => {
-                                        self.attrs.parsing_constructor = true;
+                                        self.attrs.set_constructor(true);
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.skip_balanced_parens();
                                         }
                                     }
                                     TokenKind::Identifier(name) if name == "destructor" || name == "__destructor__" => {
-                                        self.attrs.parsing_destructor = true;
+                                        self.attrs.set_destructor(true);
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.skip_balanced_parens();
@@ -484,11 +598,11 @@ impl Parser {
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "transparent_union" || name == "__transparent_union__" => {
-                                        self.attrs.parsing_transparent_union = true;
+                                        self.attrs.set_transparent_union(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "weak" || name == "__weak__" => {
-                                        self.attrs.parsing_weak = true;
+                                        self.attrs.set_weak(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "alias" || name == "__alias__" => {
@@ -512,7 +626,7 @@ impl Parser {
                                     }
                                     TokenKind::Identifier(name) if name == "weakref" || name == "__weakref__" => {
                                         // weakref("target") is equivalent to weak + alias("target")
-                                        self.attrs.parsing_weak = true;
+                                        self.attrs.set_weak(true);
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.advance(); // consume (
@@ -571,7 +685,7 @@ impl Parser {
                                         // These are GCC compile-time assertion mechanisms: if a call to
                                         // such a function survives to codegen, GCC emits a compile error.
                                         // The Linux kernel uses this for __compiletime_error() traps.
-                                        self.attrs.parsing_error_attr = true;
+                                        self.attrs.set_error_attr(true);
                                         self.advance();
                                         // Skip the ("message") argument
                                         if matches!(self.peek(), TokenKind::LParen) {
@@ -585,25 +699,25 @@ impl Parser {
                                         }
                                     }
                                     TokenKind::Identifier(name) if name == "noreturn" => {
-                                        self.attrs.parsing_noreturn = true;
+                                        self.attrs.set_noreturn(true);
                                         self.advance();
                                     }
                                     // __noreturn__ is tokenized as TokenKind::Noreturn by the lexer,
                                     // so handle the keyword form here in addition to the identifier "noreturn".
                                     TokenKind::Noreturn => {
-                                        self.attrs.parsing_noreturn = true;
+                                        self.attrs.set_noreturn(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "gnu_inline" || name == "__gnu_inline__" => {
-                                        self.attrs.parsing_gnu_inline = true;
+                                        self.attrs.set_gnu_inline(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "always_inline" || name == "__always_inline__" => {
-                                        self.attrs.parsing_always_inline = true;
+                                        self.attrs.set_always_inline(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "noinline" || name == "__noinline__" => {
-                                        self.attrs.parsing_noinline = true;
+                                        self.attrs.set_noinline(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "cleanup" || name == "__cleanup__" => {
@@ -676,11 +790,11 @@ impl Parser {
                                         }
                                     }
                                     TokenKind::Identifier(name) if name == "used" || name == "__used__" => {
-                                        self.attrs.parsing_used = true;
+                                        self.attrs.set_used(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "fastcall" || name == "__fastcall__" => {
-                                        self.attrs.parsing_fastcall = true;
+                                        self.attrs.set_fastcall(true);
                                         self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "address_space" || name == "__address_space__" => {
@@ -780,8 +894,8 @@ impl Parser {
                     if let Some(a) = attr_aligned {
                         aligned = Some(aligned.map_or(a, |prev| prev.max(a)));
                     }
-                    if self.attrs.parsing_constructor { is_constructor = true; }
-                    if self.attrs.parsing_destructor { is_destructor = true; }
+                    if self.attrs.parsing_constructor() { is_constructor = true; }
+                    if self.attrs.parsing_destructor() { is_destructor = true; }
                 }
                 TokenKind::Extension => {
                     self.advance();
@@ -992,7 +1106,7 @@ impl Parser {
         }
         // Try type-name first using save/restore
         let save = self.pos;
-        let save_typedef = self.attrs.parsing_typedef;
+        let save_typedef = self.attrs.parsing_typedef();
         self.advance(); // consume (
         if self.is_type_specifier() {
             if let Some(ts) = self.parse_type_specifier() {
@@ -1008,7 +1122,7 @@ impl Parser {
         }
         // Backtrack and try as constant expression
         self.pos = save;
-        self.attrs.parsing_typedef = save_typedef;
+        self.attrs.set_typedef(save_typedef);
         self.advance(); // consume (
         let expr = self.parse_assignment_expr();
         if matches!(self.peek(), TokenKind::RParen) {
