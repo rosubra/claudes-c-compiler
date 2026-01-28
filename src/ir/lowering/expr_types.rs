@@ -321,6 +321,10 @@ impl Lowerer {
             // I/O builtins return int
             "__builtin_printf" | "__builtin_fprintf" | "__builtin_sprintf"
             | "__builtin_snprintf" | "__builtin_puts" | "__builtin_putchar" => Some(IrType::I32),
+            // Byte-swap builtins return the same-width unsigned type
+            "__builtin_bswap16" => Some(IrType::U16),
+            "__builtin_bswap32" => Some(IrType::U32),
+            "__builtin_bswap64" => Some(IrType::U64),
             // abs returns int
             "__builtin_abs" => Some(IrType::I32),
             // Complex number component extraction builtins
