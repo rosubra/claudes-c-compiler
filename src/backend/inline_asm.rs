@@ -160,8 +160,12 @@ pub trait InlineAsmEmitter {
 /// the shared inline asm framework (to promote GpReg operands to Immediate when
 /// the input is a compile-time constant).
 ///
-/// This covers the architecture-neutral immediate constraint letters ('I', 'i', 'n').
-/// Architecture-specific immediate letters (e.g., x86 'N', 'e', 'K') are handled
+/// This covers the architecture-neutral immediate constraint letters ('I', 'i', 'n')
+/// and the RISC-V 'K' constraint (5-bit unsigned CSR immediate, used in "rK" for
+/// csrw/csrs/csrc instructions). Without recognizing 'K' here, the IR lowering
+/// won't attempt constant evaluation for "rK" constraints, causing values like 0
+/// to be materialized through stack spills instead of as bare immediates.
+/// Other architecture-specific immediate letters (e.g., x86 'N', 'e') are handled
 /// separately by each backend's `classify_constraint`.
 pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
@@ -169,7 +173,7 @@ pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
     if stripped.starts_with('[') && stripped.ends_with(']') {
         return false;
     }
-    stripped.chars().any(|c| matches!(c, 'I' | 'i' | 'n'))
+    stripped.chars().any(|c| matches!(c, 'I' | 'i' | 'n' | 'K'))
 }
 
 /// Check whether a constant value fits the immediate constraint range for a given

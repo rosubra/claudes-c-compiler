@@ -184,6 +184,15 @@ impl Lowerer {
                     let dest = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest, name: label });
                     Operand::Value(dest)
+                } else if let Some(const_op) = self.try_recover_local_const(&inp.expr, &constraint) {
+                    // For immediate-alternative constraints like "rK", try to recover the
+                    // constant value of a local variable by scanning recent Store instructions.
+                    // This handles the common kernel pattern:
+                    //   unsigned long __v = (unsigned long)(0ULL);
+                    //   asm("csrrw %0, satp, %1" : "=r"(__v) : "rK"(__v) : "memory");
+                    // Without this, __v is lowered as a stack load, causing stack memory
+                    // accesses between CSR writes that crash when paging is enabled.
+                    const_op
                 } else {
                     sym_name = self.extract_symbol_name(&inp.expr);
                     self.lower_expr(&inp.expr)
@@ -356,6 +365,73 @@ impl Lowerer {
         self.globals.contains_key(name)
             || self.known_functions.contains(name)
             || self.types.enum_constants.contains_key(name)
+    }
+
+    /// Try to recover a constant value for a local variable used as an inline
+    /// asm input with an immediate-alternative constraint (e.g., "rK", "rI").
+    ///
+    /// When a non-const local variable like `unsigned long __v = 0;` is used as
+    /// an inline asm input with constraint "rK", `eval_const_expr` returns None
+    /// because `__v` is not const-qualified. However, we can scan recent IR
+    /// instructions to find the most recent Store to the variable's alloca and,
+    /// if it stored a constant value that fits the constraint, return it as
+    /// `Operand::Const`. This avoids unnecessary register materialization (and
+    /// associated stack spills) for values that could be immediates.
+    ///
+    /// This is critical for the RISC-V Linux kernel's CSR macros like:
+    ///   `unsigned long __v = 0; asm("csrrw %0, satp, %1" : "=r"(__v) : "rK"(__v));`
+    /// Without this, the 0 is spilled to the stack between csrw/csrrw instructions,
+    /// causing a fault when paging is enabled but the stack is not identity-mapped.
+    fn try_recover_local_const(&self, expr: &Expr, _constraint: &str) -> Option<Operand> {
+        let name = match expr {
+            Expr::Identifier(name, _) => name,
+            _ => return None,
+        };
+        let fs = self.func_state.as_ref()?;
+        let local_info = fs.locals.get(name)?;
+        let alloca = local_info.alloca;
+
+        // Scan recent instructions backwards looking for a Store to this alloca
+        // with a constant value. Limit the scan to avoid performance issues.
+        for inst in fs.instrs.iter().rev().take(20) {
+            match inst {
+                Instruction::Store { val: Operand::Const(c), ptr, .. } if *ptr == alloca => {
+                    return Some(Operand::Const(c.clone()));
+                }
+                Instruction::Store { val: Operand::Value(v), ptr, .. } if *ptr == alloca => {
+                    // The store holds a Value, not a direct constant. This commonly
+                    // happens with casts like `(unsigned long)(5)` which produce:
+                    //   Cast { dest: vN, src: Const(5), from_ty: I64, to_ty: U64 }
+                    //   Store { val: Value(vN), ptr: alloca }
+                    // Follow one level of indirection to check if the defining
+                    // instruction is a Cast or Copy of a constant.
+                    let defining = *v;
+                    for def_inst in fs.instrs.iter().rev().take(20) {
+                        match def_inst {
+                            Instruction::Cast { dest, src: Operand::Const(c), .. }
+                                if *dest == defining =>
+                            {
+                                return Some(Operand::Const(c.clone()));
+                            }
+                            Instruction::Copy { dest, src: Operand::Const(c) }
+                                if *dest == defining =>
+                            {
+                                return Some(Operand::Const(c.clone()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Non-constant store, stop searching.
+                    return None;
+                }
+                // If we find any other store to this alloca, stop.
+                Instruction::Store { ptr, .. } if *ptr == alloca => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Look up the asm register name for a variable declared with
