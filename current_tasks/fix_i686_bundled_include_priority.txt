@@ -1,0 +1,13 @@
+Task: Fix i686 bundled include directory priority
+
+Problem: When set_target("i686") is called, GCC cross-compiler include paths
+are inserted at position 0 in system_include_paths, pushing them BEFORE the
+bundled include directory. This causes GCC's full emmintrin.h/xmmintrin.h
+(with unsupported builtins) to shadow our simplified bundled versions.
+
+Result: mbedtls fails to build on i686 because __builtin_ia32_pshufd (from
+GCC's emmintrin.h) is used instead of __builtin_ia32_pshufd128 (from our
+bundled emmintrin.h).
+
+Fix: Ensure bundled include directory always comes first in system include
+paths, even after set_target() inserts cross-compiler paths.
