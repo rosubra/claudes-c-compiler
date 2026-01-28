@@ -1,0 +1,51 @@
+Fix remaining i686 project failures
+=====================================
+Date: 2026-01-28
+
+Current status (after rep movsb clobber fix + Ptr data emission fix):
+- Unit tests: ~85.6% pass (2343/2737 on 10% sample)
+- Projects passing: 2/12 (zlib, libjpeg)
+- Projects failing: lua, libsodium, mquickjs, libpng, jq, sqlite, mbedtls, libuv, libffi, musl, tcc
+
+Known remaining issues:
+
+1. Lua fibonacci returns wrong result (output=1 instead of expected 55)
+   - fib(10) gives wrong answer
+   - Likely a recursion or comparison codegen bug
+
+2. mquickjs crashes with SIGSEGV
+   - All test_*.js tests segfault
+   - Need to debug under GDB to find specific crash point
+
+3. sqlite: "statement error" on CREATE TABLE
+   - No longer segfaults (fixed by Ptr emission fix)
+   - But SQL execution produces wrong results
+   - 1/622 tests pass
+
+4. musl: Build fails during assembly of i386 math routines
+   - Error in src/math/i386/rintl.c (or .s file)
+   - May need i686-specific inline assembly handling
+
+5. tcc: Some tests fail
+
+6. libffi: Likely needs i686-specific ABI handling for foreign function interface
+
+7. mbedtls: Fails after build (possible runtime crash)
+
+8. libsodium: Timeouts and segfaults
+   - Some tests timeout (possible infinite loop in crypto code)
+   - Some tests segfault
+
+9. libpng: SIGSEGV in pngtest
+
+10. jq: 1/12 pass, rest fail with SIGABRT or SIGSEGV
+
+Priority investigation targets:
+- Lua (simplest codebase, good for isolating computation bugs)
+- mquickjs (JS engine, exercises many codegen paths)
+- sqlite (exercises everything, good canary)
+
+Techniques:
+- Compare i686 assembly output against x86-64 for suspect functions
+- Use GDB to trace execution and find divergence points
+- Run unit test suite to find specific failing test categories
