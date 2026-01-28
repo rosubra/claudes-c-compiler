@@ -1106,7 +1106,7 @@ impl ArchCodegen for I686Codegen {
     /// F64 values are 8 bytes but the accumulator is only 32 bits, so we use
     /// x87 FPU for all F64 conversions, bypassing the default emit_load_operand path.
     fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
-        use crate::backend::cast::{CastKind, classify_cast};
+        use crate::backend::cast::{CastKind, classify_cast_with_f128};
 
         // Let the default handle i128 conversions
         if crate::backend::generation::is_i128_type(from_ty) || crate::backend::generation::is_i128_type(to_ty) {
@@ -1114,7 +1114,12 @@ impl ArchCodegen for I686Codegen {
             return;
         }
 
-        match classify_cast(from_ty, to_ty) {
+        // On i686, F128 (long double) is native x87 80-bit extended precision,
+        // stored as 12 bytes. We must use f128_is_native=true so that F128 casts
+        // go through the dedicated SignedToF128/UnsignedToF128/F128ToSigned/etc.
+        // paths that use fstpt (12-byte store), not through the F64 paths that
+        // use fstpl (8-byte store) which would corrupt F128 values.
+        match classify_cast_with_f128(from_ty, to_ty, true) {
             // --- Casts where F64 is the destination (result needs 8-byte slot) ---
             CastKind::SignedToFloat { to_f64: true, from_ty: src_ty } => {
                 // int → F64: load int, convert via x87, store 8-byte result
@@ -1237,10 +1242,9 @@ impl ArchCodegen for I686Codegen {
                 self.store_eax_to(dest);
             }
 
-            // --- F128 ↔ F64/F32 conversions (native F128 variants from ARM/RISC-V) ---
-            // On x86/i686, classify_cast treats F128 as F64, so these native variants
-            // are only reached when classify_cast_with_f128(..., true) is used.
-            // Handle them properly in case they appear.
+            // --- F128 ↔ F64/F32 conversions ---
+            // On i686, F128 is native x87 80-bit, so we use classify_cast_with_f128(true)
+            // and these paths are actively used for F32/F64 ↔ F128 conversions.
             CastKind::FloatToF128 { from_f32 } => {
                 if from_f32 {
                     // F32 → F128: load F32 onto x87, store as F128
@@ -1277,60 +1281,102 @@ impl ArchCodegen for I686Codegen {
 
             // --- F128 ↔ int conversions ---
             CastKind::SignedToF128 { from_ty: src_ty } => {
-                self.operand_to_eax(src);
-                match src_ty {
-                    IrType::I8 => self.state.emit("    movsbl %al, %eax"),
-                    IrType::I16 => self.state.emit("    movswl %ax, %eax"),
-                    _ => {}
+                if src_ty == IrType::I64 {
+                    // I64 → F128: load full 64-bit value via register pair, use fildq
+                    self.emit_load_acc_pair(src);
+                    self.state.emit("    pushl %edx");
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    addl $8, %esp");
+                } else {
+                    self.operand_to_eax(src);
+                    match src_ty {
+                        IrType::I8 => self.state.emit("    movsbl %al, %eax"),
+                        IrType::I16 => self.state.emit("    movswl %ax, %eax"),
+                        _ => {}
+                    }
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildl (%esp)");
+                    self.state.emit("    addl $4, %esp");
                 }
-                self.state.emit("    pushl %eax");
-                self.state.emit("    fildl (%esp)");
-                self.state.emit("    addl $4, %esp");
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
                     self.state.f128_direct_slots.insert(dest.0);
                 }
                 self.state.reg_cache.invalidate_acc();
             }
-            CastKind::UnsignedToF128 { .. } => {
-                self.operand_to_eax(src);
-                let big_label = self.state.fresh_label("u2f128_big");
-                let done_label = self.state.fresh_label("u2f128_done");
-                self.state.emit("    testl %eax, %eax");
-                self.state.out.emit_jcc_label("    js", &big_label);
-                self.state.emit("    pushl %eax");
-                self.state.emit("    fildl (%esp)");
-                self.state.emit("    addl $4, %esp");
-                self.state.out.emit_jmp_label(&done_label);
-                self.state.out.emit_named_label(&big_label);
-                self.state.emit("    pushl $0");
-                self.state.emit("    pushl %eax");
-                self.state.emit("    fildq (%esp)");
-                self.state.emit("    addl $8, %esp");
-                self.state.out.emit_named_label(&done_label);
+            CastKind::UnsignedToF128 { from_ty: src_ty } => {
+                if src_ty == IrType::U64 {
+                    // U64 → F128: load full 64-bit value via register pair, use fildq
+                    self.emit_load_acc_pair(src);
+                    self.state.emit("    pushl %edx");
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    addl $8, %esp");
+                } else {
+                    // U8/U16/U32 → F128: handle high-bit-set U32 values
+                    self.operand_to_eax(src);
+                    let big_label = self.state.fresh_label("u2f128_big");
+                    let done_label = self.state.fresh_label("u2f128_done");
+                    self.state.emit("    testl %eax, %eax");
+                    self.state.out.emit_jcc_label("    js", &big_label);
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildl (%esp)");
+                    self.state.emit("    addl $4, %esp");
+                    self.state.out.emit_jmp_label(&done_label);
+                    self.state.out.emit_named_label(&big_label);
+                    // Bit 31 set: zero-extend to 64-bit and use fildq
+                    self.state.emit("    pushl $0");
+                    self.state.emit("    pushl %eax");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    addl $8, %esp");
+                    self.state.out.emit_named_label(&done_label);
+                }
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
                     self.state.f128_direct_slots.insert(dest.0);
                 }
                 self.state.reg_cache.invalidate_acc();
             }
-            CastKind::F128ToSigned { .. } => {
+            CastKind::F128ToSigned { to_ty: dest_ty } => {
                 self.emit_f128_load_to_x87(src);
-                self.state.emit("    subl $4, %esp");
-                self.state.emit("    fisttpl (%esp)");
-                self.state.emit("    movl (%esp), %eax");
-                self.state.emit("    addl $4, %esp");
-                self.state.reg_cache.invalidate_acc();
-                self.store_eax_to(dest);
+                if dest_ty == IrType::I64 {
+                    // F128 → I64: use fisttpq for full 64-bit conversion
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
+                    self.state.emit("    addl $8, %esp");
+                    self.emit_store_acc_pair(dest);
+                } else {
+                    // F128 → I32/I16/I8: use fisttpl for 32-bit conversion
+                    self.state.emit("    subl $4, %esp");
+                    self.state.emit("    fisttpl (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    addl $4, %esp");
+                    self.state.reg_cache.invalidate_acc();
+                    self.store_eax_to(dest);
+                }
             }
-            CastKind::F128ToUnsigned { .. } => {
+            CastKind::F128ToUnsigned { to_ty: dest_ty } => {
                 self.emit_f128_load_to_x87(src);
-                self.state.emit("    subl $8, %esp");
-                self.state.emit("    fisttpq (%esp)");
-                self.state.emit("    movl (%esp), %eax");
-                self.state.emit("    addl $8, %esp");
-                self.state.reg_cache.invalidate_acc();
-                self.store_eax_to(dest);
+                if dest_ty == IrType::U64 {
+                    // F128 → U64: use fisttpq for full 64-bit conversion
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
+                    self.state.emit("    addl $8, %esp");
+                    self.emit_store_acc_pair(dest);
+                } else {
+                    // F128 → U32/U16/U8: use fisttpq then take low 32 bits
+                    self.state.emit("    subl $8, %esp");
+                    self.state.emit("    fisttpq (%esp)");
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    addl $8, %esp");
+                    self.state.reg_cache.invalidate_acc();
+                    self.store_eax_to(dest);
+                }
             }
 
             // --- I64 → F32: use x87 fildq for full 64-bit precision ---
