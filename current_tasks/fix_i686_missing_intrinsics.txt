@@ -1,0 +1,15 @@
+Task: Implement emit_intrinsic for i686 backend
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+The i686 backend is missing the emit_intrinsic() method entirely.
+The trait provides a default empty implementation, so all intrinsic
+operations (FabsF32, FabsF64, SqrtF32, SqrtF64, FrameAddress,
+ReturnAddress, fences, SSE/SIMD operations) produce no code at all.
+
+This causes widespread test failures where fabs(), sqrt(), and other
+builtins silently return garbage values.
+
+Fix: Implement emit_intrinsic in i686 codegen using x87 FPU instructions
+for fabs/sqrt, and appropriate 32-bit instructions for other intrinsics.
