@@ -1,5 +1,5 @@
 Task: Fix i686 64-bit integer arithmetic (I64/U64 operations)
-Status: in_progress
+Status: in_progress (taken over from stalled worker)
 Started: 2026-01-28
 
 Description:
