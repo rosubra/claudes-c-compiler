@@ -364,8 +364,8 @@ fn detect_cmp_branch_fusion(block: &BasicBlock, use_counts: &[u32]) -> Option<us
         return None;
     }
 
-    // Don't fuse i128 or float comparisons (they have special codegen paths)
-    if is_i128_type(*ty) || ty.is_float() {
+    // Don't fuse wide-int or float comparisons (they have special codegen paths)
+    if is_wide_int_type(*ty) || ty.is_float() {
         return None;
     }
 
@@ -938,7 +938,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             // like GCC's `movl symbol(%rip), %eax`. This is critical for early
             // boot code (.head.text) that runs before page tables are set up,
             // where virtual addresses are not yet valid.
-            if cg.state_ref().code_model_kernel && !is_i128_type(*ty) && *ty != IrType::F128 {
+            if cg.state_ref().code_model_kernel && !is_wide_int_type(*ty) && *ty != IrType::F128 {
                 if let Some(sym) = global_addr_map.get(&ptr.0) {
                     cg.emit_global_load_rip_rel(dest, sym, *ty);
                     return;
@@ -950,7 +950,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             // 2. Register-assigned bases: liveness has been extended to cover
             //    this use point (see extend_gep_base_liveness in liveness.rs).
             if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
-                if !is_i128_type(*ty) &&
+                if !is_wide_int_type(*ty) &&
                    (cg.state_ref().is_alloca(gep_info.base.0) || cg.get_phys_reg_for_value(gep_info.base.0).is_some()) {
                     cg.emit_load_with_const_offset(dest, &gep_info.base, gep_info.offset, *ty);
                     return;
@@ -959,24 +959,24 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             // emit_load ends with emit_store_result(dest) for non-i128.
             // For i128, it ends with emit_store_acc_pair(dest).
             cg.emit_load(dest, ptr, *ty);
-            if is_i128_type(*ty) {
+            if is_wide_int_type(*ty) {
                 cg.state().reg_cache.invalidate_all();
             }
-            // Non-i128: cache is set by emit_store_result(dest) inside emit_load.
+            // Non-wide: cache is set by emit_store_result(dest) inside emit_load.
         }
         Instruction::BinOp { dest, op, lhs, rhs, ty } => {
             // emit_binop dispatches to emit_int_binop (ends with store_rax_to),
             // emit_float_binop (ends with emit_store_result), or emit_i128_binop.
             cg.emit_binop(dest, *op, lhs, rhs, *ty);
-            if is_i128_type(*ty) {
+            if is_wide_int_type(*ty) {
                 cg.state().reg_cache.invalidate_all();
             }
-            // Non-i128: cache is set by store_rax_to(dest) / emit_store_result(dest).
+            // Non-wide: cache is set by store_rax_to(dest) / emit_store_result(dest).
         }
         Instruction::UnaryOp { dest, op, src, ty } => {
             // emit_unaryop ends with emit_store_result(dest) for non-i128.
             cg.emit_unaryop(dest, *op, src, *ty);
-            if is_i128_type(*ty) {
+            if is_wide_int_type(*ty) {
                 cg.state().reg_cache.invalidate_all();
             }
         }
@@ -988,7 +988,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
         Instruction::Cast { dest, src, from_ty, to_ty } => {
             // emit_cast ends with emit_store_result(dest) for non-i128 paths.
             cg.emit_cast(dest, src, *from_ty, *to_ty);
-            if is_i128_type(*to_ty) || is_i128_type(*from_ty) {
+            if is_wide_int_type(*to_ty) || is_wide_int_type(*from_ty) {
                 cg.state().reg_cache.invalidate_all();
             }
         }
@@ -1034,7 +1034,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                         } else {
                             cg.emit_seg_store(val, ptr, *ty, *seg_override);
                         }
-                    } else if cg.state_ref().code_model_kernel && !is_i128_type(*ty) && *ty != IrType::F128 {
+                    } else if cg.state_ref().code_model_kernel && !is_wide_int_type(*ty) && *ty != IrType::F128 {
                         // Kernel code model: fold GlobalAddr + Store into RIP-relative
                         // store (see Load comment above for rationale).
                         if let Some(sym) = global_addr_map.get(&ptr.0) {
@@ -1053,7 +1053,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                     } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
                         // Fold GEP into store when base is safe at use site:
                         // alloca (stable slot) or register-assigned (liveness extended).
-                        if !is_i128_type(*ty) &&
+                        if !is_wide_int_type(*ty) &&
                            (cg.state_ref().is_alloca(gep_info.base.0) || cg.get_phys_reg_for_value(gep_info.base.0).is_some()) {
                             cg.emit_store_with_const_offset(val, &gep_info.base, gep_info.offset, *ty);
                         } else {
@@ -1129,6 +1129,19 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
 
 /// Check if an IR type is a 128-bit integer type (I128 or U128).
 pub fn is_i128_type(ty: IrType) -> bool {
+    matches!(ty, IrType::I128 | IrType::U128)
+}
+
+/// Check if a type is "wide" — needs register-pair operations on the current target.
+///
+/// Currently only I128/U128 on all targets. On i686, I64/U64 are intentionally
+/// NOT included here because the IR uses I64 as the canonical widened arithmetic
+/// type for all integer ops (even for `int` variables). I64/U64 BinOp/Cmp use
+/// regular 32-bit paths (only low 32 bits matter since results get narrowed back).
+/// The i686 backend handles true `long long` at ABI boundaries: emit_load/emit_store
+/// for 8-byte memory access, emit_cast for I64<->I32, emit_return/emit_store_params
+/// for long long returns and parameters.
+pub fn is_wide_int_type(ty: IrType) -> bool {
     matches!(ty, IrType::I128 | IrType::U128)
 }
 

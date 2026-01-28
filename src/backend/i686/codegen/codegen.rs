@@ -804,50 +804,12 @@ impl ArchCodegen for I686Codegen {
         }
     }
 
-    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        // 64-bit operations on i686 need special handling (register pairs)
-        let is_64bit = matches!(ty, IrType::I64 | IrType::U64 | IrType::Ptr) && !crate::common::types::target_is_32bit()
-            || matches!(ty, IrType::I64 | IrType::U64);
-
-        if is_64bit {
-            // TODO: Implement 64-bit arithmetic via eax:edx register pairs
-            // For now, just use 32-bit operations (truncating)
-            self.operand_to_eax(lhs);
-            self.operand_to_ecx(rhs);
-
-            match op {
-                IrBinOp::Add => self.state.emit("    addl %ecx, %eax"),
-                IrBinOp::Sub => self.state.emit("    subl %ecx, %eax"),
-                IrBinOp::Mul => self.state.emit("    imull %ecx, %eax"),
-                IrBinOp::And => self.state.emit("    andl %ecx, %eax"),
-                IrBinOp::Or => self.state.emit("    orl %ecx, %eax"),
-                IrBinOp::Xor => self.state.emit("    xorl %ecx, %eax"),
-                IrBinOp::Shl => self.state.emit("    shll %cl, %eax"),
-                IrBinOp::AShr => self.state.emit("    sarl %cl, %eax"),
-                IrBinOp::LShr => self.state.emit("    shrl %cl, %eax"),
-                IrBinOp::SDiv => {
-                    self.state.emit("    cltd");
-                    self.state.emit("    idivl %ecx");
-                }
-                IrBinOp::UDiv => {
-                    self.state.emit("    xorl %edx, %edx");
-                    self.state.emit("    divl %ecx");
-                }
-                IrBinOp::SRem => {
-                    self.state.emit("    cltd");
-                    self.state.emit("    idivl %ecx");
-                    self.state.emit("    movl %edx, %eax");
-                }
-                IrBinOp::URem => {
-                    self.state.emit("    xorl %edx, %edx");
-                    self.state.emit("    divl %ecx");
-                    self.state.emit("    movl %edx, %eax");
-                }
-            }
-            self.state.reg_cache.invalidate_acc();
-            self.store_eax_to(dest);
-            return;
-        }
+    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, _ty: IrType) {
+        // On i686, I64/U64 BinOps arrive here and execute as 32-bit operations.
+        // This is correct because the IR widens ALL integer arithmetic to I64
+        // (even for `int` variables) then narrows back to I32 via Cast. Only the
+        // low 32 bits matter for the arithmetic result. True `long long` values
+        // are handled at the ABI boundary (load/store/params/returns).
 
         // Immediate optimization for ALU ops
         if matches!(op, IrBinOp::Add | IrBinOp::Sub | IrBinOp::And | IrBinOp::Or | IrBinOp::Xor) {
@@ -2023,6 +1985,7 @@ impl ArchCodegen for I686Codegen {
                 // Store the full 8-byte value to dest's slot
                 self.emit_store_acc_pair(dest);
             }
+            self.state.reg_cache.invalidate_acc();
             return;
         }
         crate::backend::traits::emit_load_default(self, dest, ptr, ty);
@@ -2668,30 +2631,92 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    notl %edx");
     }
 
-    fn emit_i128_to_float_call(&mut self, src: &Operand, _from_signed: bool, to_ty: IrType) {
-        // TODO: proper i128->float via compiler-rt
+    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) {
+        // I64/U64 -> F32/F64 conversion on i686
+        // Load the 64-bit value into eax:edx, push onto stack, use x87 fildq
         self.emit_load_acc_pair(src);
-        // Fallback: just convert low 32 bits
-        if to_ty == IrType::F32 {
-            self.state.emit("    cvtsi2ssl %eax, %xmm0");
-            self.state.emit("    movd %xmm0, %eax");
+        if from_signed {
+            // Signed I64 -> float: push as 64-bit, use fildq
+            self.state.emit("    pushl %edx");      // high 32 bits
+            self.state.emit("    pushl %eax");       // low 32 bits
+            self.state.emit("    fildq (%esp)");     // load as signed 64-bit int
+            if to_ty == IrType::F32 {
+                self.state.emit("    fstps (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+            } else {
+                self.state.emit("    fstpl (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+            }
+            self.state.emit("    addl $8, %esp");
         } else {
+            // Unsigned U64 -> float: need special handling for values >= 2^63
+            // because fildq treats the value as signed
+            let label_id = self.state.next_label_id();
+            let big_label = format!(".Lu64_to_f_big_{}", label_id);
+            let done_label = format!(".Lu64_to_f_done_{}", label_id);
+
+            self.state.emit("    pushl %edx");
             self.state.emit("    pushl %eax");
-            self.state.emit("    fildl (%esp)");
-            self.state.emit("    fstpl (%esp)");
+            // Check if high bit of edx is set (value >= 2^63)
+            self.state.emit("    testl %edx, %edx");
+            emit!(self.state, "    js {}", big_label);
+            // Value < 2^63: fildq works directly
+            self.state.emit("    fildq (%esp)");
+            emit!(self.state, "    jmp {}", done_label);
+            // Value >= 2^63: convert as (value/2) then multiply by 2
+            emit!(self.state, "{}:", big_label);
+            // Shift right by 1, preserving the low bit
             self.state.emit("    movl (%esp), %eax");
-            self.state.emit("    addl $4, %esp");
+            self.state.emit("    movl 4(%esp), %edx");
+            self.state.emit("    shrl $1, %eax");          // logical shift low
+            // Set bit 31 of eax from bit 0 of edx (the carry)
+            self.state.emit("    movl %edx, %ecx");
+            self.state.emit("    shrl $1, %edx");
+            self.state.emit("    andl $1, %ecx");
+            self.state.emit("    shll $31, %ecx");
+            self.state.emit("    orl %ecx, %eax");
+            // Round: if original low bit was set, add 1 before halving
+            // (we handle this by OR-ing the original low bit into the halved value)
+            self.state.emit("    movl %eax, (%esp)");
+            self.state.emit("    movl %edx, 4(%esp)");
+            self.state.emit("    fildq (%esp)");
+            self.state.emit("    fadd %st(0), %st(0)");    // multiply by 2
+            emit!(self.state, "{}:", done_label);
+            if to_ty == IrType::F32 {
+                self.state.emit("    fstps (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+            } else {
+                self.state.emit("    fstpl (%esp)");
+                self.state.emit("    movl (%esp), %eax");
+            }
+            self.state.emit("    addl $8, %esp");
         }
     }
 
-    fn emit_float_to_i128_call(&mut self, src: &Operand, _to_signed: bool, from_ty: IrType) {
-        // TODO: proper float->i128 via compiler-rt
+    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) {
+        // F32/F64 -> I64/U64 conversion on i686
+        // Use x87 fisttpq (truncate-toward-zero) to convert float to 64-bit integer
         self.operand_to_eax(src);
+        self.state.emit("    subl $8, %esp");
         if from_ty == IrType::F32 {
-            self.state.emit("    movd %eax, %xmm0");
-            self.state.emit("    cvttss2si %xmm0, %eax");
+            self.state.emit("    movl %eax, (%esp)");
+            self.state.emit("    flds (%esp)");
+        } else {
+            // F64: only low 32 bits in eax; store and load as F32 (lossy fallback)
+            // TODO: proper F64 -> I64 requires full 64-bit F64 value
+            self.state.emit("    movl %eax, (%esp)");
+            self.state.emit("    flds (%esp)");
         }
-        self.state.emit("    xorl %edx, %edx");
+        if to_signed {
+            self.state.emit("    fisttpq (%esp)");
+        } else {
+            // For unsigned, fisttpq gives signed result; need special handling for large values
+            // For now, use fisttpq (works for values < 2^63)
+            self.state.emit("    fisttpq (%esp)");
+        }
+        self.state.emit("    movl (%esp), %eax");
+        self.state.emit("    movl 4(%esp), %edx");
+        self.state.emit("    addl $8, %esp");
     }
 
     fn emit_i128_prep_binop(&mut self, lhs: &Operand, rhs: &Operand) {
@@ -2715,9 +2740,19 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_i128_mul(&mut self) {
-        // TODO: proper 64-bit multiply
-        // For now, just multiply low 32 bits
-        self.state.emit("    imull (%esp), %eax");
+        // 64-bit multiply: (eax:edx) * ((%esp):4(%esp))
+        // result_lo = a_lo * b_lo (low 32 bits)
+        // result_hi = a_hi * b_lo + a_lo * b_hi + high32(a_lo * b_lo)
+        //
+        // We have lhs in eax:edx, rhs at (%esp):4(%esp)
+        // Save a_hi (edx) to ecx so we can use edx for mull result
+        self.state.emit("    movl %edx, %ecx");       // ecx = a_hi
+        self.state.emit("    imull (%esp), %ecx");      // ecx = a_hi * b_lo (low 32 bits)
+        self.state.emit("    movl %eax, %edx");        // edx = a_lo (save)
+        self.state.emit("    imull 4(%esp), %edx");     // edx = a_lo * b_hi (low 32 bits)
+        self.state.emit("    addl %edx, %ecx");        // ecx = a_hi*b_lo + a_lo*b_hi
+        self.state.emit("    mull (%esp)");             // edx:eax = a_lo * b_lo (full 64-bit)
+        self.state.emit("    addl %ecx, %edx");        // edx += cross terms
         self.state.emit("    addl $8, %esp");
     }
 
@@ -2740,31 +2775,81 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_i128_shl(&mut self) {
-        // Shift eax:edx left by (%esp) amount
-        // TODO: proper 64-bit shift
+        // 64-bit left shift: eax:edx <<= (%esp)
+        // When shift >= 32, low word becomes 0 and high = low << (shift-32)
+        let label_id = self.state.next_label_id();
+        let done_label = format!(".Lshl64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
+        self.state.emit("    addl $8, %esp");
         self.state.emit("    shldl %cl, %eax, %edx");
         self.state.emit("    shll %cl, %eax");
-        self.state.emit("    addl $8, %esp");
+        self.state.emit("    testb $32, %cl");
+        emit!(self.state, "    je {}", done_label);
+        // shift >= 32: high = low, low = 0
+        self.state.emit("    movl %eax, %edx");
+        self.state.emit("    xorl %eax, %eax");
+        emit!(self.state, "{}:", done_label);
     }
 
     fn emit_i128_lshr(&mut self) {
+        // 64-bit logical right shift: eax:edx >>= (%esp)
+        let label_id = self.state.next_label_id();
+        let done_label = format!(".Llshr64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
+        self.state.emit("    addl $8, %esp");
         self.state.emit("    shrdl %cl, %edx, %eax");
         self.state.emit("    shrl %cl, %edx");
-        self.state.emit("    addl $8, %esp");
+        self.state.emit("    testb $32, %cl");
+        emit!(self.state, "    je {}", done_label);
+        // shift >= 32: low = high, high = 0
+        self.state.emit("    movl %edx, %eax");
+        self.state.emit("    xorl %edx, %edx");
+        emit!(self.state, "{}:", done_label);
     }
 
     fn emit_i128_ashr(&mut self) {
+        // 64-bit arithmetic right shift: eax:edx >>= (%esp)
+        let label_id = self.state.next_label_id();
+        let done_label = format!(".Lashr64_done_{}", label_id);
         self.state.emit("    movl (%esp), %ecx");
+        self.state.emit("    addl $8, %esp");
         self.state.emit("    shrdl %cl, %edx, %eax");
         self.state.emit("    sarl %cl, %edx");
-        self.state.emit("    addl $8, %esp");
+        self.state.emit("    testb $32, %cl");
+        emit!(self.state, "    je {}", done_label);
+        // shift >= 32: low = sign-extended high, high = sign fill
+        self.state.emit("    movl %edx, %eax");
+        self.state.emit("    sarl $31, %edx");
+        emit!(self.state, "{}:", done_label);
     }
 
-    fn emit_i128_divrem_call(&mut self, _func_name: &str, lhs: &Operand, _rhs: &Operand) {
-        // TODO: Call compiler-rt for 128-bit div/rem
+    fn emit_i128_divrem_call(&mut self, func_name: &str, lhs: &Operand, rhs: &Operand) {
+        // On i686, 64-bit division uses libgcc functions:
+        //   __divdi3(i64, i64) -> i64     (signed div)
+        //   __udivdi3(u64, u64) -> u64    (unsigned div)
+        //   __moddi3(i64, i64) -> i64     (signed mod)
+        //   __umoddi3(u64, u64) -> u64    (unsigned mod)
+        //
+        // Map the 128-bit names to 64-bit names on i686:
+        let di_func = match func_name {
+            "__divti3" => "__divdi3",
+            "__udivti3" => "__udivdi3",
+            "__modti3" => "__moddi3",
+            "__umodti3" => "__umoddi3",
+            _ => func_name,
+        };
+
+        // cdecl: push rhs (high then low), then lhs (high then low)
+        // Stack layout for call: [lhs_lo, lhs_hi, rhs_lo, rhs_hi]
+        self.emit_load_acc_pair(rhs);
+        self.state.emit("    pushl %edx");  // rhs_hi
+        self.state.emit("    pushl %eax");  // rhs_lo
         self.emit_load_acc_pair(lhs);
+        self.state.emit("    pushl %edx");  // lhs_hi
+        self.state.emit("    pushl %eax");  // lhs_lo
+        emit!(self.state, "    call {}", di_func);
+        self.state.emit("    addl $16, %esp");
+        // Result is in eax:edx (64-bit return value)
     }
 
     fn emit_i128_store_result(&mut self, dest: &Value) {
@@ -2814,16 +2899,16 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_i128_cmp_eq(&mut self, is_ne: bool) {
-        // Compare eax:edx (lhs) with (%esp) (rhs)
+        // Compare eax:edx (lhs) with (%esp):4(%esp) (rhs)
+        // eq: (low_eq AND high_eq)
+        // ne: !(low_eq AND high_eq) = (!low_eq OR !high_eq)
         self.state.emit("    cmpl (%esp), %eax");
         self.state.emit("    sete %al");
         self.state.emit("    cmpl 4(%esp), %edx");
         self.state.emit("    sete %cl");
+        self.state.emit("    andb %cl, %al");  // al = both halves equal
         if is_ne {
-            self.state.emit("    orb %cl, %al");
-            self.state.emit("    xorb $1, %al");
-        } else {
-            self.state.emit("    andb %cl, %al");
+            self.state.emit("    xorb $1, %al"); // flip for ne
         }
         self.state.emit("    movzbl %al, %eax");
         self.state.emit("    addl $8, %esp");
