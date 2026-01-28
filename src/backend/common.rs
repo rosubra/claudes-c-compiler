@@ -43,38 +43,40 @@ pub fn assemble(config: &AssemblerConfig, asm_text: &str, output_path: &str) -> 
 /// The `extra_dynamic_args` are appended after the config's static extra_args,
 /// allowing runtime overrides (e.g., -mabi=lp64 from CLI flags).
 pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path: &str, extra_dynamic_args: &[String]) -> Result<(), String> {
-    // Use a unique temp file to avoid races in parallel builds.
-    // Include PID and a counter to guarantee uniqueness even within the same process.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static ASM_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let unique_id = ASM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
+    use crate::common::temp_files::TempFile;
 
-    let asm_path = if std::env::var("CCC_KEEP_ASM").is_ok() {
-        // When keeping assembly, use the predictable name for debugging
-        format!("{}.s", output_path)
+    let keep_asm = std::env::var("CCC_KEEP_ASM").is_ok();
+
+    // Create an RAII-guarded temp file for the assembly source.
+    // When CCC_KEEP_ASM is set, place the .s next to the output for debugging
+    // and mark it as "keep" so Drop won't delete it.
+    // Otherwise, use TempFile::new() which generates a unique path in $TMPDIR
+    // and automatically cleans up on drop — even on early error returns or panics.
+    let asm_file = if keep_asm {
+        let mut f = TempFile::with_path(format!("{}.s", output_path).into());
+        f.set_keep(true);
+        f
     } else {
-        // Use the system temp directory (respects $TMPDIR) for temp assembly files
-        // to handle cases like -o /dev/null where the output directory doesn't
-        // allow file creation.
-        let tmp_dir = crate::common::temp_files::temp_dir();
-        format!("{}/ccc_asm_{}.{}.s", tmp_dir.display(), pid, unique_id)
+        // Extract a short stem from the output path for the temp file name.
+        let stem = std::path::Path::new(output_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("asm");
+        TempFile::new("ccc_asm", stem, "s")
     };
-
-    std::fs::write(&asm_path, asm_text)
+    std::fs::write(asm_file.path(), asm_text)
         .map_err(|e| format!("Failed to write assembly: {}", e))?;
 
     let mut cmd = Command::new(config.command);
     cmd.args(config.extra_args);
     cmd.args(extra_dynamic_args);
-    cmd.args(["-c", "-o", output_path, &asm_path]);
+    cmd.args(["-c", "-o", output_path, asm_file.to_str()]);
 
     let result = cmd.output()
         .map_err(|e| format!("Failed to run assembler ({}): {}", config.command, e))?;
 
-    if std::env::var("CCC_KEEP_ASM").is_err() {
-        let _ = std::fs::remove_file(&asm_path);
-    }
+    // asm_file is dropped here (or on any early return above), cleaning up
+    // the temp .s file automatically — unless keep_asm is set.
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
