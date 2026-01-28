@@ -278,6 +278,13 @@ impl Lowerer {
             | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
             | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
             | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => Some(IrType::I32),
+            // Memory/string comparison builtins return int
+            "__builtin_memcmp" | "__builtin_strcmp" | "__builtin_strncmp" => Some(IrType::I32),
+            // I/O builtins return int
+            "__builtin_printf" | "__builtin_fprintf" | "__builtin_sprintf"
+            | "__builtin_snprintf" | "__builtin_puts" | "__builtin_putchar" => Some(IrType::I32),
+            // abs returns int
+            "__builtin_abs" => Some(IrType::I32),
             // Complex number component extraction builtins
             "creal" | "__builtin_creal" | "cimag" | "__builtin_cimag" => Some(IrType::F64),
             "crealf" | "__builtin_crealf" | "cimagf" | "__builtin_cimagf" => Some(IrType::F32),

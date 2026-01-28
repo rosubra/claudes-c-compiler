@@ -1429,11 +1429,35 @@ impl ArchCodegen for I686Codegen {
                 // unsigned → F64
                 self.operand_to_eax(src);
                 if from_u64 {
-                    // U64: load both halves from slot, use fildq
+                    // U64: fildq treats the value as signed, so values >= 2^63
+                    // (i.e. bit 63 set) would produce a negative result. We must
+                    // detect this and use the shift-and-double trick instead.
                     self.emit_load_acc_pair(src);
                     self.state.emit("    pushl %edx");
                     self.state.emit("    pushl %eax");
+                    self.state.emit("    testl %edx, %edx");
+                    let big_label = self.state.fresh_label("u64_f64_big");
+                    let done_label = self.state.fresh_label("u64_f64_done");
+                    self.state.out.emit_jcc_label("    js", &big_label);
+                    // Positive (< 2^63): fildq works directly
                     self.state.emit("    fildq (%esp)");
+                    self.state.out.emit_jmp_label(&done_label);
+                    self.state.out.emit_named_label(&big_label);
+                    // Bit 63 set: right-shift by 1, OR in the lowest bit
+                    // of the original value to preserve rounding, convert as
+                    // signed, then double.
+                    self.state.emit("    movl (%esp), %ecx");  // save original low for bit 0
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
+                    self.state.emit("    shrdl $1, %edx, %eax");
+                    self.state.emit("    shrl $1, %edx");
+                    self.state.emit("    andl $1, %ecx");
+                    self.state.emit("    orl %ecx, %eax");
+                    self.state.emit("    movl %eax, (%esp)");
+                    self.state.emit("    movl %edx, 4(%esp)");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    fadd %st(0), %st(0)");
+                    self.state.out.emit_named_label(&done_label);
                     self.state.emit("    addl $8, %esp");
                 } else {
                     // U32: handle high-bit-set values
@@ -1587,11 +1611,34 @@ impl ArchCodegen for I686Codegen {
             }
             CastKind::UnsignedToF128 { from_ty: src_ty } => {
                 if src_ty == IrType::U64 {
-                    // U64 → F128: load full 64-bit value via register pair, use fildq
+                    // U64 → F128: fildq treats the value as signed, so values
+                    // >= 2^63 need the shift-and-double trick.
                     self.emit_load_acc_pair(src);
                     self.state.emit("    pushl %edx");
                     self.state.emit("    pushl %eax");
+                    self.state.emit("    testl %edx, %edx");
+                    let big_label = self.state.fresh_label("u64_f128_big");
+                    let done_label = self.state.fresh_label("u64_f128_done");
+                    self.state.out.emit_jcc_label("    js", &big_label);
+                    // Positive (< 2^63): fildq works directly
                     self.state.emit("    fildq (%esp)");
+                    self.state.out.emit_jmp_label(&done_label);
+                    self.state.out.emit_named_label(&big_label);
+                    // Bit 63 set: right-shift by 1, OR in the lowest bit of
+                    // the original value to preserve rounding, convert, then
+                    // double to recover the unsigned value.
+                    self.state.emit("    movl (%esp), %ecx");  // save original low for bit 0
+                    self.state.emit("    movl (%esp), %eax");
+                    self.state.emit("    movl 4(%esp), %edx");
+                    self.state.emit("    shrdl $1, %edx, %eax");
+                    self.state.emit("    shrl $1, %edx");
+                    self.state.emit("    andl $1, %ecx");
+                    self.state.emit("    orl %ecx, %eax");
+                    self.state.emit("    movl %eax, (%esp)");
+                    self.state.emit("    movl %edx, 4(%esp)");
+                    self.state.emit("    fildq (%esp)");
+                    self.state.emit("    fadd %st(0), %st(0)");
+                    self.state.out.emit_named_label(&done_label);
                     self.state.emit("    addl $8, %esp");
                 } else {
                     // U8/U16/U32 → F128: handle high-bit-set U32 values
@@ -1685,13 +1732,14 @@ impl ArchCodegen for I686Codegen {
                 self.state.emit("    fildq (%esp)");
                 self.state.out.emit_jmp_label(&done_label);
                 self.state.out.emit_named_label(&big_label);
-                // Negative signed: fildq gives wrong result, adjust
-                // Split into two halves: (val >> 1) and (val & 1)
+                // Negative signed: fildq gives wrong result, adjust.
+                // Compute (val >> 1) | (val & 1), convert, then double.
+                // The OR preserves the low bit for rounding.
+                self.state.emit("    movl (%esp), %ecx");  // save original low for bit 0
                 self.state.emit("    movl (%esp), %eax");
                 self.state.emit("    movl 4(%esp), %edx");
                 self.state.emit("    shrdl $1, %edx, %eax");
                 self.state.emit("    shrl $1, %edx");
-                self.state.emit("    movl 4(%esp), %ecx");
                 self.state.emit("    andl $1, %ecx");
                 self.state.emit("    orl %ecx, %eax");
                 self.state.emit("    movl %eax, (%esp)");
