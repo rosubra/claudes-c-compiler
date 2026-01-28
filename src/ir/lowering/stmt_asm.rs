@@ -114,6 +114,15 @@ impl Lowerer {
                     //
                     // We still need a placeholder operand for correct operand numbering.
                     Operand::Value(ptr)
+                } else if matches!(self.expr_ctype(&out.expr), crate::common::types::CType::Vector(_, _)) {
+                    // For "+x" read-write constraints on vector types, pass the alloca pointer
+                    // directly instead of emitting a Load instruction. Vector types (e.g.,
+                    // __attribute__((vector_size(16)))) are 128 bits but IrType::Ptr is only
+                    // 64 bits, so a Load would truncate the value to 64 bits, zeroing the
+                    // upper half of the XMM register. By passing the alloca directly, the
+                    // backend's load_input_to_reg will use movdqu to load the full 128-bit
+                    // vector from the alloca's stack slot.
+                    Operand::Value(ptr)
                 } else {
                     let cur_val = self.fresh_value();
                     self.emit(Instruction::Load { dest: cur_val, ptr, ty: out_ty, seg_override: out_seg });
