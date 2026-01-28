@@ -86,8 +86,11 @@ and PostgreSQL.
 - **i686**: The 32-bit x86 backend is new. Inline assembly with full
   operand substitution and register constraints is supported. The
   `__attribute__((fastcall))` calling convention is supported (first two
-  DWORD int/ptr args in ECX/EDX, callee cleans stack). libffi builds and
-  passes all tests including closures.
+  DWORD int/ptr args in ECX/EDX, callee cleans stack). Redis builds and
+  passes SET/GET roundtrip tests. libffi builds and passes all tests
+  including closures. Projects with C++ dependencies (e.g., Redis's
+  fast_float) require running `scripts/setup_i686_cross.sh` once to set
+  up the cross-compilation environment.
 
 ## Architecture
 

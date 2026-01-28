@@ -4,3 +4,4 @@ Cargo.lock
 *.s
 *.core
 a.out
+dump.rdb
