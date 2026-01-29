@@ -1,20 +1,29 @@
 #!/bin/bash
-# Setup i686 cross-compilation environment for building projects with C++ deps.
+# Setup i686 cross-compilation environment for building projects.
 #
-# The standard Docker/CI environment provides i686-linux-gnu-gcc but not
-# i686-linux-gnu-g++ (the C++ cross-compiler). This script creates:
+# The standard Docker/CI environment provides i686-linux-gnu-gcc but has
+# several gaps for full i686 cross-compilation support. This script creates:
 #
-# 1. A wrapper i686-linux-gnu-g++ in a configurable location that handles C++
-#    compilation for known libraries (e.g. Redis's fast_float) by substituting
-#    a pure-C fallback compiled with i686-linux-gnu-gcc.
+# 1. A wrapper i686-linux-gnu-g++ that handles C++ compilation for known
+#    libraries (e.g. Redis's fast_float) via pure-C fallback.
 #
-# 2. /usr/i686-linux-gnu/lib/libstdc++.so - Symlink to libstdc++.so.6 so
-#    that -lstdc++ resolves during linking.
+# 2. /usr/i686-linux-gnu/lib/libstdc++.so - Symlink for -lstdc++ resolution.
+#
+# 3. Sysroot symlinks at /usr/lib/i386-linux-gnu/ and /usr/include/i386-linux-gnu/
+#    pointing to /usr/i686-linux-gnu/{lib,include}. These are needed because
+#    configure scripts (e.g., TCC) detect the triplet as "i386-linux-gnu" and
+#    look for CRT objects at /usr/lib/i386-linux-gnu/crti.o.
+#
+# 4. A smart uname wrapper that returns "i686" when called from configure
+#    scripts that use ccc-i686 as the compiler. This is needed because
+#    `uname -m` returns "x86_64" on the host, but TCC's configure uses
+#    it to determine the target architecture.
 #
 # Usage:
 #   sudo ./scripts/setup_i686_cross.sh              # installs to /usr/local/bin
-#   ./scripts/setup_i686_cross.sh ~/.cargo/bin       # installs to user dir
+#   sudo ./scripts/setup_i686_cross.sh ~/.cargo/bin  # installs to user dir
 #
+# Note: sudo is required for creating system-level symlinks.
 # This only needs to be run once per environment.
 
 set -e
@@ -137,6 +146,92 @@ else
     else
         echo "Warning: $LIBDIR does not exist, skipping libstdc++ symlink."
     fi
+fi
+
+# 3. Create i386-linux-gnu sysroot symlinks for TCC/configure triplet detection
+# Many configure scripts (including TCC) detect the target triplet by compiling
+# a test program and checking for /usr/lib/<triplet>/crti.o. On cross-compilation
+# environments, the i386 libraries live in /usr/i686-linux-gnu/lib/ but configure
+# expects them at /usr/lib/i386-linux-gnu/.
+I386_LIBDIR=/usr/lib/i386-linux-gnu
+I686_LIBDIR=/usr/i686-linux-gnu/lib
+I386_INCDIR=/usr/include/i386-linux-gnu
+I686_INCDIR=/usr/i686-linux-gnu/include
+
+if [ -d "$I686_LIBDIR" ]; then
+    echo "Setting up i386-linux-gnu sysroot symlinks..."
+    sudo mkdir -p "$I386_LIBDIR" 2>/dev/null || true
+    # CRT startup files
+    for f in crt1.o crti.o crtn.o Scrt1.o Mcrt1.o gcrt1.o grcrt1.o; do
+        if [ -e "$I686_LIBDIR/$f" ] && [ ! -e "$I386_LIBDIR/$f" ]; then
+            sudo ln -sf "$I686_LIBDIR/$f" "$I386_LIBDIR/$f" 2>/dev/null || true
+        fi
+    done
+    # Key shared libraries
+    for lib in libc.a libc.so libm.a libm.so libdl.a libdl.so libpthread.a libpthread.so; do
+        if [ -e "$I686_LIBDIR/$lib" ] && [ ! -e "$I386_LIBDIR/$lib" ]; then
+            sudo ln -sf "$I686_LIBDIR/$lib" "$I386_LIBDIR/$lib" 2>/dev/null || true
+        fi
+    done
+    echo "  Symlinked CRT and library files to $I386_LIBDIR"
+fi
+
+if [ -d "$I686_INCDIR" ]; then
+    sudo mkdir -p "$I386_INCDIR" 2>/dev/null || true
+    for d in bits gnu sys asm; do
+        if [ -d "$I686_INCDIR/$d" ] && [ ! -e "$I386_INCDIR/$d" ]; then
+            sudo ln -sf "$I686_INCDIR/$d" "$I386_INCDIR/$d" 2>/dev/null || true
+        fi
+    done
+    echo "  Symlinked include directories to $I386_INCDIR"
+fi
+
+# 4. Create uname wrapper for i686 configure script detection
+# TCC's configure (and similar) uses `uname -m` to detect the target CPU.
+# On x86_64 hosts cross-compiling for i686, uname returns x86_64 which causes
+# TCC to compile the wrong codegen backend. This wrapper detects when a parent
+# configure script is using ccc-i686 as the compiler and returns i686 instead.
+UNAME_WRAPPER="$INSTALL_DIR/uname"
+if [ ! -e "$UNAME_WRAPPER" ]; then
+    echo "Creating uname wrapper at $UNAME_WRAPPER..."
+    mkdir -p "$INSTALL_DIR"
+    cat > "$UNAME_WRAPPER" << 'UNAME_EOF'
+#!/bin/bash
+# Smart uname wrapper for i686 cross-compilation detection.
+# When the parent process is a configure script using ccc-i686 as CC,
+# reports machine architecture as i686 for the -m flag.
+if echo "$*" | grep -q "\-m"; then
+    if [ -f "/proc/$PPID/cmdline" ]; then
+        while IFS= read -r -d '' arg; do
+            case "$arg" in
+                --cc=*ccc-i686*|--cc=*i686*)
+                    echo "i686"
+                    exit 0
+                    ;;
+            esac
+        done < "/proc/$PPID/cmdline"
+    fi
+    # Check grandparent (configure may use subshells)
+    gppid=$(awk '{print $4}' "/proc/$PPID/stat" 2>/dev/null)
+    if [ -n "$gppid" ] && [ "$gppid" -gt 1 ] 2>/dev/null; then
+        if [ -f "/proc/$gppid/cmdline" ]; then
+            while IFS= read -r -d '' arg; do
+                case "$arg" in
+                    --cc=*ccc-i686*|--cc=*i686*)
+                        echo "i686"
+                        exit 0
+                        ;;
+                esac
+            done < "/proc/$gppid/cmdline"
+        fi
+    fi
+fi
+exec /usr/bin/uname "$@"
+UNAME_EOF
+    chmod +x "$UNAME_WRAPPER"
+    echo "  Created $UNAME_WRAPPER"
+else
+    echo "uname wrapper already exists at $UNAME_WRAPPER, skipping."
 fi
 
 echo "i686 cross-compilation environment setup complete."

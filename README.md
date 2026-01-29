@@ -93,8 +93,10 @@ and PostgreSQL.
   (including `_mm_shuffle_epi32` and AES-NI) work correctly via bundled
   headers. Redis builds and passes SET/GET roundtrip tests. libffi builds
   and passes all tests including closures. Projects with C++ dependencies
-  (e.g., Redis's fast_float) require running `scripts/setup_i686_cross.sh`
-  once to set up the cross-compilation environment.
+  (e.g., Redis's fast_float) or configure-based projects (e.g., TCC) require
+  running `sudo scripts/setup_i686_cross.sh ~/.cargo/bin` once to set up the
+  cross-compilation environment (i386 sysroot symlinks, uname wrapper for
+  configure script architecture detection).
 
 ## Architecture
 

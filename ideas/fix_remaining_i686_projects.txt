@@ -117,9 +117,11 @@ Known remaining issues:
    - dict_snowball.so link fails
    - May be related to PIC/shared library handling on i686
 
-7. tcc: Build succeeds, 1/78 tests pass
-   - Tests fail because CCC-compiled TCC can't find crt1.o
-   - System configuration issue (same with GCC), not a compiler bug
+7. tcc: FIXED - 76/78 tests pass (was 1/78)
+   - Fixed by creating i386 sysroot symlinks and uname wrapper for configure detection
+   - Run `sudo scripts/setup_i686_cross.sh ~/.cargo/bin` to set up environment
+   - Remaining 2 failures (95_bitfields, 95_bitfields_ms) are arch-specific expected-value
+     mismatches: test .expect files have 64-bit formatting, but 32-bit TCC uses sizeof(long)=4
 
 Remaining unit test failures (41/27361 = 0.15%):
 - FP classification (fpclassify/nan/infinity edge cases)
