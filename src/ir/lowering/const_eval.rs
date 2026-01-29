@@ -132,102 +132,10 @@ impl Lowerer {
                 const_arith::bitnot_const(promoted)
             }
             Expr::Cast(ref target_type, inner, _) => {
-                let target_ir_ty = self.type_spec_to_ir(target_type);
-                let src_val = self.eval_const_expr(inner)?;
-
-                // Handle float source types: use value-based conversion, not bit manipulation
-                // For LongDouble, use full x87 precision to avoid losing mantissa bits
-                if let IrConst::LongDouble(fv, bytes) = &src_val {
-                    return IrConst::cast_long_double_to_target(*fv, bytes, target_ir_ty);
-                }
-                if let Some(fv) = src_val.to_f64() {
-                    if matches!(&src_val, IrConst::F32(_) | IrConst::F64(_)) {
-                        return IrConst::cast_float_to_target(fv, target_ir_ty);
-                    }
-                }
-
-                // Handle I128 source: use full 128-bit value to avoid truncation
-                // through the u64-based eval_const_expr_as_bits path
-                if let IrConst::I128(v128) = src_val {
-                    // Determine source signedness for int-to-float conversions
-                    let src_ty = self.get_expr_type(inner);
-                    let src_unsigned = src_ty.is_unsigned();
-                    return Some(Self::cast_i128_to_ir_type(v128, target_ir_ty, src_unsigned));
-                }
-
-                // Integer source: use bit-based cast chain evaluation
-                let (bits, src_signed) = self.eval_const_expr_as_bits(inner)?;
-                let target_width = target_ir_ty.size() * 8;
-
-                // For 128-bit targets, sign-extend or zero-extend from 64 bits
-                // based on the source expression's signedness (not the target's).
-                // E.g., (unsigned __int128)(-1) should be all-ones (sign-extend signed source),
-                // but (unsigned __int128)(0xFFFFFFFFFFFFFFFFULL) should be 0x0000...FFFF.
-                if matches!(target_ir_ty, IrType::I128 | IrType::U128) {
-                    let src_ty = self.get_expr_type(inner);
-                    let v128 = if src_ty.is_unsigned() {
-                        // Zero-extend: u64 -> i128
-                        bits as i128
-                    } else {
-                        // Sign-extend: u64 -> i64 (reinterpret) -> i128 (sign-extend)
-                        (bits as i64) as i128
-                    };
-                    return Some(IrConst::I128(v128));
-                }
-
-                // Truncate to target width
-                let truncated = if target_width >= 64 {
-                    bits
-                } else {
-                    bits & ((1u64 << target_width) - 1)
-                };
-
-                // Convert to IrConst based on target type
-                let result = match target_ir_ty {
-                    IrType::I8 => IrConst::I8(truncated as i8),
-                    IrType::U8 => IrConst::I64(truncated as u8 as i64),
-                    IrType::I16 => IrConst::I16(truncated as i16),
-                    IrType::U16 => IrConst::I64(truncated as u16 as i64),
-                    IrType::I32 => IrConst::I32(truncated as i32),
-                    IrType::U32 => IrConst::I64(truncated as u32 as i64),
-                    IrType::I64 | IrType::U64 => IrConst::I64(truncated as i64),
-                    IrType::Ptr => IrConst::ptr_int(truncated as i64),
-                    IrType::I128 | IrType::U128 => unreachable!("handled above"),
-                    // For int-to-float, use source signedness (not target) to
-                    // determine sign/zero extension before float conversion
-                    IrType::F32 => {
-                        let int_val = if src_signed { bits as i64 as f32 } else { bits as f32 };
-                        IrConst::F32(int_val)
-                    }
-                    IrType::F64 => {
-                        let int_val = if src_signed { bits as i64 as f64 } else { bits as f64 };
-                        IrConst::F64(int_val)
-                    }
-                    _ => return None,
-                };
-                Some(result)
+                self.eval_const_cast(target_type, inner)
             }
             Expr::Identifier(name, _) => {
-                // If a local variable exists with this name, it shadows any enum constant.
-                // A non-const local is not a compile-time constant, so return None.
-                // A const local's value is checked below.
-                let is_local = self.func_state.as_ref()
-                    .is_some_and(|fs| fs.locals.contains_key(name));
-
-                if !is_local {
-                    // Look up enum constants (only when not shadowed by a local variable)
-                    if let Some(&val) = self.types.enum_constants.get(name) {
-                        return Some(IrConst::I64(val));
-                    }
-                }
-                // Look up const-qualified local variable values
-                // (e.g., const int len = 5000; int arr[len];)
-                if let Some(ref fs) = self.func_state {
-                    if let Some(&val) = fs.const_local_values.get(name) {
-                        return Some(IrConst::I64(val));
-                    }
-                }
-                None
+                self.eval_const_identifier(name)
             }
             Expr::Sizeof(arg, _) => {
                 let size = match arg.as_ref() {
@@ -291,44 +199,117 @@ impl Lowerer {
                     None
                 }
             }
-            // Handle compound literals in constant expressions:
-            // ((type) { value }) -> evaluate the inner initializer's scalar value.
-            // This is critical for global/static array initializers where compound
-            // literals like ((pgprot_t) { 0x120 }) must be evaluated at compile time.
-            // Only treat as scalar if the type is NOT a multi-field aggregate;
-            // multi-field structs must go through the proper struct init path.
             Expr::CompoundLiteral(ref type_spec, ref init, _) => {
-                let cl_ctype = self.type_spec_to_ctype(type_spec);
-                let is_multi_field_aggregate = match &cl_ctype {
-                    CType::Struct(key) | CType::Union(key) => {
-                        if let Some(layout) = self.types.borrow_struct_layouts().get(&**key) {
-                            // A struct is an aggregate if it has multiple fields, OR if its
-                            // single field is itself an aggregate (array/struct/union).
-                            // Without this check, (arr_t){ {100, 200, 300} } where arr_t
-                            // has one array field would be scalar-evaluated to just 100.
-                            layout.fields.len() > 1
-                                || layout.fields.iter().any(|f| {
-                                    matches!(
-                                        f.ty,
-                                        CType::Array(..)
-                                            | CType::Struct(..)
-                                            | CType::Union(..)
-                                    )
-                                })
-                        } else {
-                            false
-                        }
-                    }
-                    CType::Array(..) => true,
-                    _ => false,
-                };
-                if is_multi_field_aggregate {
-                    None
-                } else {
-                    self.eval_const_initializer_scalar(init)
-                }
+                self.eval_const_compound_literal(type_spec, init)
             }
             _ => None,
+        }
+    }
+
+    /// Evaluate a cast expression at compile time.
+    fn eval_const_cast(&self, target_type: &TypeSpecifier, inner: &Expr) -> Option<IrConst> {
+        let target_ir_ty = self.type_spec_to_ir(target_type);
+        let src_val = self.eval_const_expr(inner)?;
+
+        // Handle float source types: use value-based conversion, not bit manipulation
+        if let IrConst::LongDouble(fv, bytes) = &src_val {
+            return IrConst::cast_long_double_to_target(*fv, bytes, target_ir_ty);
+        }
+        if let Some(fv) = src_val.to_f64() {
+            if matches!(&src_val, IrConst::F32(_) | IrConst::F64(_)) {
+                return IrConst::cast_float_to_target(fv, target_ir_ty);
+            }
+        }
+
+        // Handle I128 source: use full 128-bit value to avoid truncation
+        if let IrConst::I128(v128) = src_val {
+            let src_ty = self.get_expr_type(inner);
+            let src_unsigned = src_ty.is_unsigned();
+            return Some(Self::cast_i128_to_ir_type(v128, target_ir_ty, src_unsigned));
+        }
+
+        // Integer source: use bit-based cast chain evaluation
+        let (bits, src_signed) = self.eval_const_expr_as_bits(inner)?;
+
+        // For 128-bit targets, sign/zero-extend based on source signedness
+        if matches!(target_ir_ty, IrType::I128 | IrType::U128) {
+            let src_ty = self.get_expr_type(inner);
+            let v128 = if src_ty.is_unsigned() {
+                bits as i128
+            } else {
+                (bits as i64) as i128
+            };
+            return Some(IrConst::I128(v128));
+        }
+
+        self.cast_bits_to_ir_const(bits, src_signed, target_ir_ty)
+    }
+
+    /// Convert raw bits to an IrConst of the given target type, truncating as needed.
+    fn cast_bits_to_ir_const(&self, bits: u64, src_signed: bool, target_ir_ty: IrType) -> Option<IrConst> {
+        let target_width = target_ir_ty.size() * 8;
+        let truncated = if target_width >= 64 { bits } else { bits & ((1u64 << target_width) - 1) };
+        let result = match target_ir_ty {
+            IrType::I8 => IrConst::I8(truncated as i8),
+            IrType::U8 => IrConst::I64(truncated as u8 as i64),
+            IrType::I16 => IrConst::I16(truncated as i16),
+            IrType::U16 => IrConst::I64(truncated as u16 as i64),
+            IrType::I32 => IrConst::I32(truncated as i32),
+            IrType::U32 => IrConst::I64(truncated as u32 as i64),
+            IrType::I64 | IrType::U64 => IrConst::I64(truncated as i64),
+            IrType::Ptr => IrConst::ptr_int(truncated as i64),
+            IrType::I128 | IrType::U128 => unreachable!("handled above"),
+            IrType::F32 => {
+                let int_val = if src_signed { bits as i64 as f32 } else { bits as f32 };
+                IrConst::F32(int_val)
+            }
+            IrType::F64 => {
+                let int_val = if src_signed { bits as i64 as f64 } else { bits as f64 };
+                IrConst::F64(int_val)
+            }
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    fn eval_const_identifier(&self, name: &str) -> Option<IrConst> {
+        let is_local = self.func_state.as_ref()
+            .is_some_and(|fs| fs.locals.contains_key(name));
+        if !is_local {
+            if let Some(&val) = self.types.enum_constants.get(name) {
+                return Some(IrConst::I64(val));
+            }
+        }
+        if let Some(ref fs) = self.func_state {
+            if let Some(&val) = fs.const_local_values.get(name) {
+                return Some(IrConst::I64(val));
+            }
+        }
+        None
+    }
+
+    /// Evaluate scalar compound literals in constant expressions.
+    /// Returns None for multi-field aggregates (those go through struct init path).
+    fn eval_const_compound_literal(&self, type_spec: &TypeSpecifier, init: &Initializer) -> Option<IrConst> {
+        let cl_ctype = self.type_spec_to_ctype(type_spec);
+        let is_multi_field_aggregate = match &cl_ctype {
+            CType::Struct(key) | CType::Union(key) => {
+                if let Some(layout) = self.types.borrow_struct_layouts().get(&**key) {
+                    layout.fields.len() > 1
+                        || layout.fields.iter().any(|f| {
+                            matches!(f.ty, CType::Array(..) | CType::Struct(..) | CType::Union(..))
+                        })
+                } else {
+                    false
+                }
+            }
+            CType::Array(..) => true,
+            _ => false,
+        };
+        if is_multi_field_aggregate {
+            None
+        } else {
+            self.eval_const_initializer_scalar(init)
         }
     }
 

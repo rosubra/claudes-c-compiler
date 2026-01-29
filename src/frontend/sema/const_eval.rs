@@ -100,8 +100,32 @@ impl<'a> SemaConstEval<'a> {
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
-                let promoted = shared_const_eval::promote_sub_int(val, self.is_expr_unsigned(inner));
-                const_arith::bitnot_const(promoted)
+                let is_unsigned = self.is_expr_unsigned(inner);
+                let promoted = shared_const_eval::promote_sub_int(val, is_unsigned);
+                let result = const_arith::bitnot_const(promoted)?;
+                // For unsigned int operands (stored as I64 to preserve unsigned range),
+                // the bitwise NOT must be truncated to 32 bits. Without this, ~0u
+                // produces I64(-1) (all 64 bits set) instead of I64(0xFFFFFFFF).
+                // Check the promoted type's actual width via the inner expression type.
+                let inner_ctype = self.lookup_expr_type(inner)
+                    .or_else(|| self.infer_expr_ctype(inner));
+                let is_32bit_type = inner_ctype.as_ref().map_or(
+                    matches!(result, IrConst::I32(_)),
+                    |ct| {
+                        let size = self.ctype_size(ct);
+                        size <= 4
+                    },
+                );
+                if is_32bit_type && is_unsigned {
+                    // Truncate to 32-bit unsigned: mask to 0xFFFFFFFF and store as I64
+                    if let Some(v) = result.to_i64() {
+                        Some(IrConst::I64(v as u32 as i64))
+                    } else {
+                        Some(result)
+                    }
+                } else {
+                    Some(result)
+                }
             }
 
             // Logical NOT
@@ -116,14 +140,17 @@ impl<'a> SemaConstEval<'a> {
                 let r = self.eval_const_expr(rhs)?;
                 // Derive operand CTypes for signedness/width determination.
                 // Priority: (1) pre-annotated expr_types from sema (O(1), preserves
-                // unsigned info), (2) ctype_from_ir_const (O(1), but loses unsigned),
-                // (3) infer_expr_ctype (expensive, full type inference).
+                // unsigned info), (2) infer_expr_ctype (accurate type inference),
+                // (3) ctype_from_ir_const (O(1), but loses unsigned — only used as
+                // last resort). We must prefer infer_expr_ctype over ctype_from_ir_const
+                // because IrConst::I64 cannot distinguish signed Long from unsigned Long,
+                // and incorrect signedness breaks unsigned comparisons and shifts.
                 let lhs_ctype = self.lookup_expr_type(lhs)
-                    .or_else(|| Self::ctype_from_ir_const(&l))
-                    .or_else(|| self.infer_expr_ctype(lhs));
+                    .or_else(|| self.infer_expr_ctype(lhs))
+                    .or_else(|| Self::ctype_from_ir_const(&l));
                 let rhs_ctype = self.lookup_expr_type(rhs)
-                    .or_else(|| Self::ctype_from_ir_const(&r))
-                    .or_else(|| self.infer_expr_ctype(rhs));
+                    .or_else(|| self.infer_expr_ctype(rhs))
+                    .or_else(|| Self::ctype_from_ir_const(&r));
                 let lhs_size = lhs_ctype.as_ref().map_or(4, |ct| self.ctype_size(ct).max(4));
                 let lhs_unsigned = lhs_ctype.as_ref().is_some_and(|ct| ct.is_unsigned());
                 let rhs_size = rhs_ctype.as_ref().map_or(4, |ct| self.ctype_size(ct).max(4));

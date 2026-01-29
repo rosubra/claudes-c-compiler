@@ -879,7 +879,17 @@ impl Parser {
                 Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| v.wrapping_neg())
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| !v)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| {
+                    let result = !v;
+                    // For unsigned int operands, truncate to 32 bits. The evaluator
+                    // uses i64 for all values, so ~0u produces i64(-1) (all 64 bits set)
+                    // instead of the correct 0xFFFFFFFF (32-bit all-ones).
+                    if Self::is_unsigned_int_expr(inner) {
+                        result & 0xFFFF_FFFF
+                    } else {
+                        result
+                    }
+                })
             }
             Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
                 Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| if v == 0 { 1 } else { 0 })
@@ -920,6 +930,27 @@ impl Parser {
             Expr::AlignofExpr(_, _) | Expr::GnuAlignofExpr(_, _) => None,
             _ => None,
         }
+    }
+
+    /// Check if an expression has unsigned int type (32-bit).
+    /// Used by the parser-level constant evaluator to truncate bitwise NOT results.
+    /// Only detects obvious cases from the AST structure; non-obvious cases are
+    /// handled by the sema-level evaluator which has full type information.
+    fn is_unsigned_int_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::UIntLiteral(..) => true,
+            Expr::Cast(ts, _, _) => {
+                // Check if cast target is unsigned int
+                Self::is_unsigned_int_type_spec(ts)
+            }
+            Expr::UnaryOp(UnaryOp::Plus, inner, _) => Self::is_unsigned_int_expr(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type specifier represents unsigned int (32-bit).
+    fn is_unsigned_int_type_spec(ts: &TypeSpecifier) -> bool {
+        matches!(ts, TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned)
     }
 
     /// Check if a type specifier contains an unresolvable typedef name.
