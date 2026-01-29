@@ -107,9 +107,10 @@ impl Preprocessor {
         // Record the last line
         line_map.push(current_output_line_src);
 
-        // SAFETY: input was valid UTF-8, and we only removed/replaced ASCII characters
-        // (comments with spaces/newlines), so result is still valid UTF-8
-        let text = unsafe { String::from_utf8_unchecked(result) };
+        // Input was valid UTF-8, and we only removed/replaced ASCII characters
+        // (comments with spaces/newlines), so result is still valid UTF-8.
+        let text = String::from_utf8(result)
+            .expect("comment stripping produced non-UTF8 (input was valid UTF-8)");
         (text, line_map)
     }
 

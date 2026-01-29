@@ -953,8 +953,9 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
                 if pattern_len == 0 {
                     pattern_len = write_rbp_pattern(&mut pattern_bytes, store_offset);
                 }
-                // SAFETY: write_rbp_pattern only writes ASCII digits, '-', and "(%rbp)" bytes.
-                let pattern = unsafe { std::str::from_utf8_unchecked(&pattern_bytes[..pattern_len]) };
+                // write_rbp_pattern only writes ASCII digits, '-', and "(%rbp)" bytes.
+                let pattern = std::str::from_utf8(&pattern_bytes[..pattern_len])
+                    .expect("rbp pattern produced non-UTF8");
                 let line = infos[j].trimmed(store.get(j));
                 if line.contains(pattern) {
                     slot_read = true;
@@ -965,8 +966,9 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
                     for byte_off in 1..store_bytes {
                         let check_off = store_offset + byte_off;
                         let check_len = write_rbp_pattern(&mut pattern_bytes, check_off);
-                        // SAFETY: write_rbp_pattern only writes ASCII digits, '-', and "(%rbp)" bytes.
-                        let check_pattern = unsafe { std::str::from_utf8_unchecked(&pattern_bytes[..check_len]) };
+                        // write_rbp_pattern only writes ASCII digits, '-', and "(%rbp)" bytes.
+                        let check_pattern = std::str::from_utf8(&pattern_bytes[..check_len])
+                            .expect("rbp pattern produced non-UTF8");
                         let line = infos[j].trimmed(store.get(j));
                         if line.contains(check_pattern) {
                             slot_read = true;

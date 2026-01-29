@@ -33,13 +33,16 @@ pub fn is_ident_cont_byte(b: u8) -> bool {
 
 /// Extract a `&str` slice from `bytes[start..end]`.
 ///
-/// # Safety
-/// Caller must ensure `bytes[start..end]` contains valid UTF-8. This is guaranteed
-/// for C identifiers, which consist only of ASCII letters, digits, underscores, and dollar signs.
+/// C identifiers consist only of ASCII letters, digits, underscores, and dollar signs,
+/// which are all valid single-byte UTF-8 characters.
 #[inline(always)]
 pub fn bytes_to_str(bytes: &[u8], start: usize, end: usize) -> &str {
-    // SAFETY: C identifiers consist only of ASCII letters, digits, underscores, and dollar signs,
-    // which are all valid single-byte UTF-8 characters.
+    debug_assert!(
+        std::str::from_utf8(&bytes[start..end]).is_ok(),
+        "bytes_to_str: input is not valid UTF-8"
+    );
+    // SAFETY: C identifiers consist only of ASCII bytes, verified by debug_assert above.
+    // Using unchecked here because this is an extremely hot path in the preprocessor.
     unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) }
 }
 
@@ -98,9 +101,9 @@ pub fn copy_literal_bytes_to_string(bytes: &[u8], start: usize, quote: u8, resul
             i += 2; // skip escape sequence
         } else if bytes[i] == quote {
             i += 1; // include closing quote
-            // SAFETY: the source text is valid UTF-8, and we are copying a contiguous
-            // substring that includes only the literal and its delimiters.
-            let slice = unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) };
+            // Source text is valid UTF-8 and we copy a contiguous substring.
+            let slice = std::str::from_utf8(&bytes[start..i])
+                .expect("literal copy produced non-UTF8");
             result.push_str(slice);
             return i;
         } else {
@@ -108,8 +111,8 @@ pub fn copy_literal_bytes_to_string(bytes: &[u8], start: usize, quote: u8, resul
         }
     }
     // Unterminated literal - copy what we have
-    // SAFETY: same as above - contiguous substring of valid UTF-8 source.
-    let slice = unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) };
+    let slice = std::str::from_utf8(&bytes[start..i])
+        .expect("literal copy produced non-UTF8");
     result.push_str(slice);
     i
 }

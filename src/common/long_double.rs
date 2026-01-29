@@ -1208,6 +1208,15 @@ pub fn x87_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
 /// `op` selects the operation: 0=add, 1=sub, 2=mul, 3=div.
 #[cfg(target_arch = "x86_64")]
 fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
+    debug_assert!(op <= 3, "x87_binop: invalid op code {op}, expected 0..=3");
+    debug_assert!(
+        a[10..16] == [0; 6],
+        "x87_binop: padding bytes of operand `a` are non-zero (possible corruption)"
+    );
+    debug_assert!(
+        b[10..16] == [0; 6],
+        "x87_binop: padding bytes of operand `b` are non-zero (possible corruption)"
+    );
     let mut result = [0u8; 16];
     // SAFETY: The inline assembly loads two 80-bit x87 values from valid [u8; 16] arrays
     // via `fld tbyte ptr`, performs a single x87 arithmetic operation, and stores the
@@ -1332,6 +1341,14 @@ pub fn x87_neg(a: &[u8; 16]) -> [u8; 16] {
 /// Compute the remainder of two x87 80-bit extended precision values.
 #[cfg(target_arch = "x86_64")]
 pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    debug_assert!(
+        a[10..16] == [0; 6],
+        "x87_rem: padding bytes of operand `a` are non-zero (possible corruption)"
+    );
+    debug_assert!(
+        b[10..16] == [0; 6],
+        "x87_rem: padding bytes of operand `b` are non-zero (possible corruption)"
+    );
     let mut result = [0u8; 16];
     // SAFETY: Same safety rationale as x87_binop. Additionally, fprem may require
     // multiple iterations (checked via C2 status bit), but the loop always terminates
@@ -1372,6 +1389,14 @@ pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
 /// Returns: -1 if a < b, 0 if a == b, 1 if a > b, i32::MIN if unordered (NaN).
 #[cfg(target_arch = "x86_64")]
 pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
+    debug_assert!(
+        a[10..16] == [0; 6],
+        "x87_cmp: padding bytes of operand `a` are non-zero (possible corruption)"
+    );
+    debug_assert!(
+        b[10..16] == [0; 6],
+        "x87_cmp: padding bytes of operand `b` are non-zero (possible corruption)"
+    );
     let status: u16;
     // SAFETY: Loads two 80-bit values, fucompp compares and pops both (stack balanced).
     // fnstsw ax stores the FPU status word into the ax register for condition code inspection.

@@ -172,8 +172,8 @@ fn write_i64_fast(buf: &mut String, val: i64) {
         pos -= 1;
         tmp[pos] = b'-';
     }
-    // SAFETY: tmp[pos..20] contains only ASCII digits and optionally a '-' prefix
-    let s = unsafe { std::str::from_utf8_unchecked(&tmp[pos..20]) };
+    // All bytes are ASCII digits and optionally '-', which is always valid UTF-8.
+    let s = std::str::from_utf8(&tmp[pos..20]).expect("integer formatting produced non-UTF8");
     buf.push_str(s);
 }
 
@@ -192,7 +192,7 @@ fn write_u64_fast(buf: &mut String, val: u64) {
         tmp[pos] = b'0' + (v % 10) as u8;
         v /= 10;
     }
-    let s = unsafe { std::str::from_utf8_unchecked(&tmp[pos..20]) };
+    let s = std::str::from_utf8(&tmp[pos..20]).expect("integer formatting produced non-UTF8");
     buf.push_str(s);
 }
 

@@ -545,8 +545,8 @@ impl MacroTable {
                 }
                 _ => {
                     // Multi-byte UTF-8: reconstruct string from raw bytes
-                    // SAFETY: the source text is valid UTF-8
-                    let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                    let s = std::str::from_utf8(&bytes[i..])
+                        .expect("macro arg parsing: source text is not valid UTF-8");
                     let ch = s.chars().next().unwrap();
                     current_arg.push(ch);
                     i += ch.len_utf8();
@@ -775,7 +775,8 @@ impl MacroTable {
             if bytes[i] < 0x80 {
                 result.push(bytes[i] as char);
             } else {
-                let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                let s = std::str::from_utf8(&bytes[i..])
+                    .expect("stringify/paste: source text is not valid UTF-8");
                 let ch = s.chars().next().unwrap();
                 result.push(ch);
                 i += ch.len_utf8();
@@ -856,7 +857,8 @@ impl MacroTable {
             if bytes[i] < 0x80 {
                 result.push(bytes[i] as char);
             } else {
-                let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
+                let s = std::str::from_utf8(&bytes[i..])
+                    .expect("substitute_params: source text is not valid UTF-8");
                 let ch = s.chars().next().unwrap();
                 result.push(ch);
                 i += ch.len_utf8();
@@ -1190,8 +1192,8 @@ mod itoa {
             if n == 0 {
                 self.bytes[0] = b'0';
                 self.len = 1;
-                // SAFETY: b'0' is valid UTF-8.
-                return unsafe { std::str::from_utf8_unchecked(&self.bytes[..1]) };
+                return std::str::from_utf8(&self.bytes[..1])
+                    .expect("digit buffer is not valid UTF-8");
             }
             let mut pos = 20;
             while n > 0 {
@@ -1202,8 +1204,9 @@ mod itoa {
             self.len = 20 - pos;
             // Shift to beginning for simpler return
             self.bytes.copy_within(pos..20, 0);
-            // SAFETY: All bytes are ASCII digits (b'0'..=b'9'), which are valid UTF-8.
-            unsafe { std::str::from_utf8_unchecked(&self.bytes[..self.len]) }
+            // All bytes are ASCII digits (b'0'..=b'9'), which are valid UTF-8.
+            std::str::from_utf8(&self.bytes[..self.len])
+                .expect("digit buffer is not valid UTF-8")
         }
     }
 }
