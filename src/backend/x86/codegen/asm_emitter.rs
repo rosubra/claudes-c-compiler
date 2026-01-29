@@ -645,7 +645,9 @@ impl InlineAsmEmitter for X86Codegen {
                         }
                         _ => {}
                     }
-                    self.state.emit_fmt(format_args!("    movq %{}, {}(%rbp)", reg, slot.0));
+                    // Use the 64-bit register name for the movq store
+                    let reg64 = Self::reg_to_64(reg);
+                    self.state.emit_fmt(format_args!("    movq %{}, {}(%rbp)", reg64, slot.0));
                 }
             } else {
                 // Non-alloca: slot holds a pointer, store through it.
