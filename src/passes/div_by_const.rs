@@ -51,15 +51,19 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
         next_id = func.max_value_id() + 1;
     }
 
-    // Build a set of values known to fit in 32 bits.
-    // A value is known-32-bit if:
-    //   (a) It's a Cast from <=32-bit to I64/U64 (widening), OR
-    //   (b) It's a Cast from I64/U64 to <=32-bit (narrowing/truncation), OR
-    //   (c) It's a Load of a <=32-bit type.
-    // This lets us safely apply 32-bit magic number optimization to I64
-    // divisions whose dividend originated from a 32-bit (or smaller) value.
+    // Build sets of values known to fit in 32 bits.
+    // We track two separate properties:
+    //   - is_known_u32: value fits in unsigned 32-bit range [0, 2^32-1].
+    //     Safe for unsigned division strength reduction (UDiv/URem).
+    //   - is_known_i32: value fits in signed 32-bit range [-2^31, 2^31-1].
+    //     Safe for signed division strength reduction (SDiv/SRem).
+    //
+    // The distinction matters for sign-extending casts from signed types to
+    // unsigned 64-bit: e.g. (U64)(I8)-128 = 0xFFFFFFFFFFFFFF80, which does NOT
+    // fit in u32, but sign-extended values from I32->I64 DO fit in i32 range.
     let max_id = func.max_value_id() as usize;
-    let mut is_known_32bit: Vec<bool> = vec![false; max_id + 1];
+    let mut is_known_u32: Vec<bool> = vec![false; max_id + 1];
+    let mut is_known_i32: Vec<bool> = vec![false; max_id + 1];
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
@@ -70,11 +74,25 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                         if from_ty.is_integer() && from_ty.size() <= 4
                             && (*to_ty == IrType::I64 || *to_ty == IrType::U64)
                         {
-                            is_known_32bit[id] = true;
+                            if from_ty.is_unsigned() {
+                                // Zero-extension: value fits in both u32 and i32 ranges
+                                // (unsigned <=32-bit values are always non-negative and <= 2^32-1)
+                                is_known_u32[id] = true;
+                                is_known_i32[id] = true;
+                            } else {
+                                // Sign-extension from signed type: value fits in i32 range
+                                // but NOT necessarily in u32 range (e.g. -128 sign-extended
+                                // to U64 becomes 0xFFFFFFFFFFFFFF80, which is > 2^32).
+                                is_known_i32[id] = true;
+                                // Only safe for unsigned if widening to I64 (not U64),
+                                // AND the value will only be used in signed context.
+                                // Conservative: do NOT mark as u32-safe.
+                            }
                         }
                         // (b) Narrowing/truncation to <=32-bit
                         if to_ty.is_integer() && to_ty.size() <= 4 {
-                            is_known_32bit[id] = true;
+                            is_known_u32[id] = true;
+                            is_known_i32[id] = true;
                         }
                     }
                 }
@@ -83,7 +101,8 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                     if ty.is_integer() && ty.size() <= 4 {
                         let id = dest.0 as usize;
                         if id <= max_id {
-                            is_known_32bit[id] = true;
+                            is_known_u32[id] = true;
+                            is_known_i32[id] = true;
                         }
                     }
                 }
@@ -92,18 +111,33 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
         }
     }
 
-    // Helper: check if an operand is known to fit in 32 bits.
-    let lhs_is_32bit = |op: &Operand| -> bool {
+    // Helper: check if an operand is known to fit in unsigned 32 bits.
+    let lhs_is_u32 = |op: &Operand| -> bool {
         match op {
             Operand::Value(v) => {
                 let id = v.0 as usize;
-                id <= max_id && is_known_32bit[id]
+                id <= max_id && is_known_u32[id]
             }
             Operand::Const(c) => {
-                // A constant fits in 32 bits if it's in the u32 range (unsigned)
-                // or i32 range (signed).
                 if let Some(v) = c.to_i64() {
-                    v >= i32::MIN as i64 && v <= u32::MAX as i64
+                    v >= 0 && v <= u32::MAX as i64
+                } else {
+                    false
+                }
+            }
+        }
+    };
+
+    // Helper: check if an operand is known to fit in signed 32 bits.
+    let lhs_is_i32 = |op: &Operand| -> bool {
+        match op {
+            Operand::Value(v) => {
+                let id = v.0 as usize;
+                id <= max_id && is_known_i32[id]
+            }
+            Operand::Const(c) => {
+                if let Some(v) = c.to_i64() {
+                    v >= i32::MIN as i64 && v <= i32::MAX as i64
                 } else {
                     false
                 }
@@ -136,13 +170,19 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                         //    Without this check, genuine 64-bit divisions
                         //    (e.g. long long / 10) would get 32-bit magic
                         //    numbers and produce wrong results.
-                        let lhs_known_32 = lhs_is_32bit(lhs);
+                        //
+                        // For unsigned ops (UDiv/URem), we need the LHS to fit
+                        // in unsigned 32-bit range [0, 2^32-1]. For signed ops
+                        // (SDiv/SRem), it must fit in signed 32-bit range
+                        // [-2^31, 2^31-1]. This matters because sign-extending
+                        // a negative signed value to U64 produces a value that
+                        // exceeds u32 range (e.g. (U64)(char)-128 = 0xFFFFFFFFFFFFFF80).
                         let expanded = match op {
                             IrBinOp::UDiv => {
                                 if divisor > 1 && divisor <= u32::MAX as i64 {
                                     match *ty {
                                         IrType::U32 => expand_udiv32(*dest, lhs, divisor as u32, *ty, &mut next_id),
-                                        IrType::I64 | IrType::U64 if lhs_known_32 => expand_udiv32_in_i64(*dest, lhs, divisor as u32, &mut next_id),
+                                        IrType::I64 | IrType::U64 if lhs_is_u32(lhs) => expand_udiv32_in_i64(*dest, lhs, divisor as u32, &mut next_id),
                                         _ => None,
                                     }
                                 } else {
@@ -153,7 +193,7 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                                 if divisor > 1 && divisor <= i32::MAX as i64 {
                                     match *ty {
                                         IrType::I32 => expand_sdiv32(*dest, lhs, divisor as i32, *ty, &mut next_id),
-                                        IrType::I64 if lhs_known_32 => expand_sdiv32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
+                                        IrType::I64 if lhs_is_i32(lhs) => expand_sdiv32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
                                         _ => None,
                                     }
                                 } else {
@@ -164,7 +204,7 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                                 if divisor > 1 && divisor <= u32::MAX as i64 {
                                     match *ty {
                                         IrType::U32 => expand_urem32(*dest, lhs, divisor as u32, *ty, &mut next_id),
-                                        IrType::I64 | IrType::U64 if lhs_known_32 => expand_urem32_in_i64(*dest, lhs, divisor as u32, &mut next_id),
+                                        IrType::I64 | IrType::U64 if lhs_is_u32(lhs) => expand_urem32_in_i64(*dest, lhs, divisor as u32, &mut next_id),
                                         _ => None,
                                     }
                                 } else {
@@ -175,7 +215,7 @@ pub(crate) fn div_by_const_function(func: &mut IrFunction) -> usize {
                                 if divisor > 1 && divisor <= i32::MAX as i64 {
                                     match *ty {
                                         IrType::I32 => expand_srem32(*dest, lhs, divisor as i32, *ty, &mut next_id),
-                                        IrType::I64 if lhs_known_32 => expand_srem32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
+                                        IrType::I64 if lhs_is_i32(lhs) => expand_srem32_in_i64(*dest, lhs, divisor as i32, &mut next_id),
                                         _ => None,
                                     }
                                 } else {
