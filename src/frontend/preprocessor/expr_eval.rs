@@ -1,7 +1,8 @@
 //! Preprocessor conditional expression evaluation.
 //!
 //! This module handles evaluation of preprocessor conditional expressions (`#if`, `#elif`),
-//! including `defined()` operator resolution, `__has_builtin()` and `__has_attribute()` detection,
+//! including `defined()` operator resolution, `__has_builtin()`, `__has_attribute()`,
+//! `__has_include()`, and `__has_include_next()` detection,
 //! and replacing undefined identifiers with 0 per the C standard.
 //!
 //! All scanning operates on byte slices for performance (no Vec<char> allocation).
@@ -95,7 +96,8 @@ impl Preprocessor {
     }
 
     /// Replace `defined(X)`, `defined X`, `__has_builtin(X)`, `__has_attribute(X)`,
-    /// `__has_feature(X)`, and `__has_extension(X)` with 0 or 1 in a #if expression.
+    /// `__has_feature(X)`, `__has_extension(X)`, `__has_include(X)`, and
+    /// `__has_include_next(X)` with 0 or 1 in a #if expression.
     pub(super) fn resolve_defined_in_expr(&self, expr: &str) -> String {
         let mut result = String::new();
         let bytes = expr.as_bytes();
@@ -151,6 +153,12 @@ impl Preprocessor {
                 } else if ident == "__has_feature" || ident == "__has_extension" {
                     self.skip_paren_arg_bytes(bytes, &mut i);
                     result.push('0');
+                } else if ident == "__has_include" {
+                    let val = self.resolve_has_include_call_bytes(bytes, &mut i, false);
+                    result.push_str(val);
+                } else if ident == "__has_include_next" {
+                    let val = self.resolve_has_include_call_bytes(bytes, &mut i, true);
+                    result.push_str(val);
                 } else {
                     result.push_str(ident);
                 }
@@ -216,6 +224,74 @@ impl Preprocessor {
             *i += 1;
         }
         if Self::is_supported_attribute(name) { "1" } else { "0" }
+    }
+
+    /// Parse `(<header.h>)` or `("header.h")` after `__has_include` / `__has_include_next`
+    /// and return "1" or "0" based on whether the header can be found.
+    fn resolve_has_include_call_bytes(&self, bytes: &[u8], i: &mut usize, is_next: bool) -> &'static str {
+        let len = bytes.len();
+        // Skip whitespace
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
+            *i += 1;
+        }
+        if *i >= len || bytes[*i] != b'(' {
+            return "0";
+        }
+        *i += 1; // skip '('
+        // Skip whitespace
+        while *i < len && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
+            *i += 1;
+        }
+
+        // Determine if system include (<...>) or quoted ("...")
+        let (header_name, is_system) = if *i < len && bytes[*i] == b'<' {
+            *i += 1; // skip '<'
+            let start = *i;
+            while *i < len && bytes[*i] != b'>' {
+                *i += 1;
+            }
+            let name = bytes_to_str(bytes, start, *i);
+            if *i < len { *i += 1; } // skip '>'
+            (name, true)
+        } else if *i < len && bytes[*i] == b'"' {
+            *i += 1; // skip '"'
+            let start = *i;
+            while *i < len && bytes[*i] != b'"' {
+                *i += 1;
+            }
+            let name = bytes_to_str(bytes, start, *i);
+            if *i < len { *i += 1; } // skip closing '"'
+            (name, false)
+        } else {
+            // Fallback: try to read as identifier (e.g. macro-expanded argument)
+            let start = *i;
+            while *i < len && bytes[*i] != b')' {
+                *i += 1;
+            }
+            let name = bytes_to_str(bytes, start, *i).trim();
+            (name, false)
+        };
+
+        // Skip to closing paren
+        while *i < len && bytes[*i] != b')' {
+            *i += 1;
+        }
+        if *i < len { *i += 1; } // skip ')'
+
+        if header_name.is_empty() {
+            return "0";
+        }
+
+        // Use the preprocessor's include path resolution
+        let found = if is_next {
+            let current_file_dir = self.include_stack.last()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            self.resolve_include_next_path(header_name, current_file_dir.as_ref()).is_some()
+        } else {
+            self.resolve_include_path(header_name, is_system).is_some()
+        };
+
+        if found { "1" } else { "0" }
     }
 
     /// Skip a parenthesized argument (byte-oriented).

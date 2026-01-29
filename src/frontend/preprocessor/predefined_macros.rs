@@ -173,8 +173,8 @@ impl Preprocessor {
             ("__has_builtin", &["x"], "0"),
             ("__has_attribute", &["x"], "0"),
             ("__has_feature", &["x"], "0"),
-            ("__has_include", &["x"], "1"),
-            ("__has_include_next", &["x"], "0"),
+            // __has_include and __has_include_next are handled in resolve_defined_in_expr()
+            // (expr_eval.rs) to actually check whether the header file exists on disk.
             ("__has_extension", &["x"], "0"),
         ];
 

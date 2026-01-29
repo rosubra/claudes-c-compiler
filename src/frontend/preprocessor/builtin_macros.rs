@@ -28,7 +28,9 @@ pub fn define_builtin_macros(macros: &mut MacroTable) {
     define_stdatomic_macros(macros);
     define_float_macros(macros);
     define_inttypes_macros(macros);
-    define_assert_macros(macros);
+    // assert() is NOT defined here. It comes from the system <assert.h> header,
+    // which properly handles NDEBUG. Code that uses assert() without including
+    // <assert.h> will correctly get a compilation error.
     define_type_traits_macros(macros);
 }
 
@@ -358,23 +360,9 @@ fn define_inttypes_macros(macros: &mut MacroTable) {
     def(macros, "SCNxMAX", "\"lx\"");
 }
 
-/// <assert.h> macros
-fn define_assert_macros(macros: &mut MacroTable) {
-    // assert() becomes a no-op unless NDEBUG is not defined
-    // We define it as a simple check that aborts
-    macros.define(MacroDef {
-        name: "assert".to_string(),
-        is_function_like: true,
-        params: vec!["expr".to_string()],
-        is_variadic: false,
-        has_named_variadic: false,
-        body: "((void)0)".to_string(), // TODO: implement proper assert
-        is_predefined: true,
-    });
-    // static_assert is handled as a keyword (TokenKind::StaticAssert) rather
-    // than a preprocessor macro. Both _Static_assert and static_assert are
-    // recognized by the lexer and evaluated by the parser.
-}
+// static_assert is handled as a keyword (TokenKind::StaticAssert) rather
+// than a preprocessor macro. Both _Static_assert and static_assert are
+// recognized by the lexer and evaluated by the parser.
 
 /// Type-related GCC built-in macros
 fn define_type_traits_macros(macros: &mut MacroTable) {
