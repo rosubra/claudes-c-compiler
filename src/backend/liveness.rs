@@ -330,14 +330,23 @@ fn assign_program_points(
             // Record InlineAsm output definitions BEFORE gen collection so
             // that promoted (non-alloca) outputs are in the kill set and won't
             // be treated as upward-exposed uses.
+            //
+            // Only kill output values that are first defined here (promoted asm
+            // outputs). Output values already defined earlier (e.g., pointer
+            // values passed through for indirect stores like `"=a"(*ptr)`) are
+            // merely *used* by the InlineAsm — the asm reads the pointer from
+            // the slot and stores through it, but does not overwrite the pointer
+            // itself. Killing such values truncates their live interval, letting
+            // the slot packer reuse their slot too early, which corrupts the
+            // pointer on the next loop iteration.
             if let Instruction::InlineAsm { outputs, .. } = inst {
                 for (_, out_val, _) in outputs {
                     if !alloca_set.contains(&out_val.0) {
                         if let Some(&dense) = id_to_dense.get(&out_val.0) {
                             if def_points[dense] == u32::MAX {
                                 def_points[dense] = point;
+                                kill.insert(dense);
                             }
-                            kill.insert(dense);
                         }
                     }
                 }
