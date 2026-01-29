@@ -827,13 +827,15 @@ impl Parser {
     /// Used for range designator bounds, alignment expressions, etc.
     /// The optional `enum_consts` map allows resolving enum constant identifiers.
     pub(super) fn eval_const_int_expr(expr: &Expr) -> Option<i64> {
-        Self::eval_const_int_expr_with_enums(expr, None)
+        Self::eval_const_int_expr_with_enums(expr, None, None)
     }
 
-    /// Evaluate a constant integer expression, with access to known enum constants.
+    /// Evaluate a constant integer expression, with access to known enum constants
+    /// and struct/union tag alignments for resolving tag-only __alignof__ references.
     pub(super) fn eval_const_int_expr_with_enums(
         expr: &Expr,
         enum_consts: Option<&FxHashMap<String, i64>>,
+        tag_aligns: Option<&FxHashMap<String, usize>>,
     ) -> Option<i64> {
         match expr {
             Expr::IntLiteral(val, _) => Some(*val),
@@ -848,8 +850,8 @@ impl Parser {
                 enum_consts.and_then(|m| m.get(name.as_str()).copied())
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = Self::eval_const_int_expr_with_enums(lhs, enum_consts)?;
-                let r = Self::eval_const_int_expr_with_enums(rhs, enum_consts)?;
+                let l = Self::eval_const_int_expr_with_enums(lhs, enum_consts, tag_aligns)?;
+                let r = Self::eval_const_int_expr_with_enums(rhs, enum_consts, tag_aligns)?;
                 match op {
                     BinOp::Add => Some(l.wrapping_add(r)),
                     BinOp::Sub => Some(l.wrapping_sub(r)),
@@ -873,27 +875,27 @@ impl Parser {
                 }
             }
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| v.wrapping_neg())
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| v.wrapping_neg())
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| !v)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| !v)
             }
             Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts).map(|v| if v == 0 { 1 } else { 0 })
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns).map(|v| if v == 0 { 1 } else { 0 })
             }
             Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns)
             }
             Expr::Conditional(cond, then_expr, else_expr, _) => {
-                let c = Self::eval_const_int_expr_with_enums(cond, enum_consts)?;
+                let c = Self::eval_const_int_expr_with_enums(cond, enum_consts, tag_aligns)?;
                 if c != 0 {
-                    Self::eval_const_int_expr_with_enums(then_expr, enum_consts)
+                    Self::eval_const_int_expr_with_enums(then_expr, enum_consts, tag_aligns)
                 } else {
-                    Self::eval_const_int_expr_with_enums(else_expr, enum_consts)
+                    Self::eval_const_int_expr_with_enums(else_expr, enum_consts, tag_aligns)
                 }
             }
             Expr::Cast(_, inner, _) => {
-                Self::eval_const_int_expr_with_enums(inner, enum_consts)
+                Self::eval_const_int_expr_with_enums(inner, enum_consts, tag_aligns)
             }
             Expr::Sizeof(arg, _) => {
                 match arg.as_ref() {
@@ -902,16 +904,32 @@ impl Parser {
                 }
             }
             Expr::Alignof(ts, _) => {
-                Some(Self::alignof_type_spec(ts) as i64)
+                // Can't resolve typedef alignment at parse time
+                if Self::type_spec_has_typedef(ts) { return None; }
+                Some(Self::alignof_type_spec(ts, tag_aligns) as i64)
             }
             // __alignof(type) returns preferred alignment (8 for long long/double on i686)
             Expr::GnuAlignof(ts, _) => {
-                Some(Self::preferred_alignof_type_spec(ts) as i64)
+                // Can't resolve typedef alignment at parse time
+                if Self::type_spec_has_typedef(ts) { return None; }
+                Some(Self::preferred_alignof_type_spec(ts, tag_aligns) as i64)
             }
             // __alignof__(expr): parser-level can't always determine type alignment
             // from an expression, so return None (let sema/lowerer handle it)
             Expr::AlignofExpr(_, _) | Expr::GnuAlignofExpr(_, _) => None,
             _ => None,
+        }
+    }
+
+    /// Check if a type specifier contains an unresolvable typedef name.
+    /// Used to bail out of parser-level alignof/sizeof evaluation when the
+    /// actual type can't be determined without typedef resolution.
+    fn type_spec_has_typedef(ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::TypedefName(_) => true,
+            TypeSpecifier::Pointer(inner, _) => Self::type_spec_has_typedef(inner),
+            TypeSpecifier::Array(inner, _) => Self::type_spec_has_typedef(inner),
+            _ => false,
         }
     }
 
@@ -1005,7 +1023,12 @@ impl Parser {
         } else {
             Some(&self.enum_constants)
         };
-        if let Some(value) = Self::eval_const_int_expr_with_enums(&expr, enums) {
+        let tag_aligns = if self.struct_tag_alignments.is_empty() {
+            None
+        } else {
+            Some(&self.struct_tag_alignments)
+        };
+        if let Some(value) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
             if value == 0 {
                 // Static assertion failed
                 let msg = if let Some(ref m) = message {

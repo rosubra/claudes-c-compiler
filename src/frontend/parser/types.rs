@@ -427,11 +427,22 @@ impl Parser {
         if aligned3.is_some() { struct_aligned = aligned3; }
         // Apply current #pragma pack alignment to struct definition
         let max_field_align = self.pragma_pack_align;
-        if is_struct {
+        let ts = if is_struct {
             TypeSpecifier::Struct(name, fields, is_packed, max_field_align, struct_aligned)
         } else {
             TypeSpecifier::Union(name, fields, is_packed, max_field_align, struct_aligned)
+        };
+        // Record alignment for named struct/union definitions so that later
+        // tag-only references (e.g., __alignof__(struct foo)) can look it up.
+        match &ts {
+            TypeSpecifier::Struct(Some(ref tag), Some(_), ..)
+            | TypeSpecifier::Union(Some(ref tag), Some(_), ..) => {
+                let align = Self::alignof_type_spec(&ts, None);
+                self.struct_tag_alignments.insert(tag.clone(), align);
+            }
+            _ => {}
         }
+        ts
     }
 
     /// Parse an enum definition/reference.
@@ -746,7 +757,8 @@ impl Parser {
                 // Evaluate the explicit value expression.
                 // Use eval_const_int_expr_with_enums so references to previously
                 // defined enum constants are resolved.
-                let evaluated = Self::eval_const_int_expr_with_enums(expr, Some(&self.enum_constants));
+                let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+                let evaluated = Self::eval_const_int_expr_with_enums(expr, Some(&self.enum_constants), tag_aligns);
                 evaluated.unwrap_or(next_value)
             } else {
                 next_value

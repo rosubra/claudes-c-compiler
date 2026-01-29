@@ -251,6 +251,12 @@ pub struct Parser {
     /// Populated as enum definitions are parsed, so that later constant expressions
     /// (e.g., in __attribute__((aligned(1 << ENUM_CONST)))) can resolve them.
     pub(super) enum_constants: FxHashMap<String, i64>,
+    /// Map of struct/union tag names to their computed alignments.
+    /// Populated when a struct/union with fields is parsed, so that later
+    /// __alignof__(struct tag) references can look up the correct alignment
+    /// (especially important for packed structs where tag-only refs would
+    /// otherwise incorrectly default to ptr_size).
+    pub(super) struct_tag_alignments: FxHashMap<String, usize>,
 }
 
 impl Parser {
@@ -269,6 +275,7 @@ impl Parser {
             source_manager: None,
             diagnostics: DiagnosticEngine::new(),
             enum_constants: FxHashMap::default(),
+            struct_tag_alignments: FxHashMap::default(),
         }
     }
 
@@ -738,7 +745,8 @@ impl Parser {
                                             // TODO: Validate vector_size is a power of 2 and element type is numeric
                                             let expr = self.parse_assignment_expr();
                                             let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
-                                            if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums) {
+                                            let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+                                            if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
                                                 self.attrs.parsing_vector_size = Some(size as usize);
                                             }
                                             if matches!(self.peek(), TokenKind::RParen) {
@@ -1051,7 +1059,8 @@ impl Parser {
             }
         }
         let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
-        Self::eval_const_int_expr_with_enums(&expr, enums).map(|v| v as usize)
+        let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+        Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns).map(|v| v as usize)
     }
 
     /// Parse the parenthesized argument of `_Alignas(...)`.
@@ -1073,7 +1082,8 @@ impl Parser {
                     // Save the type specifier so the lowerer can resolve typedefs
                     // and compute accurate alignment (parser can't resolve typedefs).
                     self.attrs.parsed_alignas_type = Some(result_type.clone());
-                    return Some(Self::alignof_type_spec(&result_type));
+                    let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+                    return Some(Self::alignof_type_spec(&result_type, tag_aligns));
                 }
             }
         }
@@ -1086,7 +1096,8 @@ impl Parser {
             self.advance();
         }
         let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
-        Self::eval_const_int_expr_with_enums(&expr, enums).map(|v| v as usize)
+        let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+        Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns).map(|v| v as usize)
     }
 
     /// Compute sizeof (in bytes) for a type specifier.
@@ -1140,7 +1151,13 @@ impl Parser {
 
     /// Compute alignment (in bytes) for a type specifier.
     /// Used by _Alignas(type) to determine the alignment value.
-    pub(super) fn alignof_type_spec(ts: &TypeSpecifier) -> usize {
+    /// The optional `tag_aligns` map provides previously-computed alignments for
+    /// struct/union tags, enabling correct alignment for tag-only references
+    /// (e.g., `__alignof__(struct packed_tag)` where the definition is elsewhere).
+    pub(super) fn alignof_type_spec(
+        ts: &TypeSpecifier,
+        tag_aligns: Option<&FxHashMap<String, usize>>,
+    ) -> usize {
         use crate::common::types::target_ptr_size;
         let ptr_sz = target_ptr_size();
         match ts {
@@ -1161,9 +1178,9 @@ impl Parser {
             TypeSpecifier::ComplexFloat => 4,
             TypeSpecifier::ComplexDouble => if ptr_sz == 4 { 4 } else { 8 },
             TypeSpecifier::ComplexLongDouble => if ptr_sz == 4 { 4 } else { 16 },
-            TypeSpecifier::Array(elem, _) => Self::alignof_type_spec(elem),
-            TypeSpecifier::Struct(_, fields, is_packed, _, struct_aligned)
-            | TypeSpecifier::Union(_, fields, is_packed, _, struct_aligned) => {
+            TypeSpecifier::Array(elem, _) => Self::alignof_type_spec(elem, tag_aligns),
+            TypeSpecifier::Struct(name, fields, is_packed, _, struct_aligned)
+            | TypeSpecifier::Union(name, fields, is_packed, _, struct_aligned) => {
                 if *is_packed { return 1; }
                 // Explicit struct/union-level __attribute__((aligned(N))) overrides
                 let mut align = struct_aligned.unwrap_or(0);
@@ -1173,9 +1190,16 @@ impl Parser {
                         let field_align = if let Some(fa) = field.alignment {
                             fa
                         } else {
-                            Self::alignof_type_spec(&field.type_spec)
+                            Self::alignof_type_spec(&field.type_spec, tag_aligns)
                         };
                         align = align.max(field_align);
+                    }
+                } else if let Some(tag_name) = name {
+                    // Tag-only reference: look up previously stored alignment
+                    if let Some(ta) = tag_aligns {
+                        if let Some(&stored) = ta.get(tag_name.as_str()) {
+                            return stored;
+                        }
                     }
                 }
                 // Fallback for empty struct/union or tag-only (no fields available)
@@ -1191,20 +1215,23 @@ impl Parser {
     /// Used by GCC's __alignof/__alignof__ which returns preferred alignment.
     /// On i686: __alignof__(long long) == 8, __alignof__(double) == 8,
     /// while _Alignof returns 4 for both (minimum ABI alignment).
-    pub(super) fn preferred_alignof_type_spec(ts: &TypeSpecifier) -> usize {
+    pub(super) fn preferred_alignof_type_spec(
+        ts: &TypeSpecifier,
+        tag_aligns: Option<&FxHashMap<String, usize>>,
+    ) -> usize {
         use crate::common::types::target_ptr_size;
         let ptr_sz = target_ptr_size();
         if ptr_sz != 4 {
             // On 64-bit targets, preferred == ABI alignment
-            return Self::alignof_type_spec(ts);
+            return Self::alignof_type_spec(ts, tag_aligns);
         }
         // On i686: long long and double have preferred alignment of 8
         match ts {
             TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
             | TypeSpecifier::Double => 8,
             TypeSpecifier::ComplexDouble => 8,
-            TypeSpecifier::Array(elem, _) => Self::preferred_alignof_type_spec(elem),
-            _ => Self::alignof_type_spec(ts),
+            TypeSpecifier::Array(elem, _) => Self::preferred_alignof_type_spec(elem, tag_aligns),
+            _ => Self::alignof_type_spec(ts, tag_aligns),
         }
     }
 }
