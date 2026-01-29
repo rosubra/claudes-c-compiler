@@ -475,13 +475,20 @@ impl Driver {
 
         for input_file in &self.input_files {
             if Self::is_object_or_archive(input_file) {
-                // Pass .o and .a files directly to the linker
+                // Pass .o, .a, .so, .os, .od, .lo files directly to the linker
                 passthrough_objects.push(input_file.clone());
             } else if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
                 // .s/.S files (or -x assembler): pass to assembler, then link
                 let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
                 self.assemble_source_file(input_file, tmp.to_str())?;
                 temp_guards.push(tmp);
+            } else if !Self::is_c_source(input_file)
+                && Self::looks_like_binary_object(input_file)
+            {
+                // Unrecognized extension but file has ELF/archive magic bytes -
+                // treat as object file. This handles non-standard extensions used
+                // by various build systems.
+                passthrough_objects.push(input_file.clone());
             } else {
                 // Compile .c files to .o
                 let asm = self.compile_to_assembly(input_file)?;
@@ -524,8 +531,54 @@ impl Driver {
     }
 
     /// Check if a file is an object file or archive (pass to linker directly).
+    /// Recognizes standard extensions (.o, .a, .so) plus common variants used by
+    /// build systems (.os, .od, .lo, .obj) and versioned shared libs (.so.*).
     fn is_object_or_archive(path: &str) -> bool {
-        path.ends_with(".o") || path.ends_with(".a") || path.ends_with(".so")
+        // Standard extensions
+        if path.ends_with(".o") || path.ends_with(".a") || path.ends_with(".so") {
+            return true;
+        }
+        // Common non-standard extensions used by build systems:
+        // .os - heatshrink uses for static-variant objects
+        // .od - heatshrink uses for dynamic-variant objects
+        // .lo - libtool object files
+        // .obj - Windows-style object files sometimes used in cross-platform projects
+        if path.ends_with(".os") || path.ends_with(".od")
+            || path.ends_with(".lo") || path.ends_with(".obj")
+        {
+            return true;
+        }
+        // Versioned shared libraries: .so.1, .so.1.2.3, etc.
+        if let Some(pos) = path.rfind(".so.") {
+            let after = &path[pos + 4..];
+            if after.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a file has a known C source extension.
+    fn is_c_source(path: &str) -> bool {
+        path.ends_with(".c") || path.ends_with(".h") || path.ends_with(".i")
+    }
+
+    /// Check if a file appears to be a binary object/archive by inspecting magic bytes.
+    /// Returns true for ELF files (\x7fELF) and ar archives (!<arch>\n).
+    fn looks_like_binary_object(path: &str) -> bool {
+        use std::io::Read;
+        let mut buf = [0u8; 8];
+        if let Ok(mut f) = std::fs::File::open(path) {
+            if let Ok(n) = f.read(&mut buf) {
+                if n >= 4 && &buf[..4] == b"\x7fELF" {
+                    return true;
+                }
+                if n >= 8 && &buf[..8] == b"!<arch>\n" {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Check if a file is an assembly source (.s or .S).
