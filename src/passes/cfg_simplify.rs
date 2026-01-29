@@ -146,7 +146,7 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
     for (idx, block) in func.blocks.iter().enumerate() {
         if let Terminator::CondBranch { cond, true_label, false_label } = &block.terminator {
             let const_val = match cond {
-                Operand::Const(c) => Some(is_const_nonzero(c)),
+                Operand::Const(c) => Some(c.is_nonzero()),
                 Operand::Value(v) => {
                     // Look through Copy/Phi/Cmp/Select instructions in this block to resolve
                     // the Value to a constant. This handles the case where
@@ -154,7 +154,7 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
                     // in a previous fixpoint iteration, but copy_prop hasn't run yet.
                     let resolved = resolve_value_to_const_in_block(block, *v);
                     if resolved.is_some() {
-                        resolved.map(|c| is_const_nonzero(&c))
+                        resolved.map(|c| c.is_nonzero())
                     } else {
                         // If not found in this block, walk the single-predecessor chain
                         // (blocks with exactly one predecessor that unconditionally branches
@@ -190,7 +190,7 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
                         if resolved_from_pred.is_none() {
                             resolved_from_pred = resolve_value_globally(func, *v, &global_val_map, 0);
                         }
-                        resolved_from_pred.map(|c| is_const_nonzero(&c))
+                        resolved_from_pred.map(|c| c.is_nonzero())
                     }
                 }
             };
@@ -497,20 +497,6 @@ fn resolve_operand_to_i64_in_block(block: &BasicBlock, op: &Operand) -> Option<i
     match op {
         Operand::Const(c) => c.to_i64(),
         Operand::Value(v) => resolve_value_to_const_in_block(block, *v)?.to_i64(),
-    }
-}
-
-fn is_const_nonzero(c: &IrConst) -> bool {
-    match c {
-        IrConst::I8(v) => *v != 0,
-        IrConst::I16(v) => *v != 0,
-        IrConst::I32(v) => *v != 0,
-        IrConst::I64(v) => *v != 0,
-        IrConst::I128(v) => *v != 0,
-        IrConst::F32(v) => *v != 0.0,
-        IrConst::F64(v) => *v != 0.0,
-        IrConst::LongDouble(v, _) => *v != 0.0,
-        IrConst::Zero => false,
     }
 }
 
