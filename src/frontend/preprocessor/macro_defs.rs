@@ -285,213 +285,22 @@ impl MacroTable {
         while i < len {
             let b = bytes[i];
 
-            // Skip string and char literals (copy them verbatim)
             if b == b'"' || b == b'\'' {
                 i = copy_literal_bytes_to_string(bytes, i, b, &mut result);
-                continue;
-            }
-
-            // Skip blue-painted identifiers: a \x01 marker means the
-            // following identifier was suppressed by the blue-paint rule
-            // and must be copied verbatim (never re-expanded).
-            if b == BLUE_PAINT_MARKER {
-                result.push(BLUE_PAINT_MARKER as char);
-                i += 1;
-                // Copy the identifier that follows
-                while i < len && is_ident_cont_byte(bytes[i]) {
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Look for identifiers
-            if is_ident_start_byte(b) {
-                let start = i;
-                i += 1;
-                while i < len && is_ident_cont_byte(bytes[i]) {
-                    i += 1;
-                }
-                let ident = bytes_to_str(bytes, start, i);
-
-                // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
-                let is_ppnumber_suffix = {
-                    let result_bytes = result.as_bytes();
-                    let rlen = result_bytes.len();
-                    if rlen == 0 {
-                        false
-                    } else {
-                        let prev = result_bytes[rlen - 1];
-                        if prev.is_ascii_digit() {
-                            true
-                        } else if prev == b'.' && rlen >= 2 && result_bytes[rlen - 2].is_ascii_digit() {
-                            is_ppnumber_context(result_bytes, rlen - 2)
-                        } else if (prev == b'+' || prev == b'-') && rlen >= 3
-                            && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P') {
-                            is_ppnumber_context(result_bytes, rlen - 3)
-                        } else {
-                            false
-                        }
-                    }
-                };
-                if is_ppnumber_suffix {
-                    result.push_str(ident);
-                    continue;
-                }
-
-                // Handle _Pragma("string") operator (C99 §6.10.9).
-                if ident == "_Pragma" {
-                    let mut j = i;
-                    while j < len && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < len && bytes[j] == b'(' {
-                        let mut depth = 1;
-                        j += 1;
-                        while j < len && depth > 0 {
-                            if bytes[j] == b'(' {
-                                depth += 1;
-                            } else if bytes[j] == b')' {
-                                depth -= 1;
-                            } else if bytes[j] == b'"' || bytes[j] == b'\'' {
-                                j = skip_literal_bytes(bytes, j, bytes[j]);
-                                continue;
-                            }
-                            j += 1;
-                        }
-                        i = j;
-                        continue;
-                    }
-                    result.push_str(ident);
-                    continue;
-                }
-
-                // Handle __COUNTER__ built-in
-                if ident == "__COUNTER__" {
-                    let val = self.counter.get();
-                    self.counter.set(val + 1);
-                    // Format number without allocating a String on the heap for small numbers
-                    let mut buf = itoa::Buffer::new();
-                    result.push_str(buf.format(val));
-                    continue;
-                }
-
-                // Handle __LINE__ built-in (avoids hash lookup)
-                if ident == "__LINE__" {
-                    let val = self.line_value.get();
-                    let mut buf = itoa::Buffer::new();
-                    result.push_str(buf.format(val));
-                    continue;
-                }
-
-                // Check if this is a macro that's not currently being expanded
-                if !expanding.contains(ident) {
-                    if let Some(mac) = self.macros.get(ident) {
-                        if mac.is_function_like {
-                            // Need to find opening paren
-                            let mut j = i;
-                            while j < len && bytes[j].is_ascii_whitespace() {
-                                j += 1;
-                            }
-                            if j < len && bytes[j] == b'(' {
-                                let (args, end_pos) = self.parse_macro_args(bytes, j);
-                                i = end_pos;
-                                let expanded = self.expand_function_macro(mac, &args, expanding);
-                                let (expanded, new_i) = self.expand_trailing_func_macros(expanded, bytes, i, expanding);
-                                i = new_i;
-                                let next = if i < len { Some(bytes[i]) } else { None };
-                                Self::append_with_paste_guard(&mut result, &expanded, next);
-                                continue;
-                            } else {
-                                result.push_str(ident);
-                                continue;
-                            }
-                        } else {
-                            // Object-like macro
-                            expanding.insert(ident.to_string());
-                            let expanded = self.expand_text(&mac.body, expanding);
-                            expanding.remove(ident);
-
-                            // Check if the expansion result is a function-like macro name
-                            if let Some((func_expanded, end_pos)) =
-                                self.try_resolve_objlike_to_funclike(&expanded, bytes, i, expanding)
-                            {
-                                i = end_pos;
-                                result.push_str(&func_expanded);
-                                continue;
-                            }
-
-                            let next = if i < len { Some(bytes[i]) } else { None };
-                            Self::append_with_paste_guard(&mut result, &expanded, next);
-                            continue;
-                        }
-                    }
-                }
-
-                // Not a macro, or already expanding (blue-painted).
-                // If the identifier is being suppressed because it's in
-                // the expanding set, prefix it with the blue-paint marker
-                // so it won't be re-expanded during subsequent rescans.
-                if expanding.contains(ident) {
-                    result.push(BLUE_PAINT_MARKER as char);
-                }
-                result.push_str(ident);
-                continue;
-            }
-
-            // Skip C-style comments
-            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-                result.push('/');
-                result.push('*');
-                i += 2;
-                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    // SAFETY: We're inside a comment, just push raw bytes.
-                    // Comments can only contain ASCII or UTF-8 that we copy verbatim.
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-                if i + 1 < len {
-                    result.push('*');
-                    result.push('/');
-                    i += 2;
-                }
-                continue;
-            }
-
-            // Skip line comments
-            if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-                while i < len && bytes[i] != b'\n' {
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Skip numeric literals (pp-numbers)
-            if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
-                while i < len {
-                    if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_' {
-                        result.push(bytes[i] as char);
-                        i += 1;
-                    } else if (bytes[i] == b'+' || bytes[i] == b'-')
-                        && i > 0
-                        && matches!(bytes[i - 1], b'e' | b'E' | b'p' | b'P')
-                    {
-                        result.push(bytes[i] as char);
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                continue;
-            }
-
-            // Regular character - for ASCII just push directly
-            if b < 0x80 {
+            } else if b == BLUE_PAINT_MARKER {
+                i = Self::copy_blue_painted(bytes, i, &mut result);
+            } else if is_ident_start_byte(b) {
+                i = self.expand_identifier(text, bytes, i, &mut result, expanding);
+            } else if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                i = Self::copy_block_comment(bytes, i, &mut result);
+            } else if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+                i = Self::copy_line_comment(bytes, i, &mut result);
+            } else if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+                i = Self::copy_ppnumber(bytes, i, &mut result);
+            } else if b < 0x80 {
                 result.push(b as char);
                 i += 1;
             } else {
-                // Multi-byte UTF-8: copy the full character
                 let ch = text[i..].chars().next().unwrap();
                 result.push(ch);
                 i += ch.len_utf8();
@@ -499,6 +308,198 @@ impl MacroTable {
         }
 
         result
+    }
+
+    /// Copy a blue-painted identifier verbatim (never re-expanded).
+    fn copy_blue_painted(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+        result.push(BLUE_PAINT_MARKER as char);
+        i += 1;
+        while i < bytes.len() && is_ident_cont_byte(bytes[i]) {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        i
+    }
+
+    /// Process an identifier: expand macros, handle builtins, or copy verbatim.
+    fn expand_identifier(&self, text: &str, bytes: &[u8], start: usize,
+                         result: &mut String, expanding: &mut FxHashSet<String>) -> usize {
+        let len = bytes.len();
+        let mut i = start + 1;
+        while i < len && is_ident_cont_byte(bytes[i]) {
+            i += 1;
+        }
+        let ident = bytes_to_str(bytes, start, i);
+
+        // Check if this identifier is part of a pp-number (e.g., 1.I, 15.IF, 0x1p2).
+        if Self::is_ppnumber_suffix(result.as_bytes(), ident) {
+            result.push_str(ident);
+            return i;
+        }
+
+        // Handle _Pragma("string") operator (C99 §6.10.9).
+        if ident == "_Pragma" {
+            return Self::skip_pragma(bytes, i, ident, result);
+        }
+
+        // Handle __COUNTER__ built-in
+        if ident == "__COUNTER__" {
+            let val = self.counter.get();
+            self.counter.set(val + 1);
+            let mut buf = itoa::Buffer::new();
+            result.push_str(buf.format(val));
+            return i;
+        }
+
+        // Handle __LINE__ built-in
+        if ident == "__LINE__" {
+            let val = self.line_value.get();
+            let mut buf = itoa::Buffer::new();
+            result.push_str(buf.format(val));
+            return i;
+        }
+
+        // Try macro expansion
+        if !expanding.contains(ident) {
+            if let Some(mac) = self.macros.get(ident) {
+                return self.expand_macro_invocation(text, bytes, i, ident, mac, result, expanding);
+            }
+        }
+
+        // Not a macro, or already expanding (blue-painted).
+        if expanding.contains(ident) {
+            result.push(BLUE_PAINT_MARKER as char);
+        }
+        result.push_str(ident);
+        i
+    }
+
+    /// Check if an identifier is a pp-number suffix (e.g., the "I" in "1.I").
+    fn is_ppnumber_suffix(result_bytes: &[u8], _ident: &str) -> bool {
+        let rlen = result_bytes.len();
+        if rlen == 0 { return false; }
+        let prev = result_bytes[rlen - 1];
+        if prev.is_ascii_digit() {
+            true
+        } else if prev == b'.' && rlen >= 2 && result_bytes[rlen - 2].is_ascii_digit() {
+            is_ppnumber_context(result_bytes, rlen - 2)
+        } else if (prev == b'+' || prev == b'-') && rlen >= 3
+            && matches!(result_bytes[rlen - 2], b'e' | b'E' | b'p' | b'P') {
+            is_ppnumber_context(result_bytes, rlen - 3)
+        } else {
+            false
+        }
+    }
+
+    /// Skip a _Pragma("...") operator, consuming the parenthesized argument.
+    fn skip_pragma(bytes: &[u8], i: usize, ident: &str, result: &mut String) -> usize {
+        let len = bytes.len();
+        let mut j = i;
+        while j < len && bytes[j].is_ascii_whitespace() { j += 1; }
+        if j < len && bytes[j] == b'(' {
+            let mut depth = 1;
+            j += 1;
+            while j < len && depth > 0 {
+                if bytes[j] == b'(' {
+                    depth += 1;
+                } else if bytes[j] == b')' {
+                    depth -= 1;
+                } else if bytes[j] == b'"' || bytes[j] == b'\'' {
+                    j = skip_literal_bytes(bytes, j, bytes[j]);
+                    continue;
+                }
+                j += 1;
+            }
+            return j;
+        }
+        result.push_str(ident);
+        i
+    }
+
+    /// Expand a macro invocation (function-like or object-like).
+    fn expand_macro_invocation(&self, _text: &str, bytes: &[u8], i: usize, ident: &str,
+                               mac: &MacroDef, result: &mut String,
+                               expanding: &mut FxHashSet<String>) -> usize {
+        let len = bytes.len();
+        if mac.is_function_like {
+            let mut j = i;
+            while j < len && bytes[j].is_ascii_whitespace() { j += 1; }
+            if j < len && bytes[j] == b'(' {
+                let (args, end_pos) = self.parse_macro_args(bytes, j);
+                let mut i = end_pos;
+                let expanded = self.expand_function_macro(mac, &args, expanding);
+                let (expanded, new_i) = self.expand_trailing_func_macros(expanded, bytes, i, expanding);
+                i = new_i;
+                let next = if i < len { Some(bytes[i]) } else { None };
+                Self::append_with_paste_guard(result, &expanded, next);
+                return i;
+            }
+            result.push_str(ident);
+            return i;
+        }
+
+        // Object-like macro
+        expanding.insert(ident.to_string());
+        let expanded = self.expand_text(&mac.body, expanding);
+        expanding.remove(ident);
+
+        if let Some((func_expanded, end_pos)) =
+            self.try_resolve_objlike_to_funclike(&expanded, bytes, i, expanding)
+        {
+            result.push_str(&func_expanded);
+            return end_pos;
+        }
+
+        let next = if i < len { Some(bytes[i]) } else { None };
+        Self::append_with_paste_guard(result, &expanded, next);
+        i
+    }
+
+    /// Copy a C-style block comment verbatim.
+    fn copy_block_comment(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+        let len = bytes.len();
+        result.push('/');
+        result.push('*');
+        i += 2;
+        while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        if i + 1 < len {
+            result.push('*');
+            result.push('/');
+            i += 2;
+        }
+        i
+    }
+
+    /// Copy a line comment verbatim.
+    fn copy_line_comment(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+        while i < bytes.len() && bytes[i] != b'\n' {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        i
+    }
+
+    /// Copy a pp-number (numeric literal) verbatim.
+    fn copy_ppnumber(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+        let len = bytes.len();
+        while i < len {
+            if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_' {
+                result.push(bytes[i] as char);
+                i += 1;
+            } else if (bytes[i] == b'+' || bytes[i] == b'-')
+                && i > 0
+                && matches!(bytes[i - 1], b'e' | b'E' | b'p' | b'P')
+            {
+                result.push(bytes[i] as char);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        i
     }
 
     /// Parse function-like macro arguments from bytes starting at the opening paren.
