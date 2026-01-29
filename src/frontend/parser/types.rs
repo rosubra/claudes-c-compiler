@@ -857,49 +857,87 @@ impl Parser {
             self.skip_cv_qualifiers();
         }
         // Handle parenthesized abstract declarators: (*), (*)(params), (*)[N], (*[3][4])
+        // Also handles nested function pointers: (*(*)(params))(params)
         if matches!(self.peek(), TokenKind::LParen) {
             let save = self.pos;
-            if let Some((ptr_depth, inner_array_dims)) = self.try_parse_paren_abstract_declarator() {
-                if matches!(self.peek(), TokenKind::LParen) {
-                    // Function pointer cast: (*)(params)
-                    let (params, variadic) = self.parse_param_list();
-                    for _ in 0..ptr_depth.saturating_sub(1) {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
-                    }
-                    result_type = TypeSpecifier::FunctionPointer(Box::new(result_type), params, variadic);
-                    // Wrap with inner array dims (for array of function pointers)
-                    for dim in inner_array_dims.into_iter().rev() {
-                        result_type = TypeSpecifier::Array(Box::new(result_type), dim);
-                    }
-                } else if matches!(self.peek(), TokenKind::LBracket) || !inner_array_dims.is_empty() {
-                    // Pointer to array: (*)[N] or (*[3][4])[2]
-                    // First apply outer array dims (after ')') to the base type
-                    // Collect dims and apply in reverse (rightmost is innermost)
-                    let mut outer_dims: Vec<Option<Box<Expr>>> = Vec::new();
-                    while matches!(self.peek(), TokenKind::LBracket) {
-                        self.advance();
-                        let size = if matches!(self.peek(), TokenKind::RBracket) {
-                            None
+            if let Some(paren_decl) = self.try_parse_paren_abstract_declarator() {
+                use super::declarators::ParenAbstractDecl;
+                match paren_decl {
+                    ParenAbstractDecl::Simple { ptr_depth, array_dims: inner_array_dims } => {
+                        if matches!(self.peek(), TokenKind::LParen) {
+                            // Function pointer cast: (*)(params)
+                            let (params, variadic) = self.parse_param_list();
+                            for _ in 0..ptr_depth.saturating_sub(1) {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                            result_type = TypeSpecifier::FunctionPointer(Box::new(result_type), params, variadic);
+                            // Wrap with inner array dims (for array of function pointers)
+                            for dim in inner_array_dims.into_iter().rev() {
+                                result_type = TypeSpecifier::Array(Box::new(result_type), dim);
+                            }
+                        } else if matches!(self.peek(), TokenKind::LBracket) || !inner_array_dims.is_empty() {
+                            // Pointer to array: (*)[N] or (*[3][4])[2]
+                            let mut outer_dims: Vec<Option<Box<Expr>>> = Vec::new();
+                            while matches!(self.peek(), TokenKind::LBracket) {
+                                self.advance();
+                                let size = if matches!(self.peek(), TokenKind::RBracket) {
+                                    None
+                                } else {
+                                    Some(Box::new(self.parse_expr()))
+                                };
+                                self.expect(&TokenKind::RBracket);
+                                outer_dims.push(size);
+                            }
+                            for dim in outer_dims.into_iter().rev() {
+                                result_type = TypeSpecifier::Array(Box::new(result_type), dim);
+                            }
+                            for _ in 0..ptr_depth {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                            for dim in inner_array_dims.into_iter().rev() {
+                                result_type = TypeSpecifier::Array(Box::new(result_type), dim);
+                            }
                         } else {
-                            Some(Box::new(self.parse_expr()))
-                        };
-                        self.expect(&TokenKind::RBracket);
-                        outer_dims.push(size);
+                            for _ in 0..ptr_depth {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                        }
                     }
-                    for dim in outer_dims.into_iter().rev() {
-                        result_type = TypeSpecifier::Array(Box::new(result_type), dim);
-                    }
-                    // Then wrap with pointer(s)
-                    for _ in 0..ptr_depth {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
-                    }
-                    // Then wrap with inner array dims (outermost arrays)
-                    for dim in inner_array_dims.into_iter().rev() {
-                        result_type = TypeSpecifier::Array(Box::new(result_type), dim);
-                    }
-                } else {
-                    for _ in 0..ptr_depth {
-                        result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                    ParenAbstractDecl::NestedFnPtr {
+                        outer_ptr_depth, inner_ptr_depth,
+                        inner_params, inner_variadic,
+                    } => {
+                        // Nested function pointer: (*(*)(inner_params))(outer_params)
+                        // e.g., void(*(*)(void*))(void):
+                        //   base = void, inner_params = [void*], outer_params = [void]
+                        //   Result: Pointer(FunctionPointer(
+                        //       return_type = FunctionPointer(return_type=void, params=[], variadic=false),
+                        //       params = [Pointer(Void)],
+                        //       variadic = false))
+                        if matches!(self.peek(), TokenKind::LParen) {
+                            let (outer_params, outer_variadic) = self.parse_param_list();
+                            // Build the return type: function pointer returning base type
+                            for _ in 0..inner_ptr_depth.saturating_sub(1) {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                            let return_fn_type = TypeSpecifier::FunctionPointer(
+                                Box::new(result_type), outer_params, outer_variadic
+                            );
+                            // Build the outer function: takes inner_params, returns return_fn_type
+                            result_type = TypeSpecifier::FunctionPointer(
+                                Box::new(return_fn_type), inner_params, inner_variadic
+                            );
+                            // Apply extra outer pointer levels (for outer_ptr_depth > 1)
+                            for _ in 0..outer_ptr_depth.saturating_sub(1) {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                        } else {
+                            // No outer params - treat as simple pointer
+                            let total = outer_ptr_depth + inner_ptr_depth;
+                            for _ in 0..total {
+                                result_type = TypeSpecifier::Pointer(Box::new(result_type), AddressSpace::Default);
+                            }
+                        }
                     }
                 }
             } else {

@@ -25,6 +25,7 @@ PASSING projects (confirmed):
 - tree, sinit, minunit, greatest, dnsmasq (misc)
 - tdb, sophia, shapelib, minilzo, lwrb (data/compression)
 - tinn (neural net)
+- sqlite (database - FIXED function pointer cast parsing; passes x86/RISC-V/i686; ARM has pre-existing runtime segfault)
 
 FAILING projects (investigated):
 - yyjson: cmake build fails
@@ -39,7 +40,7 @@ FAILING projects (investigated):
 - blosc: build fails (linking)
 - bearssl: 441 parse errors in ghash_pclmul.c (inline asm)
 - libtomcrypt: linker error
-- sqlite: 17 parse errors (function pointer cast syntax)
+- sqlite: FIXED - function pointer cast parsing (passes x86/RISC-V/i686; ARM has pre-existing runtime segfault)
 - libexpat: linker error
 - libpcap: undeclared HCIGETDEVINFO
 - sokol: links now (constructor fix), but segfaults at runtime

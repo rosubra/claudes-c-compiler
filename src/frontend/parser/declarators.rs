@@ -11,6 +11,27 @@ use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::{ModeKind, Parser};
 
+/// Result of parsing a parenthesized abstract declarator.
+pub(super) enum ParenAbstractDecl {
+    /// Simple pointer/array grouping: (*), (**), (*[3][4])
+    Simple {
+        ptr_depth: u32,
+        array_dims: Vec<Option<Box<Expr>>>,
+    },
+    /// Nested function pointer inside outer parens: (*(*)(params))
+    /// Used for types like void(*(*)(void*))(void) - pointer to function
+    /// returning a function pointer.
+    NestedFnPtr {
+        /// Outer pointer depth (the * before the inner fn ptr group)
+        outer_ptr_depth: u32,
+        /// Inner pointer depth (the * in the inner-most (*) group)
+        inner_ptr_depth: u32,
+        /// Parameter list of the inner function pointer
+        inner_params: Vec<ParamDecl>,
+        inner_variadic: bool,
+    },
+}
+
 impl Parser {
     pub(super) fn parse_declarator(&mut self) -> (Option<String>, Vec<DerivedDeclarator>) {
         let (name, derived, _, _, _) = self.parse_declarator_with_attrs();
@@ -656,11 +677,10 @@ impl Parser {
     }
 
     /// Try to parse a parenthesized abstract declarator: (*), ((*)), (**), (*[3][4])
-    /// Returns (pointer_depth, inner_array_dims) if successful, None otherwise.
-    /// Inner array dims are array sizes parsed inside the parens after the pointer(s),
-    /// e.g. (*[3][4]) returns (1, vec![Some(3), Some(4)]).
+    /// Also handles nested function pointers: (*(*)(params))
+    /// Returns a ParenAbstractDecl if successful, None otherwise.
     /// Restores position on failure.
-    pub(super) fn try_parse_paren_abstract_declarator(&mut self) -> Option<(u32, Vec<Option<Box<Expr>>>)> {
+    pub(super) fn try_parse_paren_abstract_declarator(&mut self) -> Option<ParenAbstractDecl> {
         if !matches!(self.peek(), TokenKind::LParen) {
             return None;
         }
@@ -682,25 +702,61 @@ impl Parser {
 
         // Check for nested: (* (...))
         if matches!(self.peek(), TokenKind::LParen) {
-            if let Some((inner_ptrs, inner_dims)) = self.try_parse_paren_abstract_declarator() {
-                total_ptrs += inner_ptrs;
-                // Parse any array dims after the nested group but before ')'
-                let mut array_dims = inner_dims;
-                while matches!(self.peek(), TokenKind::LBracket) {
-                    self.advance();
-                    let size = if matches!(self.peek(), TokenKind::RBracket) {
-                        None
-                    } else {
-                        Some(Box::new(self.parse_expr()))
-                    };
-                    self.expect(&TokenKind::RBracket);
-                    array_dims.push(size);
-                }
-                if self.consume_if(&TokenKind::RParen) {
-                    return Some((total_ptrs, array_dims));
-                } else {
-                    self.pos = save;
-                    return None;
+            if let Some(inner) = self.try_parse_paren_abstract_declarator() {
+                match inner {
+                    ParenAbstractDecl::Simple { ptr_depth: inner_ptrs, array_dims: inner_dims } => {
+                        // After inner (*), check if a parameter list follows — making this
+                        // a nested function pointer: (*(*)(params))
+                        if matches!(self.peek(), TokenKind::LParen) {
+                            // This is a function pointer inside the outer parens
+                            // e.g., (*(*)(void*)) — inner (*) + (void*) forms a fn ptr
+                            let (params, variadic) = self.parse_param_list();
+                            // Now expect the closing ')' of the outer group
+                            if self.consume_if(&TokenKind::RParen) {
+                                return Some(ParenAbstractDecl::NestedFnPtr {
+                                    outer_ptr_depth: total_ptrs,
+                                    inner_ptr_depth: inner_ptrs,
+                                    inner_params: params,
+                                    inner_variadic: variadic,
+                                });
+                            } else {
+                                self.pos = save;
+                                return None;
+                            }
+                        }
+                        // Otherwise, handle as before: simple nested grouping
+                        let combined_ptrs = total_ptrs + inner_ptrs;
+                        let mut array_dims = inner_dims;
+                        while matches!(self.peek(), TokenKind::LBracket) {
+                            self.advance();
+                            let size = if matches!(self.peek(), TokenKind::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr()))
+                            };
+                            self.expect(&TokenKind::RBracket);
+                            array_dims.push(size);
+                        }
+                        if self.consume_if(&TokenKind::RParen) {
+                            return Some(ParenAbstractDecl::Simple {
+                                ptr_depth: combined_ptrs,
+                                array_dims,
+                            });
+                        } else {
+                            self.pos = save;
+                            return None;
+                        }
+                    }
+                    ParenAbstractDecl::NestedFnPtr { .. } => {
+                        // Deeply nested fn ptrs: just close the outer group
+                        // TODO: support deeper nesting if needed
+                        if self.consume_if(&TokenKind::RParen) {
+                            return Some(inner);
+                        } else {
+                            self.pos = save;
+                            return None;
+                        }
+                    }
                 }
             } else {
                 self.pos = save;
@@ -723,7 +779,7 @@ impl Parser {
 
         if self.consume_if(&TokenKind::RParen) {
             if total_ptrs > 0 || !array_dims.is_empty() {
-                Some((total_ptrs, array_dims))
+                Some(ParenAbstractDecl::Simple { ptr_depth: total_ptrs, array_dims })
             } else {
                 self.pos = save;
                 None
