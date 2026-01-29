@@ -165,6 +165,110 @@ const MAX_TRACE_CHAIN_LENGTH: usize = 20;
 /// trees where both operands themselves need recursive tracing.
 const MAX_TRACE_RECURSION_DEPTH: u32 = 10;
 
+/// Select the best call site to inline from the given candidates.
+///
+/// Uses a two-pass strategy:
+/// 1. First pass: pick tiny/small/static-inline callees (always inlined for
+///    code correctness, e.g., constant-returning stubs, linker symbol resolution).
+/// 2. Second pass: pick the first eligible normal callee that fits within
+///    budget and caller size constraints.
+///
+/// Returns `(site, callee_inst_count, use_relaxed)` or `None` if no eligible site.
+fn select_inline_site(
+    call_sites: &[InlineCallSite],
+    callee_map: &HashMap<String, CalleeData>,
+    caller_too_large: bool,
+    caller_at_hard_cap: bool,
+    caller_at_absolute_cap: bool,
+    caller_has_section: bool,
+    budget_remaining: usize,
+    always_inline_budget_remaining: usize,
+) -> Option<(InlineCallSite, usize, bool)> {
+    // First pass: look for tiny/small callees anywhere in the function.
+    // These are always inlined regardless of caller size because:
+    // 1. They have negligible impact on code/stack size
+    // 2. Not inlining them can cause linker errors from conditional
+    //    references to undefined symbols (e.g., fscache_clear_page_bits)
+    //
+    // However, once the always_inline budget is exhausted, only TINY
+    // callees (≤5 instructions, single block) are picked. Small callees
+    // (6-20 instructions) individually have "negligible" impact but
+    // collectively cause catastrophic stack bloat when a function has
+    // 200+ always_inline call sites (e.g., kernel's shrink_folio_list).
+    let budget_exhausted = always_inline_budget_remaining == 0;
+    for site in call_sites {
+        let callee_data = &callee_map[&site.callee_name];
+        let callee_inst_count: usize = callee_data.blocks.iter()
+            .map(|b| b.instructions.len())
+            .sum();
+        let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
+            && callee_data.blocks.len() <= 1;
+        let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
+            && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
+        // Static inline functions that fit within normal limits should
+        // always be inlined, matching GCC behavior. This is critical for
+        // functions like ror32 (35 instructions) called from blake2s: without
+        // inlining, shift amounts can't be constant-propagated, producing
+        // massive unoptimized code with 28KB+ stack frames that overflow
+        // the kernel's 16KB stack.
+        let is_static_inline_eligible = callee_data.is_static_inline
+            && callee_inst_count <= MAX_INLINE_INSTRUCTIONS
+            && callee_data.blocks.len() <= MAX_INLINE_BLOCKS;
+        if is_tiny || (is_small && !budget_exhausted) || is_static_inline_eligible {
+            let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
+            return Some((site.clone(), callee_inst_count, use_relaxed));
+        }
+    }
+
+    // Second pass: use the first eligible normal callee.
+    for site in call_sites {
+        let callee_data = &callee_map[&site.callee_name];
+        let callee_inst_count: usize = callee_data.blocks.iter()
+            .map(|b| b.instructions.len())
+            .sum();
+        // When the caller has a section attribute (e.g., .init.text),
+        // allow inlining small callees even into large callers to
+        // prevent section mismatch errors.
+        if caller_too_large && !callee_data.is_always_inline {
+            if !caller_has_section || callee_inst_count > MAX_SMALL_INLINE_INSTRUCTIONS {
+                continue;
+            }
+        }
+        // Absolute cap: stop normal inlining for extremely large callers.
+        // always_inline callees MUST still be inlined (C semantic requirement).
+        if caller_at_absolute_cap && !callee_data.is_always_inline {
+            continue;
+        }
+        // Hard cap: stop normal inlining to prevent kernel stack overflow.
+        // always_inline callees MUST be inlined regardless of caller size.
+        if caller_at_hard_cap && !callee_data.is_always_inline {
+            continue;
+        }
+        let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
+        // Budget enforcement: always_inline callees use a separate budget;
+        // non-always_inline callees use the normal budget.
+        if callee_data.is_always_inline {
+            // When the caller has a section attribute, always_inline callees
+            // bypass the budget entirely (critical for kernel init functions
+            // like intel_pmu_init that call hundreds of always_inline helpers).
+            if !caller_has_section {
+                let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= 1;
+                if !is_tiny && callee_inst_count > always_inline_budget_remaining {
+                    continue;
+                }
+            }
+        } else {
+            if callee_inst_count > budget_remaining {
+                continue;
+            }
+        }
+        return Some((site.clone(), callee_inst_count, use_relaxed));
+    }
+
+    None
+}
+
 /// Run the inlining pass on the module.
 /// Returns the number of call sites inlined.
 pub fn run(module: &mut IrModule) -> usize {
@@ -239,147 +343,17 @@ pub fn run(module: &mut IrModule) -> usize {
                 break;
             }
 
-            // Inline one call site per round. After inlining, block indices shift,
-            // so we must re-scan to get correct indices for subsequent call sites.
-            // When the caller is too large, skip non-always_inline callees instead
-            // of breaking, so that always_inline callees (which must be inlined per
-            // C semantics) are still processed.
-            //
-            // Prioritize tiny callees (≤ MAX_TINY_INLINE_INSTRUCTIONS, single block):
-            // Scan ALL call sites for tiny callees first, then fall back to the first
-            // eligible normal callee. This ensures critical constant-returning stubs
-            // (e.g., folio_test_large_rmappable returning false) are inlined even in
-            // very large functions with many earlier call sites. Without this priority,
-            // the max_rounds limit may be exhausted before reaching the tiny call site
-            // deep in the function's block list.
-            let mut found_site = None;
-            // First pass: look for tiny/small callees anywhere in the function.
-            // These are always inlined regardless of caller size because:
-            // 1. They have negligible impact on code/stack size
-            // 2. Not inlining them can cause linker errors from conditional
-            //    references to undefined symbols (e.g., fscache_clear_page_bits)
-            //
-            // However, once the always_inline budget is exhausted, only TINY
-            // callees (≤5 instructions, single block) are picked. Small callees
-            // (6-20 instructions) individually have "negligible" impact but
-            // collectively cause catastrophic stack bloat when a function has
-            // 200+ always_inline call sites (e.g., kernel's shrink_folio_list).
-            let budget_exhausted = always_inline_budget_remaining == 0;
-            for site in &call_sites {
-                let callee_data = &callee_map[&site.callee_name];
-                let callee_inst_count: usize = callee_data.blocks.iter()
-                    .map(|b| b.instructions.len())
-                    .sum();
-                let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
-                    && callee_data.blocks.len() <= 1;
-                let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
-                    && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
-                // Static inline functions that fit within normal limits should
-                // always be inlined, matching GCC behavior. This is critical for
-                // functions like ror32 (35 instructions) called from blake2s: without
-                // inlining, shift amounts can't be constant-propagated, producing
-                // massive unoptimized code with 28KB+ stack frames that overflow
-                // the kernel's 16KB stack.
-                let is_static_inline_eligible = callee_data.is_static_inline
-                    && callee_inst_count <= MAX_INLINE_INSTRUCTIONS
-                    && callee_data.blocks.len() <= MAX_INLINE_BLOCKS;
-                if is_tiny || (is_small && !budget_exhausted) || is_static_inline_eligible {
-                    let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
-                    found_site = Some((site.clone(), callee_inst_count, use_relaxed));
-                    break;
-                }
-            }
-            // Second pass: if no tiny callee found, use the first eligible normal callee.
-            if found_site.is_none() {
-                for site in &call_sites {
-                    let callee_data = &callee_map[&site.callee_name];
-                    let callee_inst_count: usize = callee_data.blocks.iter()
-                        .map(|b| b.instructions.len())
-                        .sum();
-                    // When the caller has a section attribute (e.g., .init.text),
-                    // allow inlining small callees even into large callers to
-                    // prevent section mismatch errors. Example: cpu_select_mitigations
-                    // (.init.text) inlines ssb_select_mitigation which calls
-                    // __ssb_select_mitigation (.init.text). Without inlining the
-                    // wrapper, the .text -> .init.text reference triggers modpost errors.
-                    if caller_too_large && !callee_data.is_always_inline {
-                        if !caller_has_section || callee_inst_count > MAX_SMALL_INLINE_INSTRUCTIONS {
-                            continue;
-                        }
-                    }
-                    // Absolute cap: when the caller is extremely large, stop normal
-                    // inlining to prevent kernel stack overflow. CCC's accumulator
-                    // codegen creates one stack slot per SSA value (~8 bytes), so
-                    // functions with 1000+ instructions produce 8KB+ stack frames.
-                    // always_inline callees MUST still be inlined — this is a C
-                    // semantic requirement. Not inlining them causes section mismatch
-                    // errors in the kernel when an __init caller's always_inline
-                    // helper references __initconst data but gets emitted as a
-                    // standalone .text function. GCC always inlines these regardless
-                    // of caller size.
-                    // Tiny/small callees are also still allowed (handled in first
-                    // pass above) — they're critical for linker correctness.
-                    if caller_at_absolute_cap && !callee_data.is_always_inline {
-                        continue;
-                    }
-                    // Hard cap: when the caller is extremely large, stop normal
-                    // inlining to prevent kernel stack overflow.
-                    // Tiny callees are still allowed (handled in first pass above).
-                    // always_inline callees MUST be inlined regardless of caller
-                    // size — this is a C semantic requirement. Not inlining them
-                    // causes linker errors when the function body contains inline
-                    // asm with "i" constraints that can only be resolved after
-                    // inlining (e.g., arch_static_branch's __jump_table entries).
-                    if caller_at_hard_cap && !callee_data.is_always_inline {
-                        continue;
-                    }
-                    let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
-                    // Budget enforcement for inlining decisions.
-                    //
-                    // True always_inline callees are inlined unconditionally per C
-                    // semantics — they bypass all budget checks. Not inlining them
-                    // causes section mismatch errors in the kernel (e.g., idle_init
-                    // referencing fork_idle across .text/.init.text sections).
-                    //
-                    // Non-always_inline callees (including exceeds_normal_limits)
-                    // use the normal budget (budget_remaining). This ensures they
-                    // don't consume the always_inline budget.
-                    if callee_data.is_always_inline {
-                        // always_inline callees use a separate, larger budget
-                        // (always_inline_budget_remaining) that is NOT shared
-                        // with non-always_inline callees. This prevents a large
-                        // non-always_inline callee from starving always_inline.
-                        //
-                        // When the caller has a section attribute (e.g., .init.text),
-                        // always_inline callees bypass the budget entirely. This is
-                        // critical for kernel correctness: init functions like
-                        // intel_pmu_init (.init.text) call hundreds of always_inline
-                        // helpers that reference .init.rodata. If these aren't inlined,
-                        // they appear as standalone .text functions with cross-section
-                        // references, causing modpost section mismatch errors. GCC
-                        // always inlines these regardless of function size.
-                        //
-                        // For callers WITHOUT section attributes, enforce the budget
-                        // to prevent stack overflow from deeply-nested always_inline
-                        // chains (e.g., shrink_folio_list with 200+ calls).
-                        if !caller_has_section {
-                            let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
-                                && callee_data.blocks.len() <= 1;
-                            if !is_tiny && callee_inst_count > always_inline_budget_remaining {
-                                continue;
-                            }
-                        }
-                    } else {
-                        // Non-always_inline callees use budget_remaining.
-                        // They never consume the always_inline budget.
-                        if callee_inst_count > budget_remaining {
-                            continue;
-                        }
-                    }
-                    found_site = Some((site.clone(), callee_inst_count, use_relaxed));
-                    break;
-                }
-            }
+            // Select best call site (prioritizes tiny/small, respects budgets).
+            let found_site = select_inline_site(
+                &call_sites,
+                &callee_map,
+                caller_too_large,
+                caller_at_hard_cap,
+                caller_at_absolute_cap,
+                caller_has_section,
+                budget_remaining,
+                always_inline_budget_remaining,
+            );
             let (site, callee_inst_count, _use_relaxed) = match found_site {
                 Some(s) => s,
                 None => {
