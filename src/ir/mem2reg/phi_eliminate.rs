@@ -200,245 +200,232 @@ fn find_conflicting_phis(copies: &[(u32, Option<u32>)]) -> FxHashSet<usize> {
     needs_temp
 }
 
+/// Phi information extracted from a block.
+struct PhiInfo {
+    dest: Value,
+    incoming: Vec<(Operand, BlockId)>,
+}
+
+/// Context shared across phi elimination for a single function.
+struct PhiElimCtx<'a> {
+    label_to_idx: FxHashMap<BlockId, usize>,
+    multi_succ: Vec<bool>,
+    is_indirect_branch: Vec<bool>,
+    pred_copies: FxHashMap<usize, Vec<Instruction>>,
+    target_copies: Vec<Vec<Instruction>>,
+    trampolines: Vec<TrampolineBlock>,
+    trampoline_map: FxHashMap<(usize, BlockId), usize>,
+    next_block_id: &'a mut u32,
+    next_value: u32,
+}
+
 fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
-    // Use cached next_value_id if available, otherwise scan
-    let mut next_value = if func.next_value_id > 0 {
-        func.next_value_id
-    } else {
-        func.max_value_id() + 1
+    let mut ctx = PhiElimCtx {
+        label_to_idx: func.blocks.iter().enumerate().map(|(i, b)| (b.label, i)).collect(),
+        multi_succ: func.blocks.iter().map(|b| successor_count(&b.terminator) > 1).collect(),
+        is_indirect_branch: func.blocks.iter()
+            .map(|b| matches!(&b.terminator, Terminator::IndirectBranch { .. })).collect(),
+        pred_copies: FxHashMap::default(),
+        target_copies: vec![Vec::new(); func.blocks.len()],
+        trampolines: Vec::new(),
+        trampoline_map: FxHashMap::default(),
+        next_block_id,
+        next_value: if func.next_value_id > 0 { func.next_value_id } else { func.max_value_id() + 1 },
     };
 
-    // Build label -> block index map
-    let label_to_idx: FxHashMap<BlockId, usize> = func.blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.label, i))
-        .collect();
-
-    // Determine which blocks have multiple successors (for critical edge detection)
-    let multi_succ: Vec<bool> = func.blocks.iter()
-        .map(|b| successor_count(&b.terminator) > 1)
-        .collect();
-
-    // Identify blocks that end with an IndirectBranch (computed goto).
-    // These CANNOT use trampoline blocks because the runtime jump target is a
-    // computed address that bypasses any CFG retargeting of possible_targets.
-    // Phi copies for IndirectBranch predecessors must go before the terminator
-    // in the predecessor block itself.
-    let is_indirect_branch: Vec<bool> = func.blocks.iter()
-        .map(|b| matches!(&b.terminator, Terminator::IndirectBranch { .. }))
-        .collect();
-
-    // Collect phi information from all blocks.
-    struct PhiInfo {
-        dest: Value,
-        incoming: Vec<(Operand, BlockId)>,
-    }
-
-    let mut block_phis: Vec<Vec<PhiInfo>> = Vec::new();
-    for block in &func.blocks {
-        let mut phis = Vec::new();
-        for inst in &block.instructions {
-            if let Instruction::Phi { dest, incoming, .. } = inst {
-                phis.push(PhiInfo {
-                    dest: *dest,
-                    incoming: incoming.clone(),
-                });
-            }
-        }
-        block_phis.push(phis);
-    }
-
-    // For each block with phis, determine where to place copies.
-    // If the predecessor has multiple successors (critical edge), we split the
-    // edge by creating a trampoline block for the copies.
-
-    // pred_copies: pred_block_idx -> Vec<Copy instructions>
-    // For predecessors with a single successor (safe to append copies directly).
-    let mut pred_copies: FxHashMap<usize, Vec<Instruction>> = FxHashMap::default();
-
-    // target_copies: copies to prepend at start of target blocks
-    let mut target_copies: Vec<Vec<Instruction>> = vec![Vec::new(); func.blocks.len()];
-
-    // Trampoline blocks for critical edge splitting.
-    let mut trampolines: Vec<TrampolineBlock> = Vec::new();
-
-    // Track which (pred_idx, target_block_id) pairs already have trampolines
-    let mut trampoline_map: FxHashMap<(usize, BlockId), usize> = FxHashMap::default();
+    let block_phis = collect_block_phis(func);
 
     for (block_idx, phis) in block_phis.iter().enumerate() {
         if phis.is_empty() {
             continue;
         }
-
         let target_block_id = func.blocks[block_idx].label;
-
         if phis.len() == 1 {
-            // Single phi: copy directly (no temporaries needed)
-            let phi = &phis[0];
-            for (src, pred_label) in &phi.incoming {
-                if let Some(&pred_idx) = label_to_idx.get(pred_label) {
-                    // Skip self-copies: when src is the same value as dest
-                    if let Operand::Value(v) = src {
-                        if v.0 == phi.dest.0 {
-                            continue;
-                        }
-                    }
-
-                    let copy_inst = Instruction::Copy {
-                        dest: phi.dest,
-                        src: *src,
-                    };
-
-                    if multi_succ[pred_idx] && !is_indirect_branch[pred_idx] {
-                        let tramp_idx = get_or_create_trampoline(
-                            &mut trampoline_map, &mut trampolines,
-                            pred_idx, target_block_id, next_block_id,
-                        );
-                        trampolines[tramp_idx].copies.push(copy_inst);
-                    } else {
-                        pred_copies.entry(pred_idx).or_default().push(copy_inst);
-                    }
-                }
-            }
+            emit_single_phi_copies(&phis[0], target_block_id, &mut ctx);
         } else {
-            // Multiple phis: use smart temporary allocation.
-            //
-            // Strategy: For each phi, determine if ANY predecessor edge has a
-            // conflict for that phi. If so, the phi uses a shared temporary
-            // (same temporary across all predecessors). If not, all predecessors
-            // use direct copies for that phi.
-            //
-            // This is correct because:
-            // - The temporary is shared across all predecessors, so the target
-            //   block has exactly ONE copy (temp -> dest) that works regardless
-            //   of which predecessor was taken.
-            // - Non-conflicting phis use direct copies in each predecessor,
-            //   writing directly to the phi destination.
+            emit_multi_phi_copies(phis, block_idx, target_block_id, &mut ctx);
+        }
+    }
 
-            // Collect all unique predecessor labels. Use a HashSet for O(1) dedup,
-            // which matters for large switch statements with hundreds of cases.
-            let mut pred_label_set: FxHashSet<BlockId> = FxHashSet::default();
-            let mut pred_labels: Vec<BlockId> = Vec::new();
-            for phi in phis {
-                for (_, pred_label) in &phi.incoming {
-                    if pred_label_set.insert(*pred_label) {
-                        pred_labels.push(*pred_label);
-                    }
-                }
+    apply_phi_transformations(func, &mut ctx);
+    func.next_value_id = ctx.next_value;
+}
+
+/// Collect PhiInfo from all blocks.
+fn collect_block_phis(func: &IrFunction) -> Vec<Vec<PhiInfo>> {
+    func.blocks.iter().map(|block| {
+        block.instructions.iter().filter_map(|inst| {
+            if let Instruction::Phi { dest, incoming, .. } = inst {
+                Some(PhiInfo { dest: *dest, incoming: incoming.clone() })
+            } else {
+                None
             }
+        }).collect()
+    }).collect()
+}
 
-            // Precompute per-phi source lookup tables: for each phi, build a
-            // map from predecessor BlockId to the source Operand. This avoids
-            // O(incoming) linear search per phi per predecessor in the loops below.
-            let phi_src_maps: Vec<FxHashMap<BlockId, &Operand>> = phis.iter()
-                .map(|phi| {
-                    phi.incoming.iter()
-                        .map(|(src, pred_label)| (*pred_label, src))
-                        .collect()
-                })
-                .collect();
-
-            // Analyze each predecessor edge to find which phis have conflicts.
-            // A phi is "globally conflicting" if it has a conflict on ANY edge.
-            let mut globally_needs_temp: FxHashSet<usize> = FxHashSet::default();
-
-            for pred_label in &pred_labels {
-                if !label_to_idx.contains_key(pred_label) {
-                    continue;
-                }
-
-                // Build the list of (dest, src_value_id) for this predecessor.
-                let copies_info: Vec<(u32, Option<u32>)> = phis.iter().enumerate().map(|(i, phi)| {
-                    let src_val_id = phi_src_maps[i].get(pred_label).and_then(|s| {
-                        if let Operand::Value(v) = *s { Some(v.0) } else { None }
-                    });
-                    (phi.dest.0, src_val_id)
-                }).collect();
-
-                let edge_conflicts = find_conflicting_phis(&copies_info);
-                for &i in &edge_conflicts {
-                    globally_needs_temp.insert(i);
-                }
+/// Emit copies for a block with a single phi (no temporaries needed).
+fn emit_single_phi_copies(phi: &PhiInfo, target_block_id: BlockId, ctx: &mut PhiElimCtx) {
+    for (src, pred_label) in &phi.incoming {
+        let pred_idx = match ctx.label_to_idx.get(pred_label) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        // Skip self-copies
+        if let Operand::Value(v) = src {
+            if v.0 == phi.dest.0 {
+                continue;
             }
+        }
+        let copy_inst = Instruction::Copy { dest: phi.dest, src: *src };
+        place_copy(ctx, pred_idx, target_block_id, copy_inst);
+    }
+}
 
-            // Allocate ONE shared temporary per globally-conflicting phi.
-            let mut phi_temps: Vec<Option<Value>> = vec![None; phis.len()];
-            for &i in &globally_needs_temp {
-                phi_temps[i] = Some(Value(next_value));
-                next_value += 1;
-            }
-
-            // Emit target block copies for conflicting phis (once, shared).
-            for (i, phi) in phis.iter().enumerate() {
-                if let Some(tmp) = phi_temps[i] {
-                    target_copies[block_idx].push(Instruction::Copy {
-                        dest: phi.dest,
-                        src: Operand::Value(tmp),
-                    });
-                }
-            }
-
-            // Now emit copies for each predecessor edge.
-            for pred_label in &pred_labels {
-                let pred_idx = match label_to_idx.get(pred_label) {
-                    Some(&idx) => idx,
-                    None => continue,
-                };
-
-                let mut edge_copies: Vec<Instruction> = Vec::new();
-
-                // Pass 1: Emit temporary saves for conflicting phis (must come first
-                // to capture source values before any direct copies overwrite them).
-                // Note: we cannot skip self-copies here because the target block
-                // unconditionally copies tmp -> dest for all conflicting phis.
-                for (i, _phi) in phis.iter().enumerate() {
-                    if let Some(tmp) = phi_temps[i] {
-                        if let Some(src) = phi_src_maps[i].get(pred_label) {
-                            edge_copies.push(Instruction::Copy {
-                                dest: tmp,
-                                src: *(*src),
-                            });
-                        }
-                    }
-                }
-
-                // Pass 2: Emit direct copies for non-conflicting phis.
-                for (i, phi) in phis.iter().enumerate() {
-                    if phi_temps[i].is_none() {
-                        if let Some(src) = phi_src_maps[i].get(pred_label) {
-                            // Skip self-copies
-                            if let Operand::Value(v) = *src {
-                                if v.0 == phi.dest.0 {
-                                    continue;
-                                }
-                            }
-                            edge_copies.push(Instruction::Copy {
-                                dest: phi.dest,
-                                src: *(*src),
-                            });
-                        }
-                    }
-                }
-
-                // Place copies in the appropriate location.
-                if multi_succ[pred_idx] && !is_indirect_branch[pred_idx] {
-                    let tramp_idx = get_or_create_trampoline(
-                        &mut trampoline_map, &mut trampolines,
-                        pred_idx, target_block_id, next_block_id,
-                    );
-                    trampolines[tramp_idx].copies.extend(edge_copies);
-                } else {
-                    pred_copies.entry(pred_idx).or_default().extend(edge_copies);
-                }
+/// Emit copies for a block with multiple phis, using smart temporary allocation.
+/// Shared temporaries are only allocated for phis involved in copy cycles.
+fn emit_multi_phi_copies(
+    phis: &[PhiInfo], block_idx: usize, target_block_id: BlockId,
+    ctx: &mut PhiElimCtx,
+) {
+    // Collect unique predecessor labels.
+    let mut pred_label_set: FxHashSet<BlockId> = FxHashSet::default();
+    let mut pred_labels: Vec<BlockId> = Vec::new();
+    for phi in phis {
+        for (_, pred_label) in &phi.incoming {
+            if pred_label_set.insert(*pred_label) {
+                pred_labels.push(*pred_label);
             }
         }
     }
 
-    // Apply transformations:
-    // 1. Remove phi instructions from all blocks
-    // 2. Prepend target copies
-    // 3. Insert predecessor copies (for single-successor predecessors only)
+    // Precompute per-phi source lookup tables.
+    let phi_src_maps: Vec<FxHashMap<BlockId, &Operand>> = phis.iter()
+        .map(|phi| phi.incoming.iter().map(|(src, pl)| (*pl, src)).collect())
+        .collect();
+
+    // Find which phis are globally conflicting (need temporaries on any edge).
+    let globally_needs_temp = find_globally_conflicting_phis(
+        phis, &pred_labels, &phi_src_maps, &ctx.label_to_idx,
+    );
+
+    // Allocate shared temporaries.
+    let mut phi_temps: Vec<Option<Value>> = vec![None; phis.len()];
+    for &i in &globally_needs_temp {
+        phi_temps[i] = Some(Value(ctx.next_value));
+        ctx.next_value += 1;
+    }
+
+    // Emit target block copies for conflicting phis (temp -> dest).
+    for (i, phi) in phis.iter().enumerate() {
+        if let Some(tmp) = phi_temps[i] {
+            ctx.target_copies[block_idx].push(Instruction::Copy {
+                dest: phi.dest,
+                src: Operand::Value(tmp),
+            });
+        }
+    }
+
+    // Emit copies for each predecessor edge.
+    for pred_label in &pred_labels {
+        let pred_idx = match ctx.label_to_idx.get(pred_label) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        let edge_copies = build_edge_copies(phis, &phi_temps, &phi_src_maps, pred_label);
+        place_copies(ctx, pred_idx, target_block_id, edge_copies);
+    }
+}
+
+/// Determine which phi indices are globally conflicting across all predecessor edges.
+fn find_globally_conflicting_phis(
+    phis: &[PhiInfo],
+    pred_labels: &[BlockId],
+    phi_src_maps: &[FxHashMap<BlockId, &Operand>],
+    label_to_idx: &FxHashMap<BlockId, usize>,
+) -> FxHashSet<usize> {
+    let mut globally_needs_temp: FxHashSet<usize> = FxHashSet::default();
+    for pred_label in pred_labels {
+        if !label_to_idx.contains_key(pred_label) {
+            continue;
+        }
+        let copies_info: Vec<(u32, Option<u32>)> = phis.iter().enumerate().map(|(i, phi)| {
+            let src_val_id = phi_src_maps[i].get(pred_label).and_then(|s| {
+                if let Operand::Value(v) = *s { Some(v.0) } else { None }
+            });
+            (phi.dest.0, src_val_id)
+        }).collect();
+        for &i in &find_conflicting_phis(&copies_info) {
+            globally_needs_temp.insert(i);
+        }
+    }
+    globally_needs_temp
+}
+
+/// Build the ordered copy instructions for a single predecessor edge:
+/// Pass 1 (temp saves for conflicting phis), then Pass 2 (direct copies).
+fn build_edge_copies(
+    phis: &[PhiInfo],
+    phi_temps: &[Option<Value>],
+    phi_src_maps: &[FxHashMap<BlockId, &Operand>],
+    pred_label: &BlockId,
+) -> Vec<Instruction> {
+    let mut copies = Vec::new();
+
+    // Pass 1: Emit temporary saves for conflicting phis (must come first).
+    for (i, _phi) in phis.iter().enumerate() {
+        if let Some(tmp) = phi_temps[i] {
+            if let Some(src) = phi_src_maps[i].get(pred_label) {
+                copies.push(Instruction::Copy { dest: tmp, src: *(*src) });
+            }
+        }
+    }
+
+    // Pass 2: Emit direct copies for non-conflicting phis.
+    for (i, phi) in phis.iter().enumerate() {
+        if phi_temps[i].is_none() {
+            if let Some(src) = phi_src_maps[i].get(pred_label) {
+                if let Operand::Value(v) = *src {
+                    if v.0 == phi.dest.0 { continue; } // skip self-copy
+                }
+                copies.push(Instruction::Copy { dest: phi.dest, src: *(*src) });
+            }
+        }
+    }
+
+    copies
+}
+
+/// Place a single copy instruction, using trampolines for critical edges.
+fn place_copy(ctx: &mut PhiElimCtx, pred_idx: usize, target_block_id: BlockId, copy_inst: Instruction) {
+    if ctx.multi_succ[pred_idx] && !ctx.is_indirect_branch[pred_idx] {
+        let tramp_idx = get_or_create_trampoline(
+            &mut ctx.trampoline_map, &mut ctx.trampolines,
+            pred_idx, target_block_id, ctx.next_block_id,
+        );
+        ctx.trampolines[tramp_idx].copies.push(copy_inst);
+    } else {
+        ctx.pred_copies.entry(pred_idx).or_default().push(copy_inst);
+    }
+}
+
+/// Place multiple copy instructions, using trampolines for critical edges.
+fn place_copies(ctx: &mut PhiElimCtx, pred_idx: usize, target_block_id: BlockId, copies: Vec<Instruction>) {
+    if copies.is_empty() { return; }
+    if ctx.multi_succ[pred_idx] && !ctx.is_indirect_branch[pred_idx] {
+        let tramp_idx = get_or_create_trampoline(
+            &mut ctx.trampoline_map, &mut ctx.trampolines,
+            pred_idx, target_block_id, ctx.next_block_id,
+        );
+        ctx.trampolines[tramp_idx].copies.extend(copies);
+    } else {
+        ctx.pred_copies.entry(pred_idx).or_default().extend(copies);
+    }
+}
+
+/// Apply all phi elimination transformations to the function:
+/// remove phis, insert copies, retarget terminators, add trampolines.
+fn apply_phi_transformations(func: &mut IrFunction, ctx: &mut PhiElimCtx) {
     for (block_idx, block) in func.blocks.iter_mut().enumerate() {
         // Remove phi instructions (and their spans)
         if !block.source_spans.is_empty() {
@@ -452,9 +439,9 @@ fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
         block.instructions.retain(|inst| !matches!(inst, Instruction::Phi { .. }));
 
         // Prepend target copies (these go at the start, replacing the phis)
-        if !target_copies[block_idx].is_empty() {
-            let num_copies = target_copies[block_idx].len();
-            let mut new_insts = target_copies[block_idx].clone();
+        if !ctx.target_copies[block_idx].is_empty() {
+            let num_copies = ctx.target_copies[block_idx].len();
+            let mut new_insts = ctx.target_copies[block_idx].clone();
             new_insts.append(&mut block.instructions);
             block.instructions = new_insts;
             if !block.source_spans.is_empty() {
@@ -464,8 +451,8 @@ fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
             }
         }
 
-        // Insert predecessor copies before terminator (only for single-successor blocks)
-        if let Some(copies) = pred_copies.remove(&block_idx) {
+        // Insert predecessor copies before terminator
+        if let Some(copies) = ctx.pred_copies.remove(&block_idx) {
             let num_copies = copies.len();
             block.instructions.extend(copies);
             if !block.source_spans.is_empty() {
@@ -474,8 +461,8 @@ fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
         }
     }
 
-    // 4. Retarget predecessors that need trampolines
-    for trampoline in &trampolines {
+    // Retarget predecessors that need trampolines
+    for trampoline in &ctx.trampolines {
         retarget_terminator_once(
             &mut func.blocks[trampoline.pred_idx].terminator,
             trampoline.old_target,
@@ -483,8 +470,8 @@ fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
         );
     }
 
-    // 5. Append trampoline blocks to the function
-    for trampoline in trampolines {
+    // Append trampoline blocks to the function
+    for trampoline in std::mem::take(&mut ctx.trampolines) {
         let num_copies = trampoline.copies.len();
         func.blocks.push(BasicBlock {
             label: trampoline.label,
@@ -493,9 +480,6 @@ fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
             terminator: Terminator::Branch(trampoline.branch_target),
         });
     }
-
-    // Update cached next_value_id for downstream passes
-    func.next_value_id = next_value;
 }
 
 #[cfg(test)]
