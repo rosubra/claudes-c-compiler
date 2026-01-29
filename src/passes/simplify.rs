@@ -188,9 +188,9 @@ fn try_simplify(
             }
             None
         }
-        Instruction::Call { dest, func, args, return_type, .. } => {
-            if let Some(d) = dest {
-                simplify_math_call(*d, func, args, *return_type)
+        Instruction::Call { func, info } => {
+            if let Some(d) = info.dest {
+                simplify_math_call(d, func, &info.args, info.return_type)
             } else {
                 None
             }
@@ -1050,17 +1050,19 @@ mod tests {
 
     fn make_call(func_name: &str, args: Vec<Operand>, return_type: IrType) -> Instruction {
         Instruction::Call {
-            dest: Some(Value(10)),
             func: func_name.to_string(),
-            args,
-            arg_types: vec![],
-            return_type,
-            is_variadic: false,
-            num_fixed_args: 0,
-            struct_arg_sizes: vec![],
-            struct_arg_classes: Vec::new(),
-            is_sret: false,
-            is_fastcall: false,
+            info: CallInfo {
+                dest: Some(Value(10)),
+                args,
+                arg_types: vec![],
+                return_type,
+                is_variadic: false,
+                num_fixed_args: 0,
+                struct_arg_sizes: vec![],
+                struct_arg_classes: Vec::new(),
+                is_sret: false,
+                is_fastcall: false,
+            },
         }
     }
 

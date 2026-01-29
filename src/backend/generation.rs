@@ -286,8 +286,8 @@ fn build_global_addr_ptr_set(func: &IrFunction) -> FxHashSet<u32> {
                 }
                 // Conservatively mark GlobalAddr passed to function calls as pointer use,
                 // since the callee may dereference it
-                Instruction::Call { args, .. } | Instruction::CallIndirect { args, .. } => {
-                    for arg in args {
+                Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => {
+                    for arg in &info.args {
                         mark_op(arg, &global_addrs, &derived_from, &mut ptr_set);
                     }
                 }
@@ -1099,10 +1099,10 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                         cg.emit_store(val, ptr, *ty);
                     }
                 }
-                Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret, is_fastcall } =>
-                    cg.emit_call(args, arg_types, Some(func), None, *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes, *is_sret, *is_fastcall),
-                Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret, is_fastcall } =>
-                    cg.emit_call(args, arg_types, None, Some(func_ptr), *dest, *return_type, *is_variadic, *num_fixed_args, struct_arg_sizes, struct_arg_classes, *is_sret, *is_fastcall),
+                Instruction::Call { func, info } =>
+                    cg.emit_call(&info.args, &info.arg_types, Some(func), None, info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
+                Instruction::CallIndirect { func_ptr, info } =>
+                    cg.emit_call(&info.args, &info.arg_types, None, Some(func_ptr), info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_sret, info.is_fastcall),
                 Instruction::Memcpy { dest, src, size } => cg.emit_memcpy(dest, src, *size),
                 Instruction::VaArg { dest, va_list_ptr, result_ty } => cg.emit_va_arg(dest, va_list_ptr, *result_ty),
                 Instruction::VaStart { va_list_ptr } => cg.emit_va_start(va_list_ptr),

@@ -641,10 +641,10 @@ fn for_each_used_value(inst: &Instruction, f: &mut impl FnMut(Value)) {
         Instruction::BinOp { lhs, rhs, .. } => { visit_operand(lhs, f); visit_operand(rhs, f); }
         Instruction::UnaryOp { src, .. } => visit_operand(src, f),
         Instruction::Cmp { lhs, rhs, .. } => { visit_operand(lhs, f); visit_operand(rhs, f); }
-        Instruction::Call { args, .. } => { for a in args { visit_operand(a, f); } }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
+        Instruction::Call { info, .. } => { for a in &info.args { visit_operand(a, f); } }
+        Instruction::CallIndirect { func_ptr, info } => {
             visit_operand(func_ptr, f);
-            for a in args { visit_operand(a, f); }
+            for a in &info.args { visit_operand(a, f); }
         }
         Instruction::GetElementPtr { base, offset, .. } => { f(*base); visit_operand(offset, f); }
         Instruction::Cast { src, .. } | Instruction::Copy { src, .. } => visit_operand(src, f),

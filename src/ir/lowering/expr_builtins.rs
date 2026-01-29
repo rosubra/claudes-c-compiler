@@ -179,12 +179,13 @@ impl Lowerer {
                     .unwrap_or(crate::common::types::target_int_ir_type());
                 let struct_arg_sizes = vec![None; arg_vals.len()];
                 self.emit(Instruction::Call {
-                    dest: Some(dest), func: libc_name.clone(),
-                    args: arg_vals, arg_types, return_type, is_variadic: variadic, num_fixed_args: n_fixed,
-                    struct_arg_sizes,
-                    struct_arg_classes: Vec::new(),
-                    is_sret: false,
-                    is_fastcall: false,
+                    func: libc_name.clone(),
+                    info: CallInfo {
+                        dest: Some(dest), args: arg_vals, arg_types,
+                        return_type, is_variadic: variadic, num_fixed_args: n_fixed,
+                        struct_arg_sizes, struct_arg_classes: Vec::new(),
+                        is_sret: false, is_fastcall: false,
+                    },
                 });
                 Some(Operand::Value(dest))
             }

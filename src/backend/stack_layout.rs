@@ -160,12 +160,12 @@ fn compute_coalescable_allocas(
             // Alloca pointers passed to calls are marked as escaped since the
             // callee may store the pointer in a data structure that outlives the call.
             match inst {
-                Instruction::Call { args, .. } | Instruction::CallIndirect { args, .. } => {
+                Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => {
                     // Mark allocas passed as call arguments as escaped.
                     // The callee may store the pointer in a data structure that
                     // outlives the call (e.g. Lua GC roots, linked lists, callbacks).
                     // Coalescing such allocas with others can cause memory corruption.
-                    for arg in args {
+                    for arg in &info.args {
                         if let Operand::Value(v) = arg {
                             if alloca_set.contains(&v.0) {
                                 escaped.insert(v.0);

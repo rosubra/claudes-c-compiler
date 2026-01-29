@@ -267,14 +267,14 @@ fn for_each_instruction_use(inst: &Instruction, mut f: impl FnMut(u32)) {
             visit_operand(lhs, &mut f);
             visit_operand(rhs, &mut f);
         }
-        Instruction::Call { args, .. } => {
-            for arg in args {
+        Instruction::Call { info, .. } => {
+            for arg in &info.args {
                 visit_operand(arg, &mut f);
             }
         }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
+        Instruction::CallIndirect { func_ptr, info } => {
             visit_operand(func_ptr, &mut f);
-            for arg in args {
+            for arg in &info.args {
                 visit_operand(arg, &mut f);
             }
         }
@@ -472,17 +472,19 @@ mod tests {
             label: BlockId(0),
             instructions: vec![
                 Instruction::Call {
-                    dest: Some(Value(0)),
                     func: "printf".to_string(),
-                    args: vec![],
-                    arg_types: vec![],
-                    return_type: IrType::I32,
-                    is_variadic: true,
-                    num_fixed_args: 0,
-                    struct_arg_sizes: vec![],
-                    struct_arg_classes: Vec::new(),
-                    is_sret: false,
-                    is_fastcall: false,
+                    info: CallInfo {
+                        dest: Some(Value(0)),
+                        args: vec![],
+                        arg_types: vec![],
+                        return_type: IrType::I32,
+                        is_variadic: true,
+                        num_fixed_args: 0,
+                        struct_arg_sizes: vec![],
+                        struct_arg_classes: Vec::new(),
+                        is_sret: false,
+                        is_fastcall: false,
+                    },
                 },
             ],
             terminator: Terminator::Return(None),

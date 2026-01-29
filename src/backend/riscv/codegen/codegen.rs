@@ -49,16 +49,11 @@ fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize 
     let mut max_gp = 0usize;
     for block in &func.blocks {
         for inst in &block.instructions {
-            let (args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic) = match inst {
-                Instruction::Call { args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, .. } => {
-                    (args, arg_types, struct_arg_sizes, struct_arg_classes, *is_variadic)
-                }
-                Instruction::CallIndirect { args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, .. } => {
-                    (args, arg_types, struct_arg_sizes, struct_arg_classes, *is_variadic)
-                }
+            let info = match inst {
+                Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => info,
                 _ => continue,
             };
-            let classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_classes, is_variadic, config);
+            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_classes, info.is_variadic, config);
             let gp_count = classes.iter().filter(|c| matches!(c, CallArgClass::IntReg { .. })).count();
             if gp_count > max_gp {
                 max_gp = gp_count;

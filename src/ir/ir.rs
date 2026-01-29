@@ -1,5 +1,5 @@
 use crate::common::source::Span;
-use crate::common::types::{AddressSpace, IrType};
+use crate::common::types::{AddressSpace, EightbyteClass, IrType};
 
 /// A basic block identifier. Uses a u32 index for zero-cost copies
 /// instead of heap-allocated String labels. The block's assembly label
@@ -257,6 +257,36 @@ pub struct BasicBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(pub u32);
 
+/// Shared call metadata for both direct and indirect function calls.
+///
+/// This struct consolidates the fields that are common to `Instruction::Call` and
+/// `Instruction::CallIndirect`, avoiding duplication across match arms and making
+/// it easier to add new call-related fields in the future.
+#[derive(Debug, Clone)]
+pub struct CallInfo {
+    /// Destination value for the return, or None for void calls.
+    pub dest: Option<Value>,
+    /// Argument operands.
+    pub args: Vec<Operand>,
+    /// Type of each argument (parallel to `args`).
+    pub arg_types: Vec<IrType>,
+    /// Return type of the callee.
+    pub return_type: IrType,
+    /// Whether the callee is variadic.
+    pub is_variadic: bool,
+    /// Number of named (non-variadic) parameters in the callee's prototype.
+    /// For non-variadic calls, this equals args.len().
+    pub num_fixed_args: usize,
+    /// Which args are struct/union by-value: Some(size) for struct args, None otherwise.
+    pub struct_arg_sizes: Vec<Option<usize>>,
+    /// Per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class passing).
+    pub struct_arg_classes: Vec<Vec<EightbyteClass>>,
+    /// True if the call uses a hidden pointer argument for struct returns (i386 SysV ABI).
+    pub is_sret: bool,
+    /// True if the callee uses the fastcall calling convention.
+    pub is_fastcall: bool,
+}
+
 /// An IR instruction.
 #[derive(Debug, Clone)]
 pub enum Instruction {
@@ -287,19 +317,11 @@ pub enum Instruction {
     /// Comparison: %dest = cmp op lhs, rhs
     Cmp { dest: Value, op: IrCmpOp, lhs: Operand, rhs: Operand, ty: IrType },
 
-    /// Function call: %dest = call func(args...)
-    /// `num_fixed_args` is the number of named (non-variadic) parameters in the callee's prototype.
-    /// For non-variadic calls, this equals args.len(). For variadic calls, args beyond num_fixed_args
-    /// are variadic and may need different calling convention handling (e.g., floats in GP regs on AArch64).
-    /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct args, None otherwise.
-    /// `struct_arg_classes` carries per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class struct passing).
-    /// `is_sret`: true if the call uses a hidden pointer argument for struct returns (i386 SysV ABI).
-    Call { dest: Option<Value>, func: String, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>>, is_sret: bool, is_fastcall: bool },
+    /// Direct function call: %dest = call func(args...)
+    Call { func: String, info: CallInfo },
 
     /// Indirect function call through a pointer: %dest = call_indirect ptr(args...)
-    /// `struct_arg_sizes` indicates which args are struct/union by-value: Some(size) for struct args, None otherwise.
-    /// `struct_arg_classes` carries per-eightbyte SysV ABI classification for struct args (for x86-64 SSE-class struct passing).
-    CallIndirect { dest: Option<Value>, func_ptr: Operand, args: Vec<Operand>, arg_types: Vec<IrType>, return_type: IrType, is_variadic: bool, num_fixed_args: usize, struct_arg_sizes: Vec<Option<usize>>, struct_arg_classes: Vec<Vec<crate::common::types::EightbyteClass>>, is_sret: bool, is_fastcall: bool },
+    CallIndirect { func_ptr: Operand, info: CallInfo },
 
     /// Get element pointer (for arrays/structs)
     GetElementPtr { dest: Value, base: Value, offset: Operand, ty: IrType },
@@ -1359,8 +1381,8 @@ impl Instruction {
             Instruction::UnaryOp { ty, .. } => Some(*ty),
             Instruction::Cmp { .. } => Some(IrType::I8), // comparisons produce i8
             Instruction::Cast { to_ty, .. } => Some(*to_ty),
-            Instruction::Call { return_type, .. }
-            | Instruction::CallIndirect { return_type, .. } => Some(*return_type),
+            Instruction::Call { info, .. }
+            | Instruction::CallIndirect { info, .. } => Some(info.return_type),
             Instruction::VaArg { result_ty, .. } => Some(*result_ty),
             Instruction::AtomicRmw { ty, .. } => Some(*ty),
             Instruction::AtomicCmpxchg { ty, returns_bool, .. } => {
@@ -1410,8 +1432,8 @@ impl Instruction {
             | Instruction::Select { dest, .. }
             | Instruction::StackSave { dest }
             | Instruction::ParamRef { dest, .. } => Some(*dest),
-            Instruction::Call { dest, .. }
-            | Instruction::CallIndirect { dest, .. } => *dest,
+            Instruction::Call { info, .. }
+            | Instruction::CallIndirect { info, .. } => info.dest,
             Instruction::Intrinsic { dest, .. } => *dest,
             Instruction::Store { .. }
             | Instruction::Memcpy { .. }
@@ -1457,12 +1479,12 @@ impl Instruction {
                 push_operand_value(lhs, &mut used);
                 push_operand_value(rhs, &mut used);
             }
-            Instruction::Call { args, .. } => {
-                for arg in args { push_operand_value(arg, &mut used); }
+            Instruction::Call { info, .. } => {
+                for arg in &info.args { push_operand_value(arg, &mut used); }
             }
-            Instruction::CallIndirect { func_ptr, args, .. } => {
+            Instruction::CallIndirect { func_ptr, info } => {
                 push_operand_value(func_ptr, &mut used);
-                for arg in args { push_operand_value(arg, &mut used); }
+                for arg in &info.args { push_operand_value(arg, &mut used); }
             }
             Instruction::GetElementPtr { base, offset, .. } => {
                 used.push(base.0);

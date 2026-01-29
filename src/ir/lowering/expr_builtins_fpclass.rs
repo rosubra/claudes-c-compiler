@@ -24,17 +24,19 @@ impl Lowerer {
     fn emit_f128_classify_libcall(&mut self, func_name: &str, arg_val: Operand) -> Value {
         let dest = self.fresh_value();
         self.emit(Instruction::Call {
-            dest: Some(dest),
             func: func_name.to_string(),
-            args: vec![arg_val],
-            arg_types: vec![IrType::F128],
-            return_type: IrType::I32,
-            is_variadic: false,
-            num_fixed_args: 1,
-            struct_arg_sizes: vec![None],
-            struct_arg_classes: Vec::new(),
-            is_sret: false,
-            is_fastcall: false,
+            info: CallInfo {
+                dest: Some(dest),
+                args: vec![arg_val],
+                arg_types: vec![IrType::F128],
+                return_type: IrType::I32,
+                is_variadic: false,
+                num_fixed_args: 1,
+                struct_arg_sizes: vec![None],
+                struct_arg_classes: Vec::new(),
+                is_sret: false,
+                is_fastcall: false,
+            },
         });
         dest
     }

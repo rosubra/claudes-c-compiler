@@ -161,10 +161,12 @@ pub fn allocate_registers(
                         non_gpr_values.insert(dest.0);
                     }
                 }
-                Instruction::Call { dest: Some(dest), return_type, .. }
-                | Instruction::CallIndirect { dest: Some(dest), return_type, .. } => {
-                    if is_non_gpr_type(return_type) {
-                        non_gpr_values.insert(dest.0);
+                Instruction::Call { info, .. }
+                | Instruction::CallIndirect { info, .. } => {
+                    if let Some(dest) = info.dest {
+                        if is_non_gpr_type(&info.return_type) {
+                            non_gpr_values.insert(dest.0);
+                        }
                     }
                 }
                 Instruction::Select { dest, ty, .. } => {
@@ -268,14 +270,12 @@ pub fn allocate_registers(
                 // that call spin_lock, list helpers, etc.) where call results used
                 // across subsequent calls would otherwise each consume an 8-byte
                 // stack slot.
-                Instruction::Call { dest: Some(dest), return_type, .. } => {
-                    if !is_non_gpr_type(return_type) {
-                        eligible.insert(dest.0);
-                    }
-                }
-                Instruction::CallIndirect { dest: Some(dest), return_type, .. } => {
-                    if !is_non_gpr_type(return_type) {
-                        eligible.insert(dest.0);
+                Instruction::Call { info, .. }
+                | Instruction::CallIndirect { info, .. } => {
+                    if let Some(dest) = info.dest {
+                        if !is_non_gpr_type(&info.return_type) {
+                            eligible.insert(dest.0);
+                        }
                     }
                 }
                 // Select produces its result via the standard accumulator path

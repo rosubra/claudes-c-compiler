@@ -739,8 +739,8 @@ pub(super) fn for_each_operand_in_instruction(inst: &Instruction, mut f: impl Fn
         Instruction::BinOp { lhs, rhs, .. } => { f(lhs); f(rhs); }
         Instruction::UnaryOp { src, .. } => f(src),
         Instruction::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
-        Instruction::Call { args, .. } => { for a in args { f(a); } }
-        Instruction::CallIndirect { func_ptr, args, .. } => { f(func_ptr); for a in args { f(a); } }
+        Instruction::Call { info, .. } => { for a in &info.args { f(a); } }
+        Instruction::CallIndirect { func_ptr, info } => { f(func_ptr); for a in &info.args { f(a); } }
         Instruction::GetElementPtr { offset, .. } => f(offset),
         Instruction::Cast { src, .. } => f(src),
         Instruction::Copy { src, .. } => f(src),

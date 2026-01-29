@@ -202,10 +202,10 @@ fn for_each_operand_value(inst: &Instruction, mut f: impl FnMut(u32)) {
             collect(offset, &mut f);
         }
         Instruction::Copy { src, .. } => collect(src, &mut f),
-        Instruction::Call { args, .. } => { for a in args { collect(a, &mut f); } }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
+        Instruction::Call { info, .. } => { for a in &info.args { collect(a, &mut f); } }
+        Instruction::CallIndirect { func_ptr, info } => {
             collect(func_ptr, &mut f);
-            for a in args { collect(a, &mut f); }
+            for a in &info.args { collect(a, &mut f); }
         }
         Instruction::Memcpy { dest, src, .. } => { f(dest.0); f(src.0); }
         Instruction::VaStart { va_list_ptr, .. } => f(va_list_ptr.0),

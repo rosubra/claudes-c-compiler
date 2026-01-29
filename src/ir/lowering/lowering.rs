@@ -321,17 +321,19 @@ impl Lowerer {
         for (func_name, alloca_val) in cleanup_vars.iter().rev() {
             let dest = Some(self.fresh_value());
             self.emit(Instruction::Call {
-                dest,
                 func: func_name.clone(),
-                args: vec![Operand::Value(*alloca_val)],
-                arg_types: vec![IrType::Ptr],
-                return_type: IrType::Void,
-                is_variadic: false,
-                num_fixed_args: 1,
-                struct_arg_sizes: vec![None],
-                struct_arg_classes: Vec::new(),
-                is_sret: false,
-                is_fastcall: false,
+                info: CallInfo {
+                    dest,
+                    args: vec![Operand::Value(*alloca_val)],
+                    arg_types: vec![IrType::Ptr],
+                    return_type: IrType::Void,
+                    is_variadic: false,
+                    num_fixed_args: 1,
+                    struct_arg_sizes: vec![None],
+                    struct_arg_classes: Vec::new(),
+                    is_sret: false,
+                    is_fastcall: false,
+                },
             });
         }
     }

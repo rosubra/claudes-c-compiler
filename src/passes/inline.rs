@@ -10,8 +10,8 @@
 //! the inlined code and eliminate dead branches.
 
 use crate::ir::ir::{
-    BasicBlock, BlockId, GlobalInit, IrFunction, IrModule, Instruction, Operand, Terminator,
-    Value, IrConst, IrBinOp, IrCmpOp,
+    BasicBlock, BlockId, CallInfo, GlobalInit, IrFunction, IrModule, Instruction, Operand,
+    Terminator, Value, IrConst, IrBinOp, IrCmpOp,
 };
 use crate::common::asm_constraints::constraint_is_immediate_only;
 use crate::common::types::{IrType, AddressSpace};
@@ -1045,7 +1045,7 @@ fn find_inline_call_sites(
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
-            if let Instruction::Call { dest, func: callee_name, args, .. } = inst {
+            if let Instruction::Call { func: callee_name, info } = inst {
                 if let Some(callee_data) = callee_map.get(callee_name) {
                     // Don't inline recursive calls
                     if callee_name != &func.name {
@@ -1061,8 +1061,8 @@ fn find_inline_call_sites(
                             block_idx,
                             inst_idx,
                             callee_name: callee_name.clone(),
-                            dest: *dest,
-                            args: args.clone(),
+                            dest: info.dest,
+                            args: info.args.clone(),
                         });
                     }
                 }
@@ -1374,6 +1374,22 @@ fn remap_operand(op: &Operand, value_offset: u32) -> Operand {
     }
 }
 
+/// Remap all values in a CallInfo (shared between Call and CallIndirect remapping).
+fn remap_call_info(info: &CallInfo, vo: u32) -> CallInfo {
+    CallInfo {
+        dest: info.dest.map(|v| remap_value(v, vo)),
+        args: info.args.iter().map(|a| remap_operand(a, vo)).collect(),
+        arg_types: info.arg_types.clone(),
+        return_type: info.return_type,
+        is_variadic: info.is_variadic,
+        num_fixed_args: info.num_fixed_args,
+        struct_arg_sizes: info.struct_arg_sizes.clone(),
+        struct_arg_classes: info.struct_arg_classes.clone(),
+        is_sret: info.is_sret,
+        is_fastcall: info.is_fastcall,
+    }
+}
+
 /// Remap all values and block references in an instruction.
 fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
     match inst {
@@ -1421,31 +1437,13 @@ fn remap_instruction(inst: &Instruction, vo: u32, bo: u32) -> Instruction {
             rhs: remap_operand(rhs, vo),
             ty: *ty,
         },
-        Instruction::Call { dest, func, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret, is_fastcall } => Instruction::Call {
-            dest: dest.map(|v| remap_value(v, vo)),
+        Instruction::Call { func, info } => Instruction::Call {
             func: func.clone(),
-            args: args.iter().map(|a| remap_operand(a, vo)).collect(),
-            arg_types: arg_types.clone(),
-            return_type: *return_type,
-            is_variadic: *is_variadic,
-            num_fixed_args: *num_fixed_args,
-            struct_arg_sizes: struct_arg_sizes.clone(),
-            struct_arg_classes: struct_arg_classes.clone(),
-            is_sret: *is_sret,
-            is_fastcall: *is_fastcall,
+            info: remap_call_info(info, vo),
         },
-        Instruction::CallIndirect { dest, func_ptr, args, arg_types, return_type, is_variadic, num_fixed_args, struct_arg_sizes, struct_arg_classes, is_sret, is_fastcall } => Instruction::CallIndirect {
-            dest: dest.map(|v| remap_value(v, vo)),
+        Instruction::CallIndirect { func_ptr, info } => Instruction::CallIndirect {
             func_ptr: remap_operand(func_ptr, vo),
-            args: args.iter().map(|a| remap_operand(a, vo)).collect(),
-            arg_types: arg_types.clone(),
-            return_type: *return_type,
-            is_variadic: *is_variadic,
-            num_fixed_args: *num_fixed_args,
-            struct_arg_sizes: struct_arg_sizes.clone(),
-            struct_arg_classes: struct_arg_classes.clone(),
-            is_sret: *is_sret,
-            is_fastcall: *is_fastcall,
+            info: remap_call_info(info, vo),
         },
         Instruction::GetElementPtr { dest, base, offset, ty } => Instruction::GetElementPtr {
             dest: remap_value(*dest, vo),
@@ -1650,9 +1648,9 @@ fn format_instruction(inst: &Instruction) -> String {
         Instruction::Cmp { dest, op, lhs, rhs, ty } => {
             format!("v{} = cmp {:?} {:?} {}, {}", dest.0, op, ty, format_operand(lhs), format_operand(rhs))
         }
-        Instruction::Call { dest, func, args, .. } => {
-            let args_str: Vec<String> = args.iter().map(|a| format_operand(a)).collect();
-            if let Some(d) = dest {
+        Instruction::Call { func, info } => {
+            let args_str: Vec<String> = info.args.iter().map(|a| format_operand(a)).collect();
+            if let Some(d) = info.dest {
                 format!("v{} = call {}({})", d.0, func, args_str.join(", "))
             } else {
                 format!("call {}({})", func, args_str.join(", "))

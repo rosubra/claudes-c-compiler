@@ -48,9 +48,13 @@ pub fn run(module: &mut IrModule) -> usize {
                 let mut i = 0;
                 while i < block.instructions.len() {
                     let replace = match &block.instructions[i] {
-                        Instruction::Call { dest: Some(dest), func: callee, .. } => {
-                            if let Some(const_val) = const_returns.get(callee.as_str()) {
-                                Some((*dest, *const_val))
+                        Instruction::Call { func: callee, info } => {
+                            if let Some(dest) = info.dest {
+                                if let Some(const_val) = const_returns.get(callee.as_str()) {
+                                    Some((dest, *const_val))
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
@@ -85,8 +89,8 @@ pub fn run(module: &mut IrModule) -> usize {
                 let mut new_spans = Vec::new();
                 for (idx, inst) in block.instructions.drain(..).enumerate() {
                     let is_dead = match &inst {
-                        Instruction::Call { func: callee, .. } => {
-                            dead_calls.contains(callee.as_str())
+                        Instruction::Call { func, .. } => {
+                            dead_calls.contains(func.as_str())
                         }
                         _ => false,
                     };
@@ -383,9 +387,9 @@ fn propagate_constant_arguments(module: &mut IrModule) -> usize {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Instruction::Call { func: callee, args, .. } = inst {
+                if let Instruction::Call { func: callee, info } = inst {
                     if let Some(param_states) = func_param_consts.get_mut(callee.as_str()) {
-                        for (i, arg) in args.iter().enumerate() {
+                        for (i, arg) in info.args.iter().enumerate() {
                             if i >= param_states.len() {
                                 break;
                             }

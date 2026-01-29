@@ -489,6 +489,11 @@ impl Driver {
                 let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
                 let extra = self.build_asm_extra_args();
                 self.target.assemble_with_extra(&asm, tmp.to_str(), &extra)?;
+                // Write dependency file for this source file. When compiling and
+                // linking in one step, GCC's -Wp,-MMD uses the .o name as the
+                // dependency target. We use the output executable path as target,
+                // which is sufficient for kernel build's fixdep processing.
+                self.write_dep_file(input_file, &self.output_path);
                 temp_guards.push(tmp);
             }
         }

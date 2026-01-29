@@ -209,14 +209,14 @@ fn replace_operands_in_instruction(inst: &mut Instruction, copy_map: &[Option<Op
             count += replace_operand(lhs, copy_map);
             count += replace_operand(rhs, copy_map);
         }
-        Instruction::Call { args, .. } => {
-            for arg in args.iter_mut() {
+        Instruction::Call { info, .. } => {
+            for arg in info.args.iter_mut() {
                 count += replace_operand(arg, copy_map);
             }
         }
-        Instruction::CallIndirect { func_ptr, args, .. } => {
+        Instruction::CallIndirect { func_ptr, info } => {
             count += replace_operand(func_ptr, copy_map);
-            for arg in args.iter_mut() {
+            for arg in info.args.iter_mut() {
                 count += replace_operand(arg, copy_map);
             }
         }
