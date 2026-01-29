@@ -148,10 +148,21 @@ impl Lowerer {
             Expr::Cast(_, inner, _) => {
                 self.eval_global_addr_expr(inner)
             }
-            // ((struct S) { func_ptr }) -> unwrap compound literal and try inner init
-            // This handles cases like ((struct Wrap) {inc_global}) in global initializers
-            // where the compound literal wraps a struct containing a function pointer.
+            // Compound literal -> check if it was materialized as an anonymous global
+            // by materialize_compound_literals_in_expr(), then fall back to trying
+            // to extract a global address from the initializer content.
+            // The materialized path handles patterns like:
+            //   (char*)(int[]){1,2,3} + 8
+            // where the compound literal is the base of pointer arithmetic.
+            // The initializer path handles patterns like:
+            //   ((struct Wrap) {func_ptr})
+            // where the compound literal wraps a function pointer.
             Expr::CompoundLiteral(_, ref init, _) => {
+                // Check if this compound literal was pre-materialized as an anonymous global
+                let key = expr as *const Expr as usize;
+                if let Some(label) = self.materialized_compound_literals.get(&key) {
+                    return Some(GlobalInit::GlobalAddr(label.clone()));
+                }
                 self.eval_global_addr_from_initializer(init)
             }
             // &x + n or arr + n -> GlobalAddrOffset with byte offset

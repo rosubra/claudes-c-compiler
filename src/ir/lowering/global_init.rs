@@ -131,6 +131,14 @@ impl Lowerer {
             return addr_init;
         }
 
+        // Pre-materialize compound literals embedded in address arithmetic.
+        // This handles patterns like:
+        //   (type*)((char*)(int[]){1,2,3} + 8)
+        // where a compound literal is used as the base of pointer arithmetic.
+        // We create anonymous globals for such compound literals so that
+        // eval_global_addr_expr can resolve them as GlobalAddr references.
+        self.materialize_compound_literals_in_expr(expr);
+
         // Global address expression: &x, func, arr, &arr[3], &s.field
         if let Some(addr_init) = self.eval_global_addr_expr(expr) {
             return addr_init;
@@ -143,6 +151,66 @@ impl Lowerer {
 
         // Can't evaluate - zero init as fallback
         GlobalInit::Zero
+    }
+
+    /// Recursively walk an expression tree and materialize any compound literals
+    /// found within arithmetic/cast contexts as anonymous globals. This is needed
+    /// so that `eval_global_addr_expr` (which takes `&self`) can resolve compound
+    /// literals as `GlobalAddr` references when they appear as bases of pointer
+    /// arithmetic in global initializers.
+    ///
+    /// For example, the Cello library uses:
+    ///   `var Alloc = (var)((char*)((var[]){ NULL, ... }) + sizeof(struct Header))`
+    /// The compound literal `(var[]){ NULL, ... }` must be materialized as an
+    /// anonymous global before the pointer arithmetic can be resolved.
+    fn materialize_compound_literals_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::CompoundLiteral(ref type_spec, ref init, _) => {
+                let key = expr as *const Expr as usize;
+                if !self.materialized_compound_literals.contains_key(&key) {
+                    // Materialize this compound literal as an anonymous global
+                    let init_result = self.create_compound_literal_global(type_spec, init);
+                    // Extract the global name from the result
+                    if let GlobalInit::GlobalAddr(label) = init_result {
+                        self.materialized_compound_literals.insert(key, label);
+                    }
+                }
+            }
+            Expr::Cast(_, inner, _) => {
+                self.materialize_compound_literals_in_expr(inner);
+            }
+            Expr::BinaryOp(_, lhs, rhs, _) => {
+                self.materialize_compound_literals_in_expr(lhs);
+                self.materialize_compound_literals_in_expr(rhs);
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                self.materialize_compound_literals_in_expr(inner);
+            }
+            Expr::Conditional(cond, then_e, else_e, _) => {
+                self.materialize_compound_literals_in_expr(cond);
+                self.materialize_compound_literals_in_expr(then_e);
+                self.materialize_compound_literals_in_expr(else_e);
+            }
+            _ => {}
+        }
+    }
+
+    /// Try to resolve an expression as `&(compound_literal)`, possibly wrapped
+    /// in casts. If found, materializes the compound literal as an anonymous global
+    /// and returns `GlobalInit::GlobalAddr(label)`.
+    ///
+    /// This is used by `collect_compound_init_element` to handle `&((struct T){...})`
+    /// patterns inside compound literal arrays (e.g., Cello's Instance() macro).
+    /// Note: `lower_global_init_expr` has similar logic at lines 106-110 for the
+    /// top-level expression case; this function handles the array element case.
+    fn try_address_of_compound_literal(&mut self, expr: &Expr) -> Option<GlobalInit> {
+        let stripped = Self::strip_casts(expr);
+        if let Expr::AddressOf(inner, _) = stripped {
+            if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
+            }
+        }
+        None
     }
 
     /// Coerce a scalar constant to the target type, handling bool normalization
@@ -1556,6 +1624,9 @@ impl Lowerer {
                         fs.global_init_label_blocks.push(scoped_label);
                     }
                     elements.push(GlobalInit::GlobalAddr(scoped_label.as_label()));
+                // &(compound_literal) or cast-wrapped variant -> materialize and take address
+                } else if let Some(addr) = self.try_address_of_compound_literal(expr) {
+                    elements.push(addr);
                 } else if let Some(val) = self.eval_const_expr(expr) {
                     let val = match val {
                         IrConst::I32(v) if elem_size == 8 => IrConst::I64(v as i64),
@@ -1569,10 +1640,14 @@ impl Lowerer {
                     elements.push(label_diff);
                 } else if let Some(addr) = self.eval_string_literal_addr_expr(expr) {
                     elements.push(addr);
-                } else if let Some(addr) = self.eval_global_addr_expr(expr) {
-                    elements.push(addr);
                 } else {
-                    elements.push(GlobalInit::Zero);
+                    // Pre-materialize compound literals in arithmetic before resolving
+                    self.materialize_compound_literals_in_expr(expr);
+                    if let Some(addr) = self.eval_global_addr_expr(expr) {
+                        elements.push(addr);
+                    } else {
+                        elements.push(GlobalInit::Zero);
+                    }
                 }
             }
             Initializer::List(sub_items) => {

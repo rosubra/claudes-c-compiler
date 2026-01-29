@@ -143,14 +143,28 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
         });
     }
 
-    // Phase 4: Apply narrowing transformations.
-    // We look for Cast instructions that narrow from I64 to a smaller type,
-    // where the source is a BinOp in I64 whose operands are widened from
-    // the same smaller type (or are themselves already-narrowed values).
-    //
-    // narrowed_map tracks values that Phase 4 has already narrowed, so
-    // subsequent iterations can recognize them as valid narrow operands.
     let mut narrowed_map: Vec<Option<IrType>> = vec![None; max_id + 1];
+
+    changes += narrow_binops_with_cast(func, &binop_map, &use_counts, &widen_map, &mut narrowed_map);
+    changes += narrow_binops_without_cast(func, &use_counts, &widen_map, &mut narrowed_map);
+    changes += narrow_cmps(func, &widen_map);
+
+    changes
+}
+
+/// Phase 4: Narrow BinOps that have an explicit narrowing Cast consumer.
+/// Finds `Cast(BinOp(widen(x), widen(y), I64), I64->T)` and replaces with
+/// `BinOp(x, y, T)`. Safe for Add/Sub/Mul/And/Or/Xor/Shl because the
+/// narrowing Cast truncates the result (low bits are width-independent).
+fn narrow_binops_with_cast(
+    func: &mut IrFunction,
+    binop_map: &[Option<BinOpDef>],
+    use_counts: &[u32],
+    widen_map: &[Option<CastInfo>],
+    narrowed_map: &mut [Option<IrType>],
+) -> usize {
+    let max_id = narrowed_map.len() - 1;
+    let mut changes = 0;
 
     for block in &mut func.blocks {
         for inst in &mut block.instructions {
@@ -167,16 +181,13 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     continue;
                 }
 
-                // The source must be a BinOp in I64
                 let binop_info = match &binop_map[src_id] {
                     Some(info) => info.clone(),
                     None => continue,
                 };
 
-                // The BinOp must use a safe operation (bit-preserving in low bits).
-                // Shl is safe because shifting left only affects higher bits;
-                // the low N bits of (x << k) are the same at any width >= N+k.
-                // AShr/LShr are NOT safe because they bring in bits from above.
+                // Shl is safe (shifting left only affects higher bits).
+                // AShr/LShr are NOT safe (they bring in bits from above).
                 let is_safe_op = matches!(binop_info.op,
                     IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul |
                     IrBinOp::And | IrBinOp::Or | IrBinOp::Xor |
@@ -186,24 +197,18 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     continue;
                 }
 
-                // The BinOp result must only be used by this narrowing cast
-                // (otherwise we'd change the type for other users too)
+                // BinOp result must only be used by this narrowing cast
                 if use_counts[src_id] != 1 {
                     continue;
                 }
 
-                // Check that both operands of the BinOp are either:
-                // (a) widened from the target type, or
-                // (b) constants that fit in the target type, or
-                // (c) already narrowed to the target type by a previous Phase 4 step
-                let narrow_lhs = try_narrow_operand_with_narrowed(&binop_info.lhs, *to_ty, &widen_map, &narrowed_map);
-                let narrow_rhs = try_narrow_operand_with_narrowed(&binop_info.rhs, *to_ty, &widen_map, &narrowed_map);
+                let narrow_lhs = try_narrow_operand(&binop_info.lhs, *to_ty, None, widen_map, narrowed_map);
+                let narrow_rhs = try_narrow_operand(&binop_info.rhs, *to_ty, None, widen_map, narrowed_map);
 
                 if let (Some(new_lhs), Some(new_rhs)) = (narrow_lhs, narrow_rhs) {
                     let narrow_dest = *dest;
                     let narrow_ty = *to_ty;
 
-                    // Replace this Cast with a BinOp at the narrow type
                     *inst = Instruction::BinOp {
                         dest: narrow_dest,
                         op: binop_info.op,
@@ -213,7 +218,6 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     };
                     changes += 1;
 
-                    // Record that this dest value is now at the narrow type
                     let dest_id = narrow_dest.0 as usize;
                     if dest_id <= max_id {
                         narrowed_map[dest_id] = Some(narrow_ty);
@@ -223,22 +227,26 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
         }
     }
 
-    // Phase 5: Narrow I64 BinOps whose operands are all sub-64-bit values.
-    // Handles the case where the frontend emits a BinOp at I64 but the
-    // operands come from I32 Loads (no explicit widening Cast). Pattern:
-    //   %x = Load ptr, I32
-    //   %r = BinOp op %x, const, I64   (BinOp type wider than operands)
-    // Only safe for bitwise ops (And/Or/Xor) since unlike Phase 4 there is
-    // no explicit narrowing Cast guaranteeing the consumer truncates the result.
-    //
-    // IMPORTANT: Phase 5 is NOT safe on 32-bit targets (i686). On x86-64,
-    // 32-bit register operations implicitly zero-extend to 64-bit, so consumers
-    // of a narrowed I32 result see the correct 64-bit value. On i686, I64
-    // values occupy eax:edx register pairs, and a narrowed I32 result only
-    // populates eax, leaving edx with stale/zero data. This produces wrong
-    // results when the consumer expects a full 64-bit value (e.g., bitfield
-    // extraction followed by XOR with a long long).
-    //
+    changes
+}
+
+/// Phase 5: Narrow I64 BinOps whose operands are all sub-64-bit values,
+/// even without an explicit narrowing Cast. Only safe for bitwise ops
+/// (And/Or/Xor) and only on 64-bit targets (32-bit register ops don't
+/// implicitly zero-extend to 64-bit on i686).
+fn narrow_binops_without_cast(
+    func: &mut IrFunction,
+    use_counts: &[u32],
+    widen_map: &[Option<CastInfo>],
+    narrowed_map: &mut [Option<IrType>],
+) -> usize {
+    if crate::common::types::target_is_32bit() {
+        return 0;
+    }
+
+    let max_id = narrowed_map.len() - 1;
+    let mut changes = 0;
+
     // Build load_type_map: Value -> type for Load instructions
     let mut load_type_map: Vec<Option<IrType>> = vec![None; max_id + 1];
     for block in &func.blocks {
@@ -252,11 +260,6 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
         }
     }
 
-    // Skip Phase 5 on 32-bit targets (see comment above).
-    if !crate::common::types::target_is_32bit() {
-    // Find I64 BinOps where all operands are sub-64-bit (loads, constants, or
-    // widen_map values) and the result has exactly one use (a Store to I32).
-    // Check: result used only by stores to a sub-64-bit type.
     for block in &mut func.blocks {
         for inst in &mut block.instructions {
             if let Instruction::BinOp { dest, op, lhs, rhs, ty } = inst {
@@ -264,31 +267,21 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     continue;
                 }
                 let dest_id = dest.0 as usize;
-                // Must be single-use (will be a Store or Cast)
                 if dest_id >= use_counts.len() || use_counts[dest_id] != 1 {
                     continue;
                 }
-                // Only bitwise ops (And/Or/Xor) are safe: low N bits are always
-                // preserved regardless of operand width. Arithmetic ops (Add/Sub/
-                // Mul/Shl) are NOT safe because carries or shift semantics can
-                // produce different results in the upper bits, and this phase does
-                // not verify the consumer only uses the low bits.
-                let is_safe_op = matches!(op,
-                    IrBinOp::And | IrBinOp::Or | IrBinOp::Xor
-                );
-                if !is_safe_op {
+                // Only bitwise ops are safe without an explicit narrowing Cast.
+                if !matches!(op, IrBinOp::And | IrBinOp::Or | IrBinOp::Xor) {
                     continue;
                 }
 
-                // Try to determine the narrow type from operands
-                let lhs_narrow_ty = operand_narrow_type(lhs, &load_type_map, &widen_map, &narrowed_map);
-                let rhs_narrow_ty = operand_narrow_type(rhs, &load_type_map, &widen_map, &narrowed_map);
+                let lhs_narrow_ty = operand_narrow_type(lhs, &load_type_map, widen_map, narrowed_map);
+                let rhs_narrow_ty = operand_narrow_type(rhs, &load_type_map, widen_map, narrowed_map);
 
                 let target_ty = match (lhs_narrow_ty, rhs_narrow_ty) {
                     (Some(lt), Some(rt)) if lt == rt => lt,
                     (Some(lt), Some(rt)) if lt.size() == rt.size() => lt,
                     (Some(t), None) => {
-                        // RHS must be a constant that fits
                         if try_narrow_const_operand(rhs, t).is_some() { t } else { continue; }
                     }
                     (None, Some(t)) => {
@@ -297,26 +290,14 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     _ => continue,
                 };
 
-                // Phase 5 changes the BinOp's result type without inserting a
-                // widening Cast for consumers.  Narrowing to I32/U32 is safe on
-                // x86-64 because 32-bit register operations implicitly zero-extend
-                // to 64-bit, and codegen already handles I32/U32 results correctly.
-                // Sub-int types (I8/U8/I16/U16) are NOT safe: consumers still
-                // expect a 64-bit value, and without an explicit Cast the upper
-                // bits may carry stale sign-extended data.  For example, narrowing
-                // `(unsigned char)0xFF ^ 0` to U8 produces IrConst::I8(-1) after
-                // constant folding, which sign-extends to -1 instead of 255 when
-                // the consumer reads it as an i64.
-                // Phase 4 handles sub-int narrowing correctly because it replaces
-                // an existing narrowing Cast (so consumers already expect the
-                // narrow type).
+                // Only narrow to I32/U32 (sub-int types are unsafe without
+                // an explicit Cast; see Phase 4 for sub-int handling).
                 if target_ty.size() < 4 {
                     continue;
                 }
 
-                // Narrow the operands
-                let new_lhs = narrow_operand_by_type(lhs, target_ty, &load_type_map, &widen_map, &narrowed_map);
-                let new_rhs = narrow_operand_by_type(rhs, target_ty, &load_type_map, &widen_map, &narrowed_map);
+                let new_lhs = try_narrow_operand(lhs, target_ty, Some(&load_type_map), widen_map, narrowed_map);
+                let new_rhs = try_narrow_operand(rhs, target_ty, Some(&load_type_map), widen_map, narrowed_map);
                 if let (Some(nl), Some(nr)) = (new_lhs, new_rhs) {
                     *lhs = nl;
                     *rhs = nr;
@@ -327,11 +308,21 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
             }
         }
     }
-    } // end if !target_is_32bit()
 
-    // Phase 6: Also narrow Cmp instructions where both operands are widened
-    // from the same type. Cmp(Sge, widen(x), widen(y)) == Cmp(Sge, x, y)
-    // when the widen is from a signed type and both have the same source type.
+    changes
+}
+
+/// Phase 6: Narrow Cmp instructions where both operands are widened from
+/// the same type. Only safe when the extension kind matches the comparison
+/// kind (signed cmp needs signed extension, unsigned cmp needs unsigned).
+/// Eq/Ne are safe with either extension kind.
+fn narrow_cmps(
+    func: &mut IrFunction,
+    widen_map: &[Option<CastInfo>],
+) -> usize {
+    let max_id = widen_map.len() - 1;
+    let mut changes = 0;
+
     for block in &mut func.blocks {
         for inst in &mut block.instructions {
             if let Instruction::Cmp { dest, op, lhs, rhs, ty } = inst {
@@ -339,8 +330,6 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     continue;
                 }
 
-                // Try to narrow both operands
-                // For Cmp, we need both operands to be widened from the SAME type
                 let lhs_cast = match lhs {
                     Operand::Value(v) => {
                         let id = v.0 as usize;
@@ -356,27 +345,17 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                     _ => None,
                 };
 
-                // Both operands widened from the same type, OR one is widened
-                // and the other is a constant that fits
                 let narrow_ty = if let Some(lhs_info) = lhs_cast {
                     lhs_info.from_ty
                 } else {
                     continue;
                 };
 
-                // Determine if it's a signed or unsigned comparison
                 let is_signed_cmp = matches!(op,
                     IrCmpOp::Slt | IrCmpOp::Sle | IrCmpOp::Sgt | IrCmpOp::Sge);
                 let is_unsigned_cmp = matches!(op,
                     IrCmpOp::Ult | IrCmpOp::Ule | IrCmpOp::Ugt | IrCmpOp::Uge);
 
-                // Narrowing a comparison is only safe when the extension kind matches
-                // the comparison kind. A signed comparison on zero-extended values
-                // can give wrong results because zero-extension doesn't preserve the
-                // sign-bit ordering (e.g., -1 as u8=0xFF zero-extends to 255, not -1).
-                // Similarly, an unsigned comparison on sign-extended values can fail
-                // (e.g., 128 as i8=-128 sign-extends to a large negative number).
-                // Eq/Ne are safe with either extension kind since they compare bit patterns.
                 if is_signed_cmp && narrow_ty.is_unsigned() {
                     continue;
                 }
@@ -393,12 +372,6 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                 let new_rhs = if let Some(info) = rhs_cast {
                     if info.from_ty == narrow_ty { info.src } else { continue; }
                 } else if let Operand::Const(c) = rhs {
-                    // Constant: check if it fits in the narrow type.
-                    // Use the comparison-specific variant that requires value
-                    // preservation through zero/sign extension round-trip.
-                    // The general try_narrow_const allows bit-truncation for
-                    // U32 (e.g., I64(-10) -> U32(0xFFFFFFF6)), which is wrong
-                    // for comparisons where the full 64-bit value matters.
                     if let Some(narrow_c) = try_narrow_const_for_cmp(c, narrow_ty) {
                         Operand::Const(narrow_c)
                     } else {
@@ -411,7 +384,7 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
                 *lhs = new_lhs;
                 *rhs = new_rhs;
                 *ty = narrow_ty;
-                let _ = dest; // dest type unchanged (always produces I8 for bool)
+                let _ = dest;
                 changes += 1;
             }
         }
@@ -423,20 +396,33 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
 /// Try to narrow an operand from I64 to a target type.
 /// Returns the narrowed operand if possible, None otherwise.
 ///
-/// Checks three cases:
-/// (a) The value is a widening cast from the target type → return the original
-/// (b) The value was already narrowed to the target type by Phase 4 → return as-is
-/// (c) The operand is a constant that fits in the target type → return narrowed const
-fn try_narrow_operand_with_narrowed(
+/// Checks (in order):
+/// (a) If load_type_map provided: value is a Load of the target type → return as-is
+/// (b) The value is a widening cast from the target type → return the original
+/// (c) The value was already narrowed to the target type by Phase 4 → return as-is
+/// (d) The operand is a constant that fits in the target type → return narrowed const
+fn try_narrow_operand(
     op: &Operand,
     target_ty: IrType,
+    load_type_map: Option<&[Option<IrType>]>,
     widen_map: &[Option<CastInfo>],
     narrowed_map: &[Option<IrType>],
 ) -> Option<Operand> {
     match op {
         Operand::Value(v) => {
             let id = v.0 as usize;
-            // (a) Check if it's a widening cast from the target type
+            // (a) Check if it's a Load of the target type
+            if let Some(ltm) = load_type_map {
+                if id < ltm.len() {
+                    if let Some(ty) = &ltm[id] {
+                        if *ty == target_ty || (ty.size() == target_ty.size()
+                            && ty.is_unsigned() == target_ty.is_unsigned()) {
+                            return Some(Operand::Value(*v));
+                        }
+                    }
+                }
+            }
+            // (b) Check if it's a widening cast from the target type
             if id < widen_map.len() {
                 if let Some(info) = &widen_map[id] {
                     if info.from_ty == target_ty
@@ -446,7 +432,7 @@ fn try_narrow_operand_with_narrowed(
                     }
                 }
             }
-            // (b) Check if it was already narrowed to the target type
+            // (c) Check if it was already narrowed to the target type
             if id < narrowed_map.len() {
                 if let Some(nt) = &narrowed_map[id] {
                     if *nt == target_ty
@@ -475,19 +461,16 @@ fn operand_narrow_type(
     match op {
         Operand::Value(v) => {
             let id = v.0 as usize;
-            // Check load_type_map
             if id < load_type_map.len() {
                 if let Some(ty) = &load_type_map[id] {
                     return Some(*ty);
                 }
             }
-            // Check widen_map
             if id < widen_map.len() {
                 if let Some(info) = &widen_map[id] {
                     return Some(info.from_ty);
                 }
             }
-            // Check narrowed_map
             if id < narrowed_map.len() {
                 if let Some(ty) = &narrowed_map[id] {
                     return Some(*ty);
@@ -507,63 +490,12 @@ fn try_narrow_const_operand(op: &Operand, target_ty: IrType) -> Option<IrConst> 
     }
 }
 
-/// Narrow an operand to target_ty. The operand may be:
-/// - A Value that's an I32 Load (already the right type, return as-is)
-/// - A Value in widen_map (return original source)
-/// - A Value in narrowed_map (already narrowed, return as-is)
-/// - A constant (narrow it)
-fn narrow_operand_by_type(
-    op: &Operand,
-    target_ty: IrType,
-    load_type_map: &[Option<IrType>],
-    widen_map: &[Option<CastInfo>],
-    narrowed_map: &[Option<IrType>],
-) -> Option<Operand> {
-    match op {
-        Operand::Value(v) => {
-            let id = v.0 as usize;
-            // If it's a Load of the target type, use as-is
-            if id < load_type_map.len() {
-                if let Some(ty) = &load_type_map[id] {
-                    if *ty == target_ty || (ty.size() == target_ty.size() && ty.is_unsigned() == target_ty.is_unsigned()) {
-                        return Some(Operand::Value(*v));
-                    }
-                }
-            }
-            // If it's a widening cast, use the original source
-            if id < widen_map.len() {
-                if let Some(info) = &widen_map[id] {
-                    if info.from_ty == target_ty
-                       || (info.from_ty.size() == target_ty.size()
-                           && info.from_ty.is_unsigned() == target_ty.is_unsigned()) {
-                        return Some(info.src);
-                    }
-                }
-            }
-            // If it's already narrowed
-            if id < narrowed_map.len() {
-                if let Some(nt) = &narrowed_map[id] {
-                    if *nt == target_ty || (nt.size() == target_ty.size() && nt.is_unsigned() == target_ty.is_unsigned()) {
-                        return Some(Operand::Value(*v));
-                    }
-                }
-            }
-            None
-        }
-        Operand::Const(c) => {
-            try_narrow_const(c, target_ty).map(Operand::Const)
-        }
-    }
-}
-
-/// Narrow a constant for use in a Cmp instruction.
-/// Unlike try_narrow_const (which allows bit-preserving truncation for U32),
-/// this function requires that the constant's value is preserved when extended
-/// back to 64 bits. This is critical for comparisons: if one operand was
-/// zero-extended from U32, the constant must also have zero upper 32 bits.
-/// Otherwise narrowing `Cmp(Eq, zext(x), 0xFFFFFFFF_FFFFFFF6)` to
-/// `Cmp(Eq, x, 0xFFFFFFF6)` would incorrectly match.
-fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
+/// Try to narrow a constant to a smaller type.
+/// When `require_roundtrip` is false (bit-preserving ops like Add/And/Or/Xor),
+/// U32 accepts any value in [i32::MIN, u32::MAX] because only the low 32 bits
+/// matter. When `require_roundtrip` is true (comparisons), U32 requires
+/// val >= 0 so the value survives zero-extension back to 64 bits.
+fn try_narrow_const_core(c: &IrConst, target_ty: IrType, require_roundtrip: bool) -> Option<IrConst> {
     let val = match c {
         IrConst::I64(v) => *v,
         IrConst::I32(v) => *v as i64,
@@ -575,7 +507,6 @@ fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
     };
 
     match target_ty {
-        // Signed types: value must round-trip through sign extension
         IrType::I32 => {
             if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
                 Some(IrConst::I32(val as i32))
@@ -583,10 +514,11 @@ fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
                 None
             }
         }
-        // Unsigned types: value must round-trip through zero extension.
-        // Only non-negative values whose upper bits are zero can be narrowed.
         IrType::U32 => {
-            if val >= 0 && val <= u32::MAX as i64 {
+            // For bit-preserving ops, accept [i32::MIN, u32::MAX] (low 32 bits matter).
+            // For comparisons, require [0, u32::MAX] (value must round-trip through zext).
+            let lo = if require_roundtrip { 0 } else { i32::MIN as i64 };
+            if val >= lo && val <= u32::MAX as i64 {
                 Some(IrConst::from_i64(val, IrType::U32))
             } else {
                 None
@@ -624,71 +556,18 @@ fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
     }
 }
 
-/// Try to narrow a constant to a smaller type.
-/// Returns the narrowed constant if the value fits, None otherwise.
+/// Try to narrow a constant for bit-preserving operations (Add/Sub/And/Or/Xor).
+/// For U32, allows bit-truncation (accepts negative i64 values).
 fn try_narrow_const(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
-    let val = match c {
-        IrConst::I64(v) => *v,
-        IrConst::I32(v) => *v as i64,
-        IrConst::I16(v) => *v as i64,
-        IrConst::I8(v) => *v as i64,
-        IrConst::I128(v) => *v as i64,
-        IrConst::Zero => 0,
-        _ => return None, // Float constants can't be narrowed
-    };
+    try_narrow_const_core(c, target_ty, false)
+}
 
-    match target_ty {
-        IrType::I32 => {
-            if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
-                Some(IrConst::I32(val as i32))
-            } else {
-                None
-            }
-        }
-        IrType::U32 => {
-            // For bit-preserving ops, only the low 32 bits matter.
-            // Accept any i64 value whose low 32 bits are meaningful.
-            // Use IrConst::from_i64 which stores U32 as I64 with zero-extension,
-            // matching the rest of the codebase's convention and ensuring
-            // correct behavior when the constant is later read via to_i64().
-            if val >= i32::MIN as i64 && val <= u32::MAX as i64 {
-                Some(IrConst::from_i64(val, IrType::U32))
-            } else {
-                None
-            }
-        }
-        IrType::I16 => {
-            if val >= i16::MIN as i64 && val <= i16::MAX as i64 {
-                Some(IrConst::I16(val as i16))
-            } else {
-                None
-            }
-        }
-        IrType::U16 => {
-            if val >= 0 && val <= u16::MAX as i64 {
-                // Use from_i64 to get zero-extended I64 representation for unsigned
-                Some(IrConst::from_i64(val, IrType::U16))
-            } else {
-                None
-            }
-        }
-        IrType::I8 => {
-            if val >= i8::MIN as i64 && val <= i8::MAX as i64 {
-                Some(IrConst::I8(val as i8))
-            } else {
-                None
-            }
-        }
-        IrType::U8 => {
-            if val >= 0 && val <= u8::MAX as i64 {
-                // Use from_i64 to get zero-extended I64 representation for unsigned
-                Some(IrConst::from_i64(val, IrType::U8))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
+/// Narrow a constant for use in a Cmp instruction.
+/// Requires that the constant's value is preserved when extended back to 64 bits.
+/// This prevents narrowing `Cmp(Eq, zext(x), 0xFFFFFFFF_FFFFFFF6)` to
+/// `Cmp(Eq, x, 0xFFFFFFF6)` which would incorrectly match.
+fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
+    try_narrow_const_core(c, target_ty, true)
 }
 
 /// Helper to call f for a Value if the operand is a Value.

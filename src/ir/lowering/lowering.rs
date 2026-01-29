@@ -105,6 +105,21 @@ pub struct Lowerer {
     /// Wrapped in RefCell because many lowering methods take &self (not &mut self)
     /// but still need to emit diagnostics (same pattern as expr_ctype_cache).
     pub(super) diagnostics: RefCell<DiagnosticEngine>,
+    /// Maps `*const Expr` identity of compound literal nodes to their materialized
+    /// anonymous global names. Populated by `materialize_compound_literals_in_expr()`
+    /// before `eval_global_addr_expr()` is called, so that compound literals
+    /// embedded in pointer arithmetic (e.g., `(char*)(int[]){1,2,3} + 8`)
+    /// can be resolved as global addresses.
+    ///
+    /// Lifetime: entries persist for the entire lowering session since the AST
+    /// (and therefore Expr node addresses) lives through the full lowering pass.
+    /// If the same compound literal appears in multiple globals, it will be
+    /// materialized once and reused via this cache.
+    ///
+    /// Precondition: callers of `eval_global_addr_expr()` that may encounter
+    /// compound literals in arithmetic contexts must first call
+    /// `materialize_compound_literals_in_expr()` to populate this map.
+    pub(super) materialized_compound_literals: FxHashMap<usize, String>,
 }
 
 impl Lowerer {
@@ -164,6 +179,7 @@ impl Lowerer {
             asm_label_map: FxHashMap::default(),
             expr_ctype_cache: RefCell::new(FxHashMap::default()),
             diagnostics: RefCell::new(diagnostics),
+            materialized_compound_literals: FxHashMap::default(),
         }
     }
 
