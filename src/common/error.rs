@@ -34,7 +34,9 @@ use crate::common::source::{SourceManager, Span};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WarningKind {
     /// An undeclared identifier was used.
-    /// Not a standard GCC warning category; always enabled.
+    /// NOTE: As of the fix in sema.rs, undeclared variables are now hard errors
+    /// (not warnings). This variant is kept for CLI flag parsing compatibility
+    /// (-Wno-undeclared, -Werror=undeclared) but is no longer emitted.
     Undeclared,
     /// A function was called without a prior declaration (C89 implicit int).
     /// GCC flag: -Wimplicit-function-declaration
@@ -81,7 +83,7 @@ impl WarningKind {
         &[
             WarningKind::ImplicitFunctionDeclaration,
             WarningKind::Cpp,
-            // WarningKind::Undeclared is always enabled, not gated on -Wall
+            // WarningKind::Undeclared is now a hard error, not a warning
         ]
     }
 

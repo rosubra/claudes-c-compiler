@@ -401,6 +401,14 @@ impl SemanticAnalyzer {
                 explicit_alignment,
             });
 
+            // Analyze array size expressions in derived declarators
+            // (catches undeclared identifiers in e.g. `int arr[UNDECLARED];`)
+            for derived in &init_decl.derived {
+                if let DerivedDeclarator::Array(Some(size_expr)) = derived {
+                    self.analyze_expr(size_expr);
+                }
+            }
+
             // Analyze initializer expressions
             if let Some(init) = &init_decl.init {
                 self.analyze_initializer(init);
@@ -797,10 +805,9 @@ impl SemanticAnalyzer {
                     && name != "__func__" && name != "__FUNCTION__"
                     && name != "__PRETTY_FUNCTION__"
                 {
-                    self.diagnostics.borrow_mut().warning_with_kind(
+                    self.diagnostics.borrow_mut().error(
                         format!("'{}' undeclared", name),
                         *span,
-                        crate::common::error::WarningKind::Undeclared,
                     );
                 }
             }

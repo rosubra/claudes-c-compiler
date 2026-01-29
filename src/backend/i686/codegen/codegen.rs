@@ -2807,6 +2807,7 @@ impl ArchCodegen for I686Codegen {
                 call_abi::CallArgClass::I128Stack => total += 16,
                 call_abi::CallArgClass::StructByValStack { size } => total += (*size + 3) & !3,
                 call_abi::CallArgClass::LargeStructStack { size } => total += (*size + 3) & !3,
+                call_abi::CallArgClass::ZeroSizeSkip => {} // no space for zero-size structs
                 _ => total += 4, // fallback for any remaining classes
             }
         }
@@ -3018,6 +3019,9 @@ impl ArchCodegen for I686Codegen {
                         emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                         stack_offset += 4;
                     }
+                }
+                call_abi::CallArgClass::ZeroSizeSkip => {
+                    // Zero-size struct: no stack space consumed
                 }
                 _ => {
                     // Fallback: put on stack as 4-byte value

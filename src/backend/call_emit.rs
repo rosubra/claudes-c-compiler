@@ -56,6 +56,9 @@ pub enum ParamClass {
     /// Large struct (>16 bytes) passed by reference on the stack (AAPCS64, overflow case).
     /// The stack slot holds a pointer to the struct data; callee must copy from it.
     LargeStructByRefStack { offset: i64, size: usize },
+    /// Zero-size struct parameter (e.g., `struct { char x[0]; }`).
+    /// Per GCC behavior, zero-size struct parameters consume no register or stack space.
+    ZeroSizeSkip,
 }
 
 impl ParamClass {
@@ -153,6 +156,12 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
 
         // Struct-by-value parameters.
         if let Some(size) = struct_size {
+            // Zero-size structs consume no register or stack space per GCC behavior.
+            if size == 0 {
+                result.push(ParamClass::ZeroSizeSkip);
+                continue;
+            }
+
             let eb_classes = &param.struct_eightbyte_classes;
 
             if size <= 16 && config.use_sysv_struct_classification && !eb_classes.is_empty() {

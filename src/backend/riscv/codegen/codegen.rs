@@ -1091,7 +1091,8 @@ impl ArchCodegen for RiscvCodegen {
                 }
                 // F128 in FP reg doesn't happen on RISC-V. SysV SSE-class structs don't happen on RISC-V.
                 ParamClass::F128FpReg { .. } |
-                ParamClass::StructSseReg { .. } | ParamClass::StructMixedIntSseReg { .. } | ParamClass::StructMixedSseIntReg { .. } => {}
+                ParamClass::StructSseReg { .. } | ParamClass::StructMixedIntSseReg { .. } | ParamClass::StructMixedSseIntReg { .. } |
+                ParamClass::ZeroSizeSkip => {}
             }
         }
 

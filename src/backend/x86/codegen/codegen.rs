@@ -1839,7 +1839,8 @@ impl ArchCodegen for X86Codegen {
                 }
                 // These variants don't occur for x86 (no F128 in FP/GP pair regs, no by-ref structs).
                 ParamClass::F128FpReg { .. } | ParamClass::F128GpPair { .. } | ParamClass::F128Stack { .. } |
-                ParamClass::LargeStructByRefReg { .. } | ParamClass::LargeStructByRefStack { .. } => {}
+                ParamClass::LargeStructByRefReg { .. } | ParamClass::LargeStructByRefStack { .. } |
+                ParamClass::ZeroSizeSkip => {}
             }
         }
     }

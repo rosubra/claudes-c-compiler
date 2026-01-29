@@ -40,6 +40,9 @@ pub enum CallArgClass {
     F128Stack,
     /// I128 argument overflows to the stack (16-byte aligned).
     I128Stack,
+    /// Zero-size struct argument (e.g., `struct { char x[0]; }`).
+    /// Per GCC behavior, zero-size struct arguments consume no register or stack space.
+    ZeroSizeSkip,
 }
 
 impl CallArgClass {
@@ -178,6 +181,13 @@ pub fn classify_call_args(
         let force_gp = is_variadic && config.variadic_floats_in_gp && is_float && !is_long_double;
 
         if let Some(size) = struct_size {
+            // Zero-size structs (e.g., `struct { char x[0]; }`) consume no register
+            // or stack space per GCC behavior. Skip them entirely.
+            if size == 0 {
+                result.push(CallArgClass::ZeroSizeSkip);
+                continue;
+            }
+
             // Get per-eightbyte classification for this struct arg (if available)
             let eb_classes = struct_arg_classes.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
 
