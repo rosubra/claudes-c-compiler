@@ -88,9 +88,7 @@ impl Parser {
 
         // Handle _Static_assert at file scope
         if matches!(self.peek(), TokenKind::StaticAssert) {
-            self.advance();
-            self.skip_balanced_parens();
-            self.consume_if(&TokenKind::Semicolon);
+            self.parse_static_assert();
             return Some(ExternalDecl::Declaration(Declaration::empty()));
         }
 
@@ -898,7 +896,7 @@ impl Parser {
             }
             Expr::Sizeof(arg, _) => {
                 match arg.as_ref() {
-                    SizeofArg::Type(ts) => Some(Self::sizeof_type_spec(ts) as i64),
+                    SizeofArg::Type(ts) => Self::try_sizeof_type_spec(ts).map(|s| s as i64),
                     SizeofArg::Expr(_) => None,
                 }
             }
@@ -959,6 +957,68 @@ impl Parser {
             }
             self.attrs.set_typedef(false);
         }
+    }
+
+    /// Parse and evaluate `_Static_assert(constant-expr, "message")` or
+    /// the C23 single-argument form `_Static_assert(constant-expr)`.
+    ///
+    /// If the constant expression evaluates to zero, emits a compile error
+    /// with the provided message (or a default message for the single-arg form).
+    /// If the expression cannot be evaluated at compile time, silently accepts
+    /// it (matching GCC behavior for complex expressions).
+    pub(super) fn parse_static_assert(&mut self) {
+        let assert_span = self.peek_span();
+        self.advance(); // consume _Static_assert
+        self.expect(&TokenKind::LParen);
+
+        // Parse the constant expression
+        let expr = self.parse_assignment_expr();
+
+        // Parse optional message: ", string-literal(s)"
+        // Adjacent string literals are concatenated per C standard (translation phase 6).
+        // The kernel uses patterns like: "min" "(" "x" ", " "y" ") error"
+        let message = if self.consume_if(&TokenKind::Comma) {
+            let mut msg = String::new();
+            let mut found_string = false;
+            loop {
+                match self.peek().clone() {
+                    TokenKind::StringLiteral(s) => {
+                        msg.push_str(&s);
+                        found_string = true;
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
+            if found_string { Some(msg) } else { None }
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::RParen);
+        self.consume_if(&TokenKind::Semicolon);
+
+        // Evaluate the constant expression
+        let enums = if self.enum_constants.is_empty() {
+            None
+        } else {
+            Some(&self.enum_constants)
+        };
+        if let Some(value) = Self::eval_const_int_expr_with_enums(&expr, enums) {
+            if value == 0 {
+                // Static assertion failed
+                let msg = if let Some(ref m) = message {
+                    format!("static assertion failed: {}", m)
+                } else {
+                    "static assertion failed".to_string()
+                };
+                self.emit_error(msg, assert_span);
+            }
+        }
+        // If we can't evaluate the expression (returns None), silently accept.
+        // This matches real-world behavior where complex expressions involving
+        // sizeof, offsetof, or compiler-specific builtins may not be evaluable
+        // at parse time but are valid constant expressions.
     }
 
 }

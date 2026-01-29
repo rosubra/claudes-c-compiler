@@ -246,7 +246,7 @@ impl TokenKind {
             "_Generic" => Some(TokenKind::Generic),
             "_Imaginary" => Some(TokenKind::Imaginary),
             "_Noreturn" | "__noreturn__" => Some(TokenKind::Noreturn),
-            "_Static_assert" => Some(TokenKind::StaticAssert),
+            "_Static_assert" | "static_assert" => Some(TokenKind::StaticAssert),
             "_Thread_local" | "__thread" => Some(TokenKind::ThreadLocal),
             "typeof" | "__typeof__" | "__typeof" => Some(TokenKind::Typeof),
             "asm" | "__asm__" | "__asm" => Some(TokenKind::Asm),

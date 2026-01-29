@@ -371,15 +371,9 @@ fn define_assert_macros(macros: &mut MacroTable) {
         body: "((void)0)".to_string(), // TODO: implement proper assert
         is_predefined: true,
     });
-    macros.define(MacroDef {
-        name: "static_assert".to_string(),
-        is_function_like: true,
-        params: vec!["expr".to_string(), "msg".to_string()],
-        is_variadic: false,
-        has_named_variadic: false,
-        body: "".to_string(), // TODO: implement proper static_assert
-        is_predefined: true,
-    });
+    // static_assert is handled as a keyword (TokenKind::StaticAssert) rather
+    // than a preprocessor macro. Both _Static_assert and static_assert are
+    // recognized by the lexer and evaluated by the parser.
 }
 
 /// Type-related GCC built-in macros

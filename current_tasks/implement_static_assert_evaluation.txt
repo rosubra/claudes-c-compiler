@@ -1,6 +1,6 @@
 Implement _Static_assert / static_assert Evaluation
 =====================================================
-Status: in_progress
+Status: completed
 
 The parser currently skips _Static_assert declarations entirely without
 evaluating the condition expression. This means _Static_assert(0, "fail")

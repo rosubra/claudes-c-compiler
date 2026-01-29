@@ -1092,32 +1092,49 @@ impl Parser {
     /// Compute sizeof (in bytes) for a type specifier.
     /// Used by sizeof(type) in parser-level constant evaluation.
     pub(super) fn sizeof_type_spec(ts: &TypeSpecifier) -> usize {
+        // For types we can't compute at parse time, fall back conservatively.
+        // Use try_sizeof_type_spec() when an incorrect fallback would be harmful.
+        Self::try_sizeof_type_spec(ts).unwrap_or_else(|| {
+            use crate::common::types::target_ptr_size;
+            match ts {
+                TypeSpecifier::Enum(_, _, _) => 4, // enums are int-sized by default
+                _ => target_ptr_size(),             // struct/union/typedef
+            }
+        })
+    }
+
+    /// Try to compute sizeof for a type specifier. Returns None for types
+    /// whose size cannot be determined at parse time (struct, union, typedef).
+    /// Use this in constant expression evaluation where a wrong default would
+    /// cause spurious errors (e.g., _Static_assert).
+    pub(super) fn try_sizeof_type_spec(ts: &TypeSpecifier) -> Option<usize> {
         use crate::common::types::target_ptr_size;
         let ptr_sz = target_ptr_size();
         match ts {
             TypeSpecifier::Void | TypeSpecifier::Bool
-            | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
-            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
+            | TypeSpecifier::Char | TypeSpecifier::UnsignedChar => Some(1),
+            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => Some(2),
             TypeSpecifier::Int | TypeSpecifier::UnsignedInt
             | TypeSpecifier::Signed | TypeSpecifier::Unsigned
-            | TypeSpecifier::Float => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => ptr_sz,
+            | TypeSpecifier::Float => Some(4),
+            TypeSpecifier::Long | TypeSpecifier::UnsignedLong => Some(ptr_sz),
             TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong
-            | TypeSpecifier::Double => 8,
-            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => ptr_sz,
-            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
-            TypeSpecifier::LongDouble => if ptr_sz == 4 { 12 } else { 16 },
-            TypeSpecifier::ComplexFloat => 8,
-            TypeSpecifier::ComplexDouble => 16,
-            TypeSpecifier::ComplexLongDouble => if ptr_sz == 4 { 24 } else { 32 },
+            | TypeSpecifier::Double => Some(8),
+            TypeSpecifier::Pointer(_, _) | TypeSpecifier::FunctionPointer(_, _, _) => Some(ptr_sz),
+            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => Some(16),
+            TypeSpecifier::LongDouble => Some(if ptr_sz == 4 { 12 } else { 16 }),
+            TypeSpecifier::ComplexFloat => Some(8),
+            TypeSpecifier::ComplexDouble => Some(16),
+            TypeSpecifier::ComplexLongDouble => Some(if ptr_sz == 4 { 24 } else { 32 }),
             TypeSpecifier::Array(elem, Some(size_expr)) => {
-                let elem_size = Self::sizeof_type_spec(elem);
-                let count = Self::eval_const_int_expr(size_expr).unwrap_or(0) as usize;
-                elem_size * count
+                let elem_size = Self::try_sizeof_type_spec(elem)?;
+                let count = Self::eval_const_int_expr(size_expr)? as usize;
+                Some(elem_size * count)
             }
-            TypeSpecifier::Array(_, None) => 0,
-            TypeSpecifier::Enum(_, _, _) => 4,
-            _ => ptr_sz, // conservative default for struct/union/typedef
+            TypeSpecifier::Array(_, None) => Some(0),
+            // Enum, struct, union, typedef: size not reliably known at parse time.
+            // Enums can be __packed (1 byte), and struct/union sizes depend on layout.
+            _ => None,
         }
     }
 

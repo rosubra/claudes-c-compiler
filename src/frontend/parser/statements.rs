@@ -65,10 +65,7 @@ impl Parser {
                 continue;
             }
             if matches!(self.peek(), TokenKind::StaticAssert) {
-                // _Static_assert - skip entirely (no codegen needed)
-                self.advance();
-                self.skip_balanced_parens();
-                self.consume_if(&TokenKind::Semicolon);
+                self.parse_static_assert();
             } else if self.is_type_specifier() {
                 if let Some(decl) = self.parse_local_declaration() {
                     items.push(BlockItem::Declaration(decl));
