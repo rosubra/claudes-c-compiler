@@ -1,0 +1,10 @@
+Fix linker argument ordering to preserve relative order of objects and -Wl, flags.
+
+Problem: The driver separates object/archive files from -l/-Wl, flags during parsing,
+then places all objects before all flags at link time. This breaks -Wl,--whole-archive
+which must appear before the .a file it affects.
+
+Fix: Add a linker_ordered_items field that tracks the relative CLI order of passthrough
+objects, -l flags, and -Wl, flags. Use this ordering when building the final link command.
+
+This fixes squashfuse (and any libtool-based project using --whole-archive).
