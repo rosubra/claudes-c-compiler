@@ -841,10 +841,17 @@ impl Driver {
 
     /// Delegate compilation to the system GCC when we can't handle the target mode
     /// (e.g., -m16 or -m32 for 32-bit/16-bit x86 code).
-    /// Forwards all original command-line arguments to GCC verbatim.
+    ///
+    /// Filters out flags that the system GCC may not support. This is necessary
+    /// because ccc silently accepts unknown flags (returning success), so the
+    /// kernel's `cc-option` mechanism thinks ccc supports GCC-version-specific
+    /// flags. When ccc falls back to the system GCC (which may be a different
+    /// version than what ccc impersonates), those flags can cause errors.
     fn run_gcc_fallback(&self) -> Result<(), String> {
+        let filtered_args = self.filter_args_for_system_gcc();
+
         let mut cmd = std::process::Command::new("gcc");
-        cmd.args(&self.original_args);
+        cmd.args(&filtered_args);
 
         let result = cmd.output()
             .map_err(|e| format!("Failed to run gcc fallback: {}", e))?;
@@ -865,6 +872,56 @@ impl Driver {
         }
 
         Ok(())
+    }
+
+    /// Filter command-line arguments to remove flags the system GCC doesn't support.
+    ///
+    /// ccc pretends to be GCC 6.5 (__GNUC__=6, __GNUC_MINOR__=5), but the system
+    /// GCC is typically a different version. The kernel adds version-specific flags
+    /// based on cc-option tests (which always pass with ccc since it silently accepts
+    /// unknown flags). We test each potentially problematic flag against the real
+    /// system GCC and remove those it rejects.
+    fn filter_args_for_system_gcc(&self) -> Vec<String> {
+        use std::collections::HashSet;
+
+        // Identify flags that might be version-specific and need testing.
+        // These are flags that ccc silently accepts but may not exist in the
+        // system GCC: --param=..., -fmin-function-alignment, etc.
+        let mut flags_to_test: Vec<&str> = Vec::new();
+        for arg in &self.original_args {
+            if arg.starts_with("--param=") ||
+               arg == "-fmin-function-alignment" ||
+               arg.starts_with("-fmin-function-alignment=") {
+                flags_to_test.push(arg.as_str());
+            }
+        }
+
+        // Test each flag against the system GCC
+        let mut rejected_flags: HashSet<String> = HashSet::new();
+        for flag in &flags_to_test {
+            if !Self::system_gcc_accepts_flag(flag) {
+                rejected_flags.insert(flag.to_string());
+            }
+        }
+
+        // Build filtered arg list, skipping rejected flags
+        self.original_args.iter()
+            .filter(|arg| !rejected_flags.contains(arg.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Test whether the system GCC accepts a given flag by compiling /dev/null.
+    fn system_gcc_accepts_flag(flag: &str) -> bool {
+        let result = std::process::Command::new("gcc")
+            .args(&["-Werror", flag, "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match result {
+            Ok(status) => status.success(),
+            Err(_) => true, // If we can't run gcc, don't filter (let it fail naturally)
+        }
     }
 
     /// Core pipeline: preprocess, lex, parse, sema, lower, optimize, codegen.
