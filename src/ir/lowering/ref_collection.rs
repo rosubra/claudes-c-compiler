@@ -67,6 +67,17 @@ impl Lowerer {
             }
         }
 
+        // Constructor and destructor functions are roots: they will be called by
+        // the runtime via .init_array/.fini_array, so any functions they reference
+        // must also be preserved. The constructor/destructor names were collected
+        // into module.constructors/destructors in an earlier pass.
+        for ctor in &self.module.constructors {
+            referenced.insert(ctor.clone());
+        }
+        for dtor in &self.module.destructors {
+            referenced.insert(dtor.clone());
+        }
+
         // Transitive closure: use a worklist to propagate reachability through
         // skippable functions. When a skippable function is found to be referenced,
         // add all of its own references to the worklist.

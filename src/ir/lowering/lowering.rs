@@ -614,7 +614,10 @@ impl Lowerer {
                     } else {
                         false
                     };
-                    if can_skip && !func.attrs.is_used() && !referenced_statics.contains(&func.name) {
+                    if can_skip && !func.attrs.is_used()
+                        && !func.attrs.is_constructor() && !self.module.constructors.contains(&func.name)
+                        && !func.attrs.is_destructor() && !self.module.destructors.contains(&func.name)
+                        && !referenced_statics.contains(&func.name) {
                         continue;
                     }
                     self.lower_function(func);

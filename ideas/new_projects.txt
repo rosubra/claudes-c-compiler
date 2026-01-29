@@ -15,6 +15,16 @@ PASSING projects (confirmed):
 - parson (JSON - passes all 4 architectures)
 - MuJS (JavaScript interpreter - passes x86/ARM/RISC-V; i686 has pre-existing float issues)
 - stc (C containers library - FIXED compound literal array bugs; passes x86/ARM/RISC-V; i686 39/40 pre-existing regex issue)
+- tinyexpr, genann, md4c, xxhash, linenoise, smaz, shoco, libcsv, libfastcdc (small libraries)
+- heatshrink, tiny-regex-c, munit, libconfig, tinycthread, peg_leg, whereami, optparse (misc)
+- getopt_standalone, vedis, lmdb, libgrapheme, oniguruma, libucl (misc)
+- wasm3, samurai, jo_gif, incbin, pngcrush, lzw, uzlib (misc)
+- olive.c, par, par_shapes (graphics utils)
+- Elk, SmallerC (interpreters/compilers)
+- lexbor, termbox, stb_ds, pkgconf, check (misc)
+- tree, sinit, minunit, greatest, dnsmasq (misc)
+- tdb, sophia, shapelib, minilzo, lwrb (data/compression)
+- tinn (neural net)
 
 FAILING projects (investigated):
 - yyjson: cmake build fails
@@ -32,6 +42,11 @@ FAILING projects (investigated):
 - sqlite: 17 parse errors (function pointer cast syntax)
 - libexpat: linker error
 - libpcap: undeclared HCIGETDEVINFO
+- sokol: links now (constructor fix), but segfaults at runtime
+- Janet: compile error in bootstrap (uninitialized memory / codegen bug)
+- lcc: rcc segfaults (complex codegen issue)
+- scc: build failure in z80 target
+- JerryScript: cmake build errors
 
 NOT TESTED / NO CHECK SCRIPT:
 - map, gb_string, chipmunk2d, civetweb, tweetnacl: missing test files
