@@ -428,13 +428,22 @@ fn hoist_loop_invariants(
         None => return 0, // No suitable preheader found
     };
 
-    // Build the set of Value IDs defined inside the loop
+    // Build the set of Value IDs defined inside the loop.
+    // InlineAsm outputs are included: after mem2reg promotion, InlineAsm output
+    // pointers become fresh SSA values that define new values, but
+    // Instruction::dest() returns None for InlineAsm, so we must add them
+    // explicitly to prevent LICM from hoisting uses of those values.
     let mut loop_defined: FxHashSet<u32> = FxHashSet::default();
     for &block_idx in &natural_loop.body {
         if block_idx < func.blocks.len() {
             for inst in &func.blocks[block_idx].instructions {
                 if let Some(dest) = inst.dest() {
                     loop_defined.insert(dest.0);
+                }
+                if let Instruction::InlineAsm { outputs, .. } = inst {
+                    for (_, out_val, _) in outputs {
+                        loop_defined.insert(out_val.0);
+                    }
                 }
             }
         }
@@ -1112,5 +1121,144 @@ mod tests {
 
         // The cond block should still have its load + cmp
         assert_eq!(func.blocks[2].instructions.len(), 2);
+    }
+
+    #[test]
+    fn test_promoted_asm_output_not_hoisted() {
+        // Regression test: after mem2reg promotes an InlineAsm output alloca to
+        // an SSA value, LICM must recognize the fresh SSA output as loop-defined.
+        // Without this fix, LICM incorrectly hoists instructions using the
+        // InlineAsm output because Instruction::dest() returns None for InlineAsm,
+        // so the output value doesn't appear in loop_defined.
+        //
+        // This is the pattern from Linux kernel's per_cpu_ptr macro:
+        //   asm("" : "=r"(__ptr) : "0"(addr))  →  output is fresh SSA Value
+        //   result = __ptr + __per_cpu_offset[cpu]
+        //
+        // After mem2reg, the InlineAsm output is Value(5) (not an alloca).
+        // The Copy from Value(5) must NOT be hoisted to the preheader.
+        //
+        // entry:
+        //   %0 = globaladdr @addr        (loop-invariant address)
+        //   br loop_header
+        //
+        // loop_header:
+        //   %3 = phi [entry: 0, body: %7]
+        //   %4 = cmp lt %3, 10
+        //   br %4, body, exit
+        //
+        // body:
+        //   inline_asm outputs=[%5] inputs=[%0]  (%5 is fresh SSA output)
+        //   %6 = copy %5                         (must NOT be hoisted)
+        //   %7 = binop add %3, 1
+        //   br loop_header
+        //
+        // exit:
+        //   ret 0
+        use crate::common::types::AddressSpace;
+
+        let mut func = IrFunction::new("test_promoted_asm".to_string(), IrType::I32, vec![], false);
+
+        // Block 0 (entry): globaladdr + branch
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::GlobalAddr {
+                    dest: Value(0),
+                    name: "addr".to_string(),
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)),
+            source_spans: Vec::new(),
+        });
+
+        // Block 1 (loop_header): phi + cmp + condbranch
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![
+                Instruction::Phi {
+                    dest: Value(3),
+                    ty: IrType::I32,
+                    incoming: vec![
+                        (Operand::Const(IrConst::I32(0)), BlockId(0)),
+                        (Operand::Value(Value(7)), BlockId(2)),
+                    ],
+                },
+                Instruction::Cmp {
+                    dest: Value(4),
+                    op: IrCmpOp::Slt,
+                    lhs: Operand::Value(Value(3)),
+                    rhs: Operand::Const(IrConst::I32(10)),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Value(Value(4)),
+                true_label: BlockId(2),   // body
+                false_label: BlockId(3),  // exit
+            },
+            source_spans: Vec::new(),
+        });
+
+        // Block 2 (body): inline asm with promoted output + copy + increment
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![
+                // InlineAsm with promoted output: Value(5) is a fresh SSA value
+                // (not an alloca pointer). This is what mem2reg produces.
+                Instruction::InlineAsm {
+                    template: String::new(), // empty template like per_cpu_ptr
+                    outputs: vec![("=r".to_string(), Value(5), None)],
+                    inputs: vec![("0".to_string(), Operand::Value(Value(0)), None)],
+                    clobbers: vec![],
+                    operand_types: vec![IrType::I64],
+                    goto_labels: vec![],
+                    input_symbols: vec![],
+                    seg_overrides: vec![AddressSpace::Default],
+                },
+                // Copy from the InlineAsm output — this MUST NOT be hoisted
+                Instruction::Copy {
+                    dest: Value(6),
+                    src: Operand::Value(Value(5)),
+                },
+                // Loop increment
+                Instruction::BinOp {
+                    dest: Value(7),
+                    op: IrBinOp::Add,
+                    lhs: Operand::Value(Value(3)),
+                    rhs: Operand::Const(IrConst::I32(1)),
+                    ty: IrType::I32,
+                },
+            ],
+            terminator: Terminator::Branch(BlockId(1)), // back to header
+            source_spans: Vec::new(),
+        });
+
+        // Block 3 (exit)
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(0)))),
+            source_spans: Vec::new(),
+        });
+
+        func.next_value_id = 8;
+
+        let alloca_info = analyze_allocas(&func);
+        let label_to_idx = analysis::build_label_map(&func);
+        let (preds, succs) = analysis::build_cfg(&func, &label_to_idx);
+        let idom = analysis::compute_dominators(func.blocks.len(), &preds, &succs);
+        let loops = loop_analysis::find_natural_loops(func.blocks.len(), &preds, &succs, &idom);
+
+        assert_eq!(loops.len(), 1);
+        let hoisted = hoist_loop_invariants(&mut func, &loops[0], &preds, &alloca_info);
+
+        // The Copy from Value(5) must NOT be hoisted because Value(5) is
+        // defined by InlineAsm inside the loop. The BinOp depends on the
+        // phi (also loop-defined), so it shouldn't be hoisted either.
+        assert_eq!(hoisted, 0, "Nothing should be hoisted: Copy depends on InlineAsm output defined inside loop");
+
+        // The body block should still have all 3 instructions
+        assert_eq!(func.blocks[2].instructions.len(), 3);
     }
 }

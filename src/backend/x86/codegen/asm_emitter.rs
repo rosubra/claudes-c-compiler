@@ -531,7 +531,7 @@ impl InlineAsmEmitter for X86Codegen {
                     IrType::F128 => "fstpt",
                     _ => "fstpl", // F64 and default
                 };
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     self.state.emit_fmt(format_args!("    {} {}(%rbp)", fstp_instr, slot.0));
                 } else {
                     // Non-alloca: slot holds a pointer, store through it
@@ -555,7 +555,7 @@ impl InlineAsmEmitter for X86Codegen {
             // Store the result (0 or 1) to the output variable
             if let Some(slot) = self.state.get_slot(ptr.0) {
                 let ty = op.operand_type;
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     let store_instr = Self::mov_store_for_type(ty);
                     let src_reg = match ty {
                         IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
@@ -587,7 +587,7 @@ impl InlineAsmEmitter for X86Codegen {
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_xmm {
                 // XMM register: use SSE/AVX store instructions
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     // Alloca: vector data lives directly in the stack slot.
                     // Use movdqu for a full 128-bit store for vector types
                     // (unaligned-safe since stack allocas may not be 16-byte aligned).
@@ -609,8 +609,8 @@ impl InlineAsmEmitter for X86Codegen {
                     self.state.emit_fmt(format_args!("    {} %{}, (%{})", store_instr, reg, scratch));
                     self.state.out.emit_instr_reg("    popq", scratch);
                 }
-            } else if self.state.is_alloca(ptr.0) {
-                // Alloca: store directly to the stack slot with type-appropriate size
+            } else if self.state.is_direct_slot(ptr.0) {
+                // Alloca/promoted asm output: store directly to the stack slot
                 let store_instr = Self::mov_store_for_type(ty);
                 let src_reg = match ty {
                     IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),

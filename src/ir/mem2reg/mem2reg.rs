@@ -263,6 +263,27 @@ fn find_promotable_allocas(func: &IrFunction, promote_params: bool) -> Vec<Alloc
                         }
                     }
                 }
+                // InlineAsm: output pointers act as definitions (like Store),
+                // while input operand Values that are allocas disqualify them
+                // (the address is taken for memory/address constraints).
+                Instruction::InlineAsm { outputs, inputs, .. } => {
+                    // Output pointers: treat as definitions of the alloca
+                    for (_, ptr, _) in outputs {
+                        if candidate_set.contains(&ptr.0) && !disqualified.contains(&ptr.0) {
+                            def_blocks.entry(ptr.0).or_default().insert(block_idx);
+                        }
+                    }
+                    // Input operands: if a candidate alloca appears as a Value,
+                    // its address is being taken (e.g., for "+m" or "+A" constraints).
+                    // This disqualifies it from promotion.
+                    for (_, op, _) in inputs {
+                        if let Operand::Value(v) = op {
+                            if candidate_set.contains(&v.0) {
+                                disqualified.insert(v.0);
+                            }
+                        }
+                    }
+                }
                 // Any other use of the alloca value disqualifies it
                 _ => {
                     for used_val in inst.used_values() {
@@ -511,6 +532,25 @@ fn rename_block(
                     new_instructions.push(Instruction::Store { val, ptr, ty, seg_override });
                     if has_spans { new_spans.push(old_spans[inst_idx]); }
                 }
+            }
+            Instruction::InlineAsm {
+                template, mut outputs, inputs, clobbers,
+                operand_types, goto_labels, input_symbols, seg_overrides,
+            } => {
+                // Replace output pointers that are promoted allocas with fresh SSA values
+                for (_, out_ptr, _) in outputs.iter_mut() {
+                    if let Some(&alloca_idx) = alloca_to_idx.get(&out_ptr.0) {
+                        let fresh = Value(*next_value);
+                        *next_value += 1;
+                        *out_ptr = fresh;
+                        def_stacks[alloca_idx].push(Operand::Value(fresh));
+                    }
+                }
+                new_instructions.push(Instruction::InlineAsm {
+                    template, outputs, inputs, clobbers,
+                    operand_types, goto_labels, input_symbols, seg_overrides,
+                });
+                if has_spans { new_spans.push(old_spans[inst_idx]); }
             }
             other => {
                 new_instructions.push(other);
@@ -1008,5 +1048,145 @@ mod tests {
         assert!(df[2].contains(&3));
         assert!(df[0].is_empty());
         assert!(df[3].is_empty());
+    }
+
+    #[test]
+    fn test_inline_asm_output_promotion() {
+        // Test that mem2reg promotes an alloca used as an InlineAsm output
+        // with a register constraint ("=r"). The alloca should be replaced
+        // with a fresh SSA value in the InlineAsm output.
+        //
+        // Pattern: unsigned long __ptr;
+        //          asm("" : "=r"(__ptr) : "0"(addr));
+        //          return __ptr;
+        //
+        // Before mem2reg:
+        //   %0 = alloca i64
+        //   inline_asm outputs=[("=r", %0)] inputs=[("0", ...)]
+        //   %1 = load %0
+        //   ret %1
+        //
+        // After mem2reg:
+        //   inline_asm outputs=[("=r", %fresh)] inputs=[...]
+        //   %1 = copy Value(%fresh)
+        //   ret %1
+        let mut func = IrFunction::new("test_asm_promote".to_string(), IrType::I64, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                // %0 = alloca i64
+                Instruction::Alloca { dest: Value(0), ty: IrType::I64, size: 8, align: 8, volatile: false },
+                // inline_asm outputs=[("=r", %0)]
+                Instruction::InlineAsm {
+                    template: String::new(),
+                    outputs: vec![("=r".to_string(), Value(0), None)],
+                    inputs: vec![("0".to_string(), Operand::Const(IrConst::I64(100)), None)],
+                    clobbers: vec![],
+                    operand_types: vec![IrType::I64],
+                    goto_labels: vec![],
+                    input_symbols: vec![],
+                    seg_overrides: vec![AddressSpace::Default],
+                },
+                // %1 = load %0
+                Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I64,
+                    seg_override: AddressSpace::Default },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+            source_spans: Vec::new(),
+        });
+        func.next_value_id = 2;
+
+        let mut module = IrModule::new();
+        module.functions.push(func);
+        promote_allocas(&mut module);
+
+        let func = &module.functions[0];
+        // The alloca should be gone (promoted)
+        let has_alloca = func.blocks[0].instructions.iter().any(|inst|
+            matches!(inst, Instruction::Alloca { .. })
+        );
+        assert!(!has_alloca, "Alloca should be promoted when used only as InlineAsm output");
+
+        // The InlineAsm should now have a fresh SSA value as output (not the alloca)
+        let asm_output = func.blocks[0].instructions.iter().find_map(|inst| {
+            if let Instruction::InlineAsm { outputs, .. } = inst {
+                Some(outputs[0].1.0) // Value ID of first output
+            } else {
+                None
+            }
+        });
+        assert!(asm_output.is_some(), "InlineAsm instruction should exist");
+        let fresh_id = asm_output.unwrap();
+        assert_ne!(fresh_id, 0, "InlineAsm output should be a fresh value, not the original alloca");
+
+        // The load should be replaced with a Copy from the fresh value
+        let has_copy_from_fresh = func.blocks[0].instructions.iter().any(|inst| {
+            if let Instruction::Copy { src: Operand::Value(v), .. } = inst {
+                v.0 == fresh_id
+            } else {
+                false
+            }
+        });
+        assert!(has_copy_from_fresh, "Load should be replaced with Copy from fresh InlineAsm output");
+
+        // No Load instruction should remain (it was promoted to Copy)
+        let has_load = func.blocks[0].instructions.iter().any(|inst|
+            matches!(inst, Instruction::Load { .. })
+        );
+        assert!(!has_load, "Load from promoted alloca should be removed");
+    }
+
+    #[test]
+    fn test_inline_asm_memory_constraint_not_promoted() {
+        // InlineAsm with memory/address constraints ("+m", "+A") should NOT
+        // be promoted because the alloca address is passed as a Value operand.
+        //
+        // Pattern: asm("csrrw %0, satp, %1" : "+m"(*ptr) : ...)
+        //
+        // The alloca's address is taken (used as input Value), so it must stay.
+        let mut func = IrFunction::new("test_asm_no_promote".to_string(), IrType::I64, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                // %0 = alloca i64
+                Instruction::Alloca { dest: Value(0), ty: IrType::I64, size: 8, align: 8, volatile: false },
+                // store 42, %0
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I64(42)),
+                    ptr: Value(0),
+                    ty: IrType::I64,
+                    seg_override: AddressSpace::Default,
+                },
+                // inline_asm outputs=[("=m", %0)] inputs=[("m", Value(%0))]
+                // The input uses the alloca's address (Value(%0)), which means address-taken
+                Instruction::InlineAsm {
+                    template: "nop".to_string(),
+                    outputs: vec![("=r".to_string(), Value(0), None)],
+                    inputs: vec![("m".to_string(), Operand::Value(Value(0)), None)],
+                    clobbers: vec![],
+                    operand_types: vec![IrType::I64],
+                    goto_labels: vec![],
+                    input_symbols: vec![],
+                    seg_overrides: vec![AddressSpace::Default, AddressSpace::Default],
+                },
+                // %1 = load %0
+                Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I64,
+                    seg_override: AddressSpace::Default },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+            source_spans: Vec::new(),
+        });
+        func.next_value_id = 2;
+
+        let mut module = IrModule::new();
+        module.functions.push(func);
+        promote_allocas(&mut module);
+
+        let func = &module.functions[0];
+        // The alloca should still exist (NOT promoted because address is taken via input)
+        let has_alloca = func.blocks[0].instructions.iter().any(|inst|
+            matches!(inst, Instruction::Alloca { .. })
+        );
+        assert!(has_alloca, "Alloca should NOT be promoted when its address is used as InlineAsm input Value");
     }
 }

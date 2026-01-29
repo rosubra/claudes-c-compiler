@@ -242,6 +242,22 @@ pub fn compute_live_intervals(func: &IrFunction) -> LivenessResult {
             // Record uses before defs
             record_instruction_uses_dense(inst, point, &alloca_set, &id_to_dense, &mut last_use_points);
 
+            // Record InlineAsm output definitions BEFORE gen collection so
+            // that promoted (non-alloca) outputs are in the kill set and won't
+            // be treated as upward-exposed uses.
+            if let Instruction::InlineAsm { outputs, .. } = inst {
+                for (_, out_val, _) in outputs {
+                    if !alloca_set.contains(&out_val.0) {
+                        if let Some(&dense) = id_to_dense.get(&out_val.0) {
+                            if def_points[dense] == u32::MAX {
+                                def_points[dense] = point;
+                            }
+                            kill.insert(dense);
+                        }
+                    }
+                }
+            }
+
             // Collect gen/kill for dataflow
             collect_instruction_gen_dense(inst, &alloca_set, &id_to_dense, &kill, &mut gen);
 

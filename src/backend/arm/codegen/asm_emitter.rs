@@ -279,7 +279,7 @@ impl InlineAsmEmitter for ArmCodegen {
                 // Move to a scratch register first, then store.
                 self.state.emit("    mov x9, sp");
                 self.emit_store_to_sp("x9", slot.0, "str");
-            } else if self.state.is_alloca(ptr.0) {
+            } else if self.state.is_direct_slot(ptr.0) {
                 self.emit_store_to_sp(reg, slot.0, "str");
             } else {
                 // Non-alloca: slot holds a pointer, store through it.

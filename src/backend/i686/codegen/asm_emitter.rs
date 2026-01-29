@@ -421,7 +421,7 @@ impl InlineAsmEmitter for I686Codegen {
                     IrType::F128 => "fstpt",
                     _ => "fstpl",
                 };
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     self.state.emit_fmt(format_args!("    {} {}(%ebp)", fstp_instr, slot.0));
                 } else {
                     self.state.emit("    pushl %ecx");
@@ -441,7 +441,7 @@ impl InlineAsmEmitter for I686Codegen {
             self.state.emit_fmt(format_args!("    movzbl %{}, %{}", reg8, Self::reg_to_32(reg)));
             if let Some(slot) = self.state.get_slot(ptr.0) {
                 let ty = op.operand_type;
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     let store_instr = Self::i686_mov_store_for_type(ty);
                     let src = Self::src_reg_for_type(reg, ty);
                     self.state.emit_fmt(format_args!("    {} %{}, {}(%ebp)", store_instr, src, slot.0));
@@ -463,7 +463,7 @@ impl InlineAsmEmitter for I686Codegen {
         let is_xmm = reg.starts_with("xmm");
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_xmm {
-                if self.state.is_alloca(ptr.0) {
+                if self.state.is_direct_slot(ptr.0) {
                     let store_instr = match ty {
                         IrType::F32 => "movss",
                         IrType::F64 => "movsd",
@@ -480,7 +480,7 @@ impl InlineAsmEmitter for I686Codegen {
                     self.state.emit_fmt(format_args!("    {} %{}, (%ecx)", store_instr, reg));
                     self.state.emit("    popl %ecx");
                 }
-            } else if self.state.is_alloca(ptr.0) {
+            } else if self.state.is_direct_slot(ptr.0) {
                 let store_instr = Self::i686_mov_store_for_type(ty);
                 let src = Self::src_reg_for_type(reg, ty);
                 self.state.emit_fmt(format_args!("    {} %{}, {}(%ebp)", store_instr, src, slot.0));

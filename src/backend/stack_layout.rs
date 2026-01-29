@@ -882,6 +882,29 @@ fn classify_instructions(
                     assign_slot, non_local_space, deferred_slots,
                     block_space, max_block_local_space,
                 );
+            } else if let Instruction::InlineAsm { outputs, operand_types, .. } = inst {
+                // Promoted InlineAsm output values need stack slots to hold
+                // the output register value. These are "direct" slots (like
+                // allocas) -- the slot contains the value itself, not a pointer.
+                for (out_idx, (_, out_val, _)) in outputs.iter().enumerate() {
+                    if !state.alloca_values.contains(&out_val.0)
+                        && collected_values.insert(out_val.0)
+                    {
+                        let slot_size: i64 = if out_idx < operand_types.len() {
+                            match operand_types[out_idx] {
+                                IrType::I128 | IrType::U128 | IrType::F128 => 16,
+                                _ => 8,
+                            }
+                        } else {
+                            8
+                        };
+                        state.asm_output_values.insert(out_val.0);
+                        multi_block_values.push(MultiBlockValue {
+                            dest_id: out_val.0,
+                            slot_size,
+                        });
+                    }
+                }
             } else if let Some(dest) = inst.dest() {
                 classify_value(
                     state, dest, inst, ctx, reg_assigned,

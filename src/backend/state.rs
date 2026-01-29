@@ -160,6 +160,11 @@ pub struct CodegenState {
     /// Used by resolve_slot_addr to return a dummy Indirect slot for these values,
     /// which is safe because all Indirect codepaths check reg_assignments first.
     pub reg_assigned_values: FxHashSet<u32>,
+    /// Values that are promoted InlineAsm output results. Like allocas, their
+    /// stack slot holds the value directly (not a pointer). The asm emitter
+    /// stores the output register to this slot after the asm, and subsequent
+    /// uses load the value from it.
+    pub asm_output_values: FxHashSet<u32>,
     /// Whether to emit .file/.loc debug directives for source-level debugging.
     pub debug_info: bool,
     /// Pre-computed parameter classifications for the current function.
@@ -208,6 +213,7 @@ impl CodegenState {
             no_jump_tables: false,
             weak_extern_symbols: FxHashSet::default(),
             reg_assigned_values: FxHashSet::default(),
+            asm_output_values: FxHashSet::default(),
             debug_info: false,
             param_classes: Vec::new(),
             num_params: 0,
@@ -277,6 +283,7 @@ impl CodegenState {
         self.f128_direct_slots.clear();
         self.f128_load_sources.clear();
         self.reg_assigned_values.clear();
+        self.asm_output_values.clear();
         self.uses_sret = false;
     }
 
@@ -287,6 +294,13 @@ impl CodegenState {
 
     pub fn is_alloca(&self, v: u32) -> bool {
         self.alloca_values.contains(&v)
+    }
+
+    /// Check if a value has a direct stack slot (the slot holds the value itself,
+    /// not a pointer to the value). This is true for allocas and promoted InlineAsm
+    /// output values.
+    pub fn is_direct_slot(&self, v: u32) -> bool {
+        self.alloca_values.contains(&v) || self.asm_output_values.contains(&v)
     }
 
     pub fn get_slot(&self, v: u32) -> Option<StackSlot> {

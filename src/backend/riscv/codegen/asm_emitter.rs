@@ -270,7 +270,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                 // Use fsw for F32, fsd for F64/other
                 let store_op = if op.operand_type == IrType::F32 { "fsw" } else { "fsd" };
                 if let Some(slot) = self.state.get_slot(ptr.0) {
-                    if self.state.is_alloca(ptr.0) {
+                    if self.state.is_direct_slot(ptr.0) {
                         self.emit_store_to_s0(&reg, slot.0, store_op);
                     } else {
                         // Non-alloca: slot holds a pointer, store through it.
@@ -289,7 +289,7 @@ impl InlineAsmEmitter for RiscvCodegen {
             _ => {
                 let reg = op.reg.clone();
                 if let Some(slot) = self.state.get_slot(ptr.0) {
-                    if self.state.is_alloca(ptr.0) {
+                    if self.state.is_direct_slot(ptr.0) {
                         self.emit_store_to_s0(&reg, slot.0, "sd");
                     } else {
                         // Non-alloca: slot holds a pointer, store through it.
