@@ -144,166 +144,176 @@ impl Lexer {
     }
 
     fn lex_number(&mut self, start: usize) -> Token {
-        // Handle hex (integers and hex float literals)
         if self.pos + 1 < self.input.len() && self.input[self.pos] == b'0'
             && (self.input[self.pos + 1] == b'x' || self.input[self.pos + 1] == b'X')
         {
-            self.pos += 2;
-            let hex_start = self.pos;
-            while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
-                self.pos += 1;
-            }
-
-            // Check for hex float: 0x<digits>.<digits>p<exp> or 0x<digits>p<exp>
-            let has_dot = self.pos < self.input.len() && self.input[self.pos] == b'.';
-            let after_dot_has_p = if has_dot {
-                // Look ahead past fractional hex digits for 'p'/'P'
-                let mut look = self.pos + 1;
-                while look < self.input.len() && self.input[look].is_ascii_hexdigit() {
-                    look += 1;
-                }
-                look < self.input.len() && (self.input[look] == b'p' || self.input[look] == b'P')
-            } else {
-                false
-            };
-            let has_p = self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P');
-
-            if has_dot && after_dot_has_p || has_p {
-                // Hex float literal: 0x<int_hex>.<frac_hex>p<+/->exp
-                let int_hex = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
-
-                let frac_hex = if has_dot {
-                    self.pos += 1; // skip '.'
-                    let frac_start = self.pos;
-                    while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
-                        self.pos += 1;
-                    }
-                    std::str::from_utf8(&self.input[frac_start..self.pos]).unwrap_or("")
-                } else {
-                    ""
-                };
-
-                // Parse 'p'/'P' exponent (mandatory for hex floats)
-                let exp: i64 = if self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P') {
-                    self.pos += 1;
-                    let exp_neg = if self.pos < self.input.len() && self.input[self.pos] == b'-' {
-                        self.pos += 1;
-                        true
-                    } else {
-                        if self.pos < self.input.len() && self.input[self.pos] == b'+' {
-                            self.pos += 1;
-                        }
-                        false
-                    };
-                    let exp_start = self.pos;
-                    while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
-                        self.pos += 1;
-                    }
-                    let exp_str = std::str::from_utf8(&self.input[exp_start..self.pos]).unwrap_or("0");
-                    let e: i64 = exp_str.parse().unwrap_or(0);
-                    if exp_neg { -e } else { e }
-                } else {
-                    0
-                };
-
-                // Convert hex float to f64: value = (int_part + frac_part) * 2^exp
-                let int_val = u64::from_str_radix(int_hex, 16).unwrap_or(0) as f64;
-                let frac_val: f64 = if !frac_hex.is_empty() {
-                    let frac_int = u64::from_str_radix(frac_hex, 16).unwrap_or(0) as f64;
-                    frac_int / (16.0_f64).powi(frac_hex.len() as i32)
-                } else {
-                    0.0
-                };
-                let value = (int_val + frac_val) * (2.0_f64).powi(exp as i32);
-
-                // Check float suffix: f/F = float, l/L = long double
-                // 0 = double, 1 = float, 2 = long double
-                let hex_float_kind = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
-                    self.pos += 1;
-                    1 // float
-                } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
-                    self.pos += 1;
-                    2 // long double
-                } else {
-                    0 // double
-                };
-
-                let span = Span::new(start as u32, self.pos as u32, self.file_id);
-                return match hex_float_kind {
-                    1 => Token::new(TokenKind::FloatLiteralF32(value), span),
-                    2 => {
-                        // Parse hex float with full f128 precision for long double
-                        let hex_text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0x0p0");
-                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(hex_text);
-                        Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
-                    }
-                    _ => Token::new(TokenKind::FloatLiteral(value), span),
-                };
-            }
-
-            // Regular hex integer
-            let hex_str = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
-            let value = u64::from_str_radix(hex_str, 16).unwrap_or(0);
-            let (is_unsigned, is_long, is_long_long, is_imaginary) = self.parse_int_suffix();
-            if is_imaginary {
-                let span = Span::new(start as u32, self.pos as u32, self.file_id);
-                return Token::new(TokenKind::ImaginaryLiteral(value as f64), span);
-            }
-            return self.make_int_token(value, is_unsigned, is_long, is_long_long, true, start);
+            return self.lex_hex_number(start);
         }
 
-        // Handle binary (0b/0B)
         if self.pos + 1 < self.input.len() && self.input[self.pos] == b'0'
             && (self.input[self.pos + 1] == b'b' || self.input[self.pos + 1] == b'B')
         {
-            self.pos += 2;
-            let bin_start = self.pos;
-            while self.pos < self.input.len() && (self.input[self.pos] == b'0' || self.input[self.pos] == b'1') {
-                self.pos += 1;
-            }
-            let bin_str = std::str::from_utf8(&self.input[bin_start..self.pos]).unwrap_or("0");
-            let value = u64::from_str_radix(bin_str, 2).unwrap_or(0);
-            let (is_unsigned, is_long, is_long_long, is_imaginary) = self.parse_int_suffix();
-            if is_imaginary {
-                let span = Span::new(start as u32, self.pos as u32, self.file_id);
-                return Token::new(TokenKind::ImaginaryLiteral(value as f64), span);
-            }
-            return self.make_int_token(value, is_unsigned, is_long, is_long_long, true, start);
+            return self.lex_binary_number(start);
         }
 
-        // Handle octal (but not if followed by '.' or 'e'/'E' which makes it a float)
-        if self.input[self.pos] == b'0' && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
-            // Save position to backtrack if this turns out to be a float
-            let saved_pos = self.pos;
+        if let Some(tok) = self.lex_octal_number(start) {
+            return tok;
+        }
+
+        self.lex_decimal_number(start)
+    }
+
+    /// Lex a hexadecimal integer or hex float literal (0x/0X prefix).
+    fn lex_hex_number(&mut self, start: usize) -> Token {
+        self.pos += 2;
+        let hex_start = self.pos;
+        while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
             self.pos += 1;
-            let oct_start = self.pos;
-            while self.pos < self.input.len() && self.input[self.pos] >= b'0' && self.input[self.pos] <= b'7' {
-                self.pos += 1;
-            }
-            // Check if this is actually a float (e.g., 000.001)
-            if self.pos < self.input.len() && (self.input[self.pos] == b'.' || self.input[self.pos] == b'e' || self.input[self.pos] == b'E') {
-                // Backtrack and parse as decimal float
-                self.pos = saved_pos;
-                // Fall through to decimal/float parsing below
-            } else {
-                // Also check for digits 8/9 which make this a decimal, not octal
-                if self.pos < self.input.len() && (self.input[self.pos] == b'8' || self.input[self.pos] == b'9') {
-                    self.pos = saved_pos;
-                    // Fall through to decimal parsing
-                } else {
-                    let oct_str = std::str::from_utf8(&self.input[oct_start..self.pos]).unwrap_or("0");
-                    let value = u64::from_str_radix(oct_str, 8).unwrap_or(0);
-                    let (is_unsigned, is_long, is_long_long, is_imaginary) = self.parse_int_suffix();
-                    if is_imaginary {
-                        let span = Span::new(start as u32, self.pos as u32, self.file_id);
-                        return Token::new(TokenKind::ImaginaryLiteral(value as f64), span);
-                    }
-                    return self.make_int_token(value, is_unsigned, is_long, is_long_long, true, start);
-                }
-            }
         }
 
-        // Decimal integer or float
+        // Check for hex float: 0x<digits>.<digits>p<exp> or 0x<digits>p<exp>
+        let has_dot = self.pos < self.input.len() && self.input[self.pos] == b'.';
+        let after_dot_has_p = if has_dot {
+            let mut look = self.pos + 1;
+            while look < self.input.len() && self.input[look].is_ascii_hexdigit() {
+                look += 1;
+            }
+            look < self.input.len() && (self.input[look] == b'p' || self.input[look] == b'P')
+        } else {
+            false
+        };
+        let has_p = self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P');
+
+        if has_dot && after_dot_has_p || has_p {
+            return self.lex_hex_float(start, hex_start, has_dot);
+        }
+
+        // Regular hex integer
+        let hex_str = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
+        let value = u64::from_str_radix(hex_str, 16).unwrap_or(0);
+        self.finish_int_literal(value, true, start)
+    }
+
+    /// Lex a hex float literal: 0x<int_hex>.<frac_hex>p<+/->exp
+    fn lex_hex_float(&mut self, start: usize, hex_start: usize, has_dot: bool) -> Token {
+        let int_hex = std::str::from_utf8(&self.input[hex_start..self.pos]).unwrap_or("0");
+
+        let frac_hex = if has_dot {
+            self.pos += 1; // skip '.'
+            let frac_start = self.pos;
+            while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
+                self.pos += 1;
+            }
+            std::str::from_utf8(&self.input[frac_start..self.pos]).unwrap_or("")
+        } else {
+            ""
+        };
+
+        // Parse 'p'/'P' exponent (mandatory for hex floats)
+        let exp: i64 = if self.pos < self.input.len() && (self.input[self.pos] == b'p' || self.input[self.pos] == b'P') {
+            self.pos += 1;
+            let exp_neg = if self.pos < self.input.len() && self.input[self.pos] == b'-' {
+                self.pos += 1;
+                true
+            } else {
+                if self.pos < self.input.len() && self.input[self.pos] == b'+' {
+                    self.pos += 1;
+                }
+                false
+            };
+            let exp_start = self.pos;
+            while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            let exp_str = std::str::from_utf8(&self.input[exp_start..self.pos]).unwrap_or("0");
+            let e: i64 = exp_str.parse().unwrap_or(0);
+            if exp_neg { -e } else { e }
+        } else {
+            0
+        };
+
+        // Convert hex float to f64: value = (int_part + frac_part) * 2^exp
+        let int_val = u64::from_str_radix(int_hex, 16).unwrap_or(0) as f64;
+        let frac_val: f64 = if !frac_hex.is_empty() {
+            let frac_int = u64::from_str_radix(frac_hex, 16).unwrap_or(0) as f64;
+            frac_int / (16.0_f64).powi(frac_hex.len() as i32)
+        } else {
+            0.0
+        };
+        let value = (int_val + frac_val) * (2.0_f64).powi(exp as i32);
+
+        // Check float suffix: f/F = float, l/L = long double
+        let float_kind = self.parse_simple_float_suffix();
+        let span = Span::new(start as u32, self.pos as u32, self.file_id);
+        match float_kind {
+            1 => Token::new(TokenKind::FloatLiteralF32(value), span),
+            2 => {
+                let hex_text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0x0p0");
+                let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(hex_text);
+                Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
+            }
+            _ => Token::new(TokenKind::FloatLiteral(value), span),
+        }
+    }
+
+    /// Parse a simple float suffix (f/F → 1, l/L → 2, else 0). No imaginary handling.
+    fn parse_simple_float_suffix(&mut self) -> u8 {
+        if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
+            self.pos += 1;
+            1
+        } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
+            self.pos += 1;
+            2
+        } else {
+            0
+        }
+    }
+
+    /// Lex a binary integer literal (0b/0B prefix).
+    fn lex_binary_number(&mut self, start: usize) -> Token {
+        self.pos += 2;
+        let bin_start = self.pos;
+        while self.pos < self.input.len() && (self.input[self.pos] == b'0' || self.input[self.pos] == b'1') {
+            self.pos += 1;
+        }
+        let bin_str = std::str::from_utf8(&self.input[bin_start..self.pos]).unwrap_or("0");
+        let value = u64::from_str_radix(bin_str, 2).unwrap_or(0);
+        self.finish_int_literal(value, true, start)
+    }
+
+    /// Try to lex an octal literal. Returns None if the token turns out to be decimal/float.
+    fn lex_octal_number(&mut self, start: usize) -> Option<Token> {
+        if self.input[self.pos] != b'0' || !self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let saved_pos = self.pos;
+        self.pos += 1;
+        let oct_start = self.pos;
+        while self.pos < self.input.len() && self.input[self.pos] >= b'0' && self.input[self.pos] <= b'7' {
+            self.pos += 1;
+        }
+        // Float indicator or non-octal digit → backtrack to decimal
+        if self.pos < self.input.len() && matches!(self.input[self.pos], b'.' | b'e' | b'E' | b'8' | b'9') {
+            self.pos = saved_pos;
+            return None;
+        }
+        let oct_str = std::str::from_utf8(&self.input[oct_start..self.pos]).unwrap_or("0");
+        let value = u64::from_str_radix(oct_str, 8).unwrap_or(0);
+        Some(self.finish_int_literal(value, true, start))
+    }
+
+    /// Common integer literal finish: parse suffix, return token.
+    fn finish_int_literal(&mut self, value: u64, is_hex_or_octal: bool, start: usize) -> Token {
+        let (is_unsigned, is_long, is_long_long, is_imaginary) = self.parse_int_suffix();
+        if is_imaginary {
+            let span = Span::new(start as u32, self.pos as u32, self.file_id);
+            return Token::new(TokenKind::ImaginaryLiteral(value as f64), span);
+        }
+        self.make_int_token(value, is_unsigned, is_long, is_long_long, is_hex_or_octal, start)
+    }
+
+    /// Lex a decimal integer or float literal.
+    fn lex_decimal_number(&mut self, start: usize) -> Token {
         let mut is_float = false;
         while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
             self.pos += 1;
@@ -317,7 +327,6 @@ impl Lexer {
             }
         }
 
-        // Exponent
         if self.pos < self.input.len() && (self.input[self.pos] == b'e' || self.input[self.pos] == b'E') {
             is_float = true;
             self.pos += 1;
@@ -332,81 +341,76 @@ impl Lexer {
         let text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0").to_string();
 
         if is_float {
-            // Check float suffix: f/F means float (32-bit), l/L means long double, none means double
-            // Also track imaginary suffix 'i' (GCC extension)
-            // float_kind: 0 = double, 1 = float, 2 = long double
-            // is_imaginary: true if 'i' suffix present
-            let mut is_imaginary = false;
-            let float_kind = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
-                self.pos += 1;
-                // Consume trailing 'i'/'I' for imaginary (GCC extension: 3.0fi, 3.0fI)
-                if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
-                    self.pos += 1;
-                    is_imaginary = true;
-                }
-                1 // float (f32)
-            } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
-                self.pos += 1;
-                // Consume trailing 'i'/'I' for imaginary (GCC extension: 3.0Li, 3.0LI)
-                if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
-                    self.pos += 1;
-                    is_imaginary = true;
-                }
-                2 // long double
-            } else if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
-                // GCC extension: imaginary suffix 'i' or 'I' (3.0i, 3.0I)
-                self.pos += 1;
-                is_imaginary = true;
-                // Check for additional f/F/l/L after i/I (e.g., 3.0if, 3.0iF, 3.0IF)
-                if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
-                    self.pos += 1;
-                    1 // float imaginary
-                } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
-                    self.pos += 1;
-                    2 // long double imaginary
-                } else {
-                    0 // double imaginary
-                }
-            } else {
-                0 // double
-            };
-            // Also consume trailing 'j'/'J' suffix (C99/GCC alternative for imaginary)
-            if !is_imaginary && self.pos < self.input.len() && (self.input[self.pos] == b'j' || self.input[self.pos] == b'J') {
-                self.pos += 1;
-                is_imaginary = true;
-            }
-            let value: f64 = text.parse().unwrap_or(0.0);
-            let span = Span::new(start as u32, self.pos as u32, self.file_id);
-            if is_imaginary {
-                match float_kind {
-                    1 => Token::new(TokenKind::ImaginaryLiteralF32(value), span),
-                    2 => {
-                        // Parse with full f128 precision for long double imaginary
-                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(&text);
-                        Token::new(TokenKind::ImaginaryLiteralLongDouble(value, f128_bytes), span)
-                    }
-                    _ => Token::new(TokenKind::ImaginaryLiteral(value), span),
-                }
-            } else {
-                match float_kind {
-                    1 => Token::new(TokenKind::FloatLiteralF32(value), span),
-                    2 => {
-                        // Parse with full f128 precision for long double
-                        let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(&text);
-                        Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
-                    }
-                    _ => Token::new(TokenKind::FloatLiteral(value), span),
-                }
-            }
+            let (float_kind, is_imaginary) = self.parse_float_suffix();
+            self.make_float_token(&text, float_kind, is_imaginary, start)
         } else {
             let uvalue: u64 = text.parse().unwrap_or(0);
-            let (is_unsigned, is_long, is_long_long, is_imaginary) = self.parse_int_suffix();
-            if is_imaginary {
-                // Integer imaginary literal (e.g., 5i) becomes double imaginary
-                let span = Span::new(start as u32, self.pos as u32, self.file_id);
-                Token::new(TokenKind::ImaginaryLiteral(uvalue as f64), span)
+            self.finish_int_literal(uvalue, false, start)
+        }
+    }
+
+    /// Parse float suffix with imaginary support (GCC extension).
+    /// Returns (float_kind, is_imaginary) where float_kind: 0=double, 1=float, 2=long double.
+    fn parse_float_suffix(&mut self) -> (u8, bool) {
+        let mut is_imaginary = false;
+        let float_kind = if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
+            self.pos += 1;
+            if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
+                self.pos += 1;
+                is_imaginary = true;
+            }
+            1
+        } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
+            self.pos += 1;
+            if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
+                self.pos += 1;
+                is_imaginary = true;
+            }
+            2
+        } else if self.pos < self.input.len() && (self.input[self.pos] == b'i' || self.input[self.pos] == b'I') {
+            self.pos += 1;
+            is_imaginary = true;
+            if self.pos < self.input.len() && (self.input[self.pos] == b'f' || self.input[self.pos] == b'F') {
+                self.pos += 1;
+                1
+            } else if self.pos < self.input.len() && (self.input[self.pos] == b'l' || self.input[self.pos] == b'L') {
+                self.pos += 1;
+                2
             } else {
-                self.make_int_token(uvalue, is_unsigned, is_long, is_long_long, false, start)
+                0
+            }
+        } else {
+            0
+        };
+        // Also consume trailing 'j'/'J' suffix (C99/GCC alternative for imaginary)
+        if !is_imaginary && self.pos < self.input.len() && (self.input[self.pos] == b'j' || self.input[self.pos] == b'J') {
+            self.pos += 1;
+            is_imaginary = true;
+        }
+        (float_kind, is_imaginary)
+    }
+
+    /// Construct a float/imaginary token from parsed components.
+    fn make_float_token(&self, text: &str, float_kind: u8, is_imaginary: bool, start: usize) -> Token {
+        let value: f64 = text.parse().unwrap_or(0.0);
+        let span = Span::new(start as u32, self.pos as u32, self.file_id);
+        if is_imaginary {
+            match float_kind {
+                1 => Token::new(TokenKind::ImaginaryLiteralF32(value), span),
+                2 => {
+                    let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(text);
+                    Token::new(TokenKind::ImaginaryLiteralLongDouble(value, f128_bytes), span)
+                }
+                _ => Token::new(TokenKind::ImaginaryLiteral(value), span),
+            }
+        } else {
+            match float_kind {
+                1 => Token::new(TokenKind::FloatLiteralF32(value), span),
+                2 => {
+                    let f128_bytes = crate::common::long_double::parse_long_double_to_f128_bytes(text);
+                    Token::new(TokenKind::FloatLiteralLongDouble(value, f128_bytes), span)
+                }
+                _ => Token::new(TokenKind::FloatLiteral(value), span),
             }
         }
     }
