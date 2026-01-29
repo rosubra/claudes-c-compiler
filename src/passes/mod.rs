@@ -180,6 +180,51 @@ fn run_gvn_licm_ivsr_shared(
 /// 10. CFG simplification (clean up after DCE may have made blocks dead)
 /// 11. Dead static function elimination (remove unreferenced internal-linkage functions)
 ///
+struct DisabledPasses {
+    cfg: bool,
+    copyprop: bool,
+    narrow: bool,
+    simplify: bool,
+    constfold: bool,
+    gvn: bool,
+    licm: bool,
+    ifconv: bool,
+    dce: bool,
+    ipcp: bool,
+}
+
+impl DisabledPasses {
+    fn from_env(disabled: &str) -> Self {
+        DisabledPasses {
+            cfg: disabled.contains("cfg"),
+            copyprop: disabled.contains("copyprop"),
+            narrow: disabled.contains("narrow"),
+            simplify: disabled.contains("simplify"),
+            constfold: disabled.contains("constfold"),
+            gvn: disabled.contains("gvn"),
+            licm: disabled.contains("licm"),
+            ifconv: disabled.contains("ifconv"),
+            dce: disabled.contains("dce"),
+            ipcp: disabled.contains("ipcp"),
+        }
+    }
+}
+
+/// Run Phase 0: function inlining and post-inline optimization passes.
+fn run_inline_phase(module: &mut IrModule, disabled: &str) {
+    if disabled.contains("inline") {
+        return;
+    }
+    inline::run(module);
+    crate::ir::mem2reg::promote_allocas_with_params(module);
+    constant_fold::run(module);
+    copy_prop::run(module);
+    simplify::run(module);
+    constant_fold::run(module);
+    copy_prop::run(module);
+    resolve_asm::resolve_inline_asm_symbols(module);
+}
+
 /// All optimization levels run the same pipeline with the same number of
 /// iterations. The `opt_level` parameter is accepted for API compatibility
 /// but currently ignored -- all levels behave identically. This is intentional:
@@ -189,93 +234,18 @@ fn run_gvn_licm_ivsr_shared(
 // TODO: Restore per-level optimization tiers once the compiler is stable enough
 // to warrant differentiated behavior (e.g., -O0 skipping passes for faster builds).
 pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend::Target) {
-    // Debug support: set CCC_DISABLE_PASSES=pass1,pass2,... to skip specific passes.
-    // Useful for bisecting miscompilation bugs to a specific pass.
-    // Pass names: cfg, copyprop, simplify, constfold, gvn, licm, ifconv, dce, all
     let disabled = std::env::var("CCC_DISABLE_PASSES").unwrap_or_default();
     if disabled.contains("all") {
         return;
     }
 
-    // Phase 0: Function inlining (before the optimization loop).
-    // Inline small static/static-inline functions so that subsequent passes
-    // can see through constant-returning helpers and eliminate dead branches.
-    // This is critical for kernel code patterns like IS_ENABLED() guards.
-    if !disabled.contains("inline") {
-        inline::run(module);
-
-        // Re-run mem2reg after inlining. The inliner creates parameter allocas
-        // in the callee's entry block, which becomes a non-entry block in the
-        // caller. These store/load pairs through stack slots must be promoted
-        // to SSA values so that constant arguments (e.g., feature bit numbers)
-        // propagate through to inline asm "i" (immediate) constraints.
-        // Without this, expressions like `1 << (bit & 7)` in _static_cpu_has()
-        // cannot be constant-folded and inline asm emits $0 placeholders.
-        crate::ir::mem2reg::promote_allocas_with_params(module);
-
-        // After mem2reg, run scalar optimization passes so that arithmetic
-        // on inlined constants is fully resolved before we try to resolve
-        // inline asm symbols. The simplify pass reduces expressions like
-        // cast chains, and constant folding evaluates the final values.
-        // Two rounds of constant_fold+copy_prop are needed: the first resolves
-        // simple arithmetic, simplify reduces remaining expressions, and the
-        // second round folds the simplified results to constants.
-        constant_fold::run(module);
-        copy_prop::run(module);
-        simplify::run(module);
-        constant_fold::run(module);
-        copy_prop::run(module);
-
-        // Resolve InlineAsm input symbols that became resolvable after inlining.
-        // When a callee like _static_cpu_has(596) is inlined, its "i" constraint
-        // operand `&boot_cpu_data.x86_capability[bit >> 3]` becomes a GlobalAddr +
-        // constant GEP chain. This pass traces the def chain and sets input_symbols
-        // to "boot_cpu_data+74" so the backend can emit correct symbol references.
-        resolve_asm::resolve_inline_asm_symbols(module);
-    }
-
-    // Phase 0.5: Resolve remaining IsConstant (__builtin_constant_p) to 0.
-    // After inlining and the post-inline constant_fold+copy_prop passes above,
-    // any IsConstant whose operand became constant through inlining has already
-    // been resolved to Copy(1). The remaining IsConstant instructions have
-    // operands that are genuinely non-constant (global variables, non-inlined
-    // parameters, etc.) and must resolve to 0.
-    //
-    // This must happen before the main optimization loop so that cfg_simplify
-    // can fold CondBranch instructions testing __builtin_constant_p results and
-    // eliminate dead code paths. Without this, unreachable calls to intentionally
-    // undefined symbols (like the kernel's __bad_udelay) survive and cause link errors.
+    run_inline_phase(module, &disabled);
     constant_fold::resolve_remaining_is_constant(module);
 
-    // Run up to 3 iterations of the full pipeline. After the first full pass,
-    // subsequent iterations only process functions that were modified (dirty
-    // tracking), avoiding redundant work on already-optimized functions.
-    //
-    // Per-pass skip tracking (iterations >= 1): We track which passes made changes
-    // in each iteration. In subsequent iterations, a pass is skipped if:
-    // - It made 0 changes in the previous iteration, AND
-    // - None of its "upstream" passes (which could create new opportunities) made
-    //   changes in the previous iteration.
-    // This avoids running expensive passes (GVN, LICM) when no upstream pass
-    // generated new optimization opportunities for them.
     let iterations = 3;
-
-    // Per-function dirty tracking: dirty[i] == true means function i needs
-    // reprocessing. All functions start dirty for the first iteration.
     let num_funcs = module.functions.len();
     let mut dirty = vec![true; num_funcs];
-
-    // Pre-compute disabled pass flags once to avoid repeated string searches.
-    let dis_cfg = disabled.contains("cfg");
-    let dis_copyprop = disabled.contains("copyprop");
-    let dis_narrow = disabled.contains("narrow");
-    let dis_simplify = disabled.contains("simplify");
-    let dis_constfold = disabled.contains("constfold");
-    let dis_gvn = disabled.contains("gvn");
-    let dis_licm = disabled.contains("licm");
-    let dis_ifconv = disabled.contains("ifconv");
-    let dis_dce = disabled.contains("dce");
-    let dis_ipcp = disabled.contains("ipcp");
+    let dis = DisabledPasses::from_env(&disabled);
 
     // `changed` accumulates which functions were modified during each iteration.
     let mut changed = vec![false; num_funcs];
@@ -335,7 +305,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 1: CFG simplification
         // Upstream: constfold (constant branches), dce (empty blocks)
-        if !dis_cfg && should_run!(0, 4, 9) {
+        if !dis.cfg && should_run!(0, 4, 9) {
             let n = timed_pass!("cfg_simplify1", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
             cur_pass_changes[0] = n;
             total_changes += n;
@@ -344,7 +314,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 2: Copy propagation
         // Upstream: cfg_simplify (simpler CFG), gvn (eliminated exprs), licm (hoisted code), if_convert
-        if !dis_copyprop && should_run!(1, 0, 5, 6, 7) {
+        if !dis.copyprop && should_run!(1, 0, 5, 6, 7) {
             let n = timed_pass!("copy_prop1", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
             cur_pass_changes[1] = n;
             total_changes += n;
@@ -370,7 +340,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 2b: Integer narrowing
         // Upstream: copy_prop (propagated values expose narrowing)
-        if !dis_narrow && should_run!(2, 1) {
+        if !dis.narrow && should_run!(2, 1) {
             let n = timed_pass!("narrow", run_on_visited(module, &dirty, &mut changed, narrow::narrow_function));
             cur_pass_changes[2] = n;
             total_changes += n;
@@ -379,7 +349,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 3: Algebraic simplification
         // Upstream: copy_prop (propagated values), narrow (smaller types)
-        if !dis_simplify && should_run!(3, 1, 2) {
+        if !dis.simplify && should_run!(3, 1, 2) {
             let n = timed_pass!("simplify", run_on_visited(module, &dirty, &mut changed, simplify::simplify_function));
             cur_pass_changes[3] = n;
             total_changes += n;
@@ -390,7 +360,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
         // Upstream: copy_prop (propagated constants), narrow, simplify (reduced exprs),
         //           if_convert (creates Select that constfold can fold with known-constant cond),
         //           copy_prop2 (propagates constants into Select/Cmp operands after if_convert)
-        if !dis_constfold && should_run!(4, 1, 2, 3, 7, 8) {
+        if !dis.constfold && should_run!(4, 1, 2, 3, 7, 8) {
             let n = timed_pass!("constfold", run_on_visited(module, &dirty, &mut changed, constant_fold::fold_function));
             cur_pass_changes[4] = n;
             total_changes += n;
@@ -404,8 +374,8 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
         // existing blocks), the analysis computed for GVN remains valid for LICM
         // and IVSR. We compute it once per function and share it across all three.
         {
-            let run_gvn = !dis_gvn && should_run!(5, 0, 1, 3);
-            let run_licm = !dis_licm && should_run!(6, 0, 1, 5);
+            let run_gvn = !dis.gvn && should_run!(5, 0, 1, 3);
+            let run_licm = !dis.licm && should_run!(6, 0, 1, 5);
             let run_ivsr = iter == 0 && !disabled.contains("ivsr");
 
             if run_gvn || run_licm || run_ivsr {
@@ -427,7 +397,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 7: If-conversion
         // Upstream: cfg_simplify (simpler CFG), constfold (simplified conditions)
-        if !dis_ifconv && should_run!(7, 0, 4) {
+        if !dis.ifconv && should_run!(7, 0, 4) {
             let n = timed_pass!("if_convert", run_on_visited(module, &dirty, &mut changed, if_convert::if_convert_function));
             cur_pass_changes[7] = n;
             total_changes += n;
@@ -439,7 +409,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
         //           gvn (produced copies), licm (hoisted code), if_convert (select values)
         // Note: simplify and constfold run earlier in this iteration, so we check
         // cur_pass_changes for them (not just prev_pass_changes via should_run!).
-        if !dis_copyprop && (should_run!(8, 5, 6, 7) || cur_pass_changes[3] > 0 || cur_pass_changes[4] > 0) {
+        if !dis.copyprop && (should_run!(8, 5, 6, 7) || cur_pass_changes[3] > 0 || cur_pass_changes[4] > 0) {
             let n = timed_pass!("copy_prop2", run_on_visited(module, &dirty, &mut changed, copy_prop::propagate_copies));
             cur_pass_changes[8] = n;
             total_changes += n;
@@ -457,7 +427,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
         // the optimizer from completing multi-iteration constant propagation chains
         // (e.g., kernel's cpucap_is_possible switch folding through inlined
         // system_supports_sme -> alternative_has_cap_unlikely -> cpucap_is_possible).
-        if !dis_dce && should_run!(9, 5, 6, 7, 8) {
+        if !dis.dce && should_run!(9, 5, 6, 7, 8) {
             let n = timed_pass!("dce", run_on_visited(module, &dirty, &mut changed, dce::eliminate_dead_code));
             cur_pass_changes[9] = n;
             total_changes += n;
@@ -466,7 +436,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
 
         // Phase 10: CFG simplification again
         // Upstream: constfold (constant branches), dce (dead blocks), if_convert
-        if !dis_cfg && should_run!(10, 4, 7, 9) {
+        if !dis.cfg && should_run!(10, 4, 7, 9) {
             let n = timed_pass!("cfg_simplify2", run_on_visited(module, &dirty, &mut changed, cfg_simplify::run_function));
             cur_pass_changes[10] = n;
             total_changes += n;
@@ -478,7 +448,7 @@ pub(crate) fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::
         // have simplified call arguments to constants (e.g., phi nodes collapsed
         // after CFG simplification resolved dead branches from IS_ENABLED() checks).
         let mut ipcp_changes = 0;
-        if !dis_ipcp {
+        if !dis.ipcp {
             ipcp_changes = timed_pass!("ipcp", ipcp::run(module));
             if ipcp_changes > 0 {
                 changed.iter_mut().for_each(|c| *c = true);
