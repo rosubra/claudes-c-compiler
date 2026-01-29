@@ -44,12 +44,13 @@ pub struct Driver {
     debug_info: bool,
     defines: Vec<CliDefine>,
     include_paths: Vec<String>,
-    /// Libraries to pass to the linker (from -l flags)
-    linker_libs: Vec<String>,
     /// Library search paths (from -L flags)
     linker_paths: Vec<String>,
-    /// Extra linker args (e.g., -Wl,... pass-through)
-    linker_extra_args: Vec<String>,
+    /// Ordered list of linker items preserving command-line order.
+    /// Contains passthrough object/archive paths, -l flags, and -Wl, flags
+    /// in the order they appeared on the command line. This is critical for
+    /// flags like -Wl,--whole-archive which must precede the .a they affect.
+    linker_ordered_items: Vec<String>,
     /// Whether to link statically (-static)
     static_link: bool,
     /// Whether to produce a shared library (-shared)
@@ -160,9 +161,8 @@ impl Driver {
             debug_info: false,
             defines: Vec::new(),
             include_paths: Vec::new(),
-            linker_libs: Vec::new(),
             linker_paths: Vec::new(),
-            linker_extra_args: Vec::new(),
+            linker_ordered_items: Vec::new(),
             static_link: false,
             shared_lib: false,
             nostdlib: false,
@@ -333,14 +333,14 @@ impl Driver {
 
                 // Linker library flags: -lfoo
                 arg if arg.starts_with("-l") => {
-                    self.linker_libs.push(arg[2..].to_string());
+                    self.linker_ordered_items.push(arg.to_string());
                 }
 
                 // Linker pass-through: -Wl,flag1,flag2,...
                 arg if arg.starts_with("-Wl,") => {
                     for flag in arg[4..].split(',') {
                         if !flag.is_empty() {
-                            self.linker_extra_args.push(format!("-Wl,{}", flag));
+                            self.linker_ordered_items.push(format!("-Wl,{}", flag));
                         }
                     }
                 }
@@ -510,7 +510,9 @@ impl Driver {
                 "-MT" | "-MQ" => { i += 1; }
 
                 // Misc flags
-                "-rdynamic" => self.linker_extra_args.push("-rdynamic".to_string()),
+                "-rdynamic" => {
+                    self.linker_ordered_items.push("-rdynamic".to_string());
+                }
                 "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
 
                 // Stdin input
@@ -530,6 +532,12 @@ impl Driver {
                 _ => {
                     if explicit_language.is_some() {
                         self.explicit_language = explicit_language.clone();
+                    }
+                    // Track object/archive files in the ordered linker items list
+                    // to preserve their position relative to -l and -Wl, flags.
+                    // C source files are compiled to temp objects and placed first.
+                    if Self::is_object_or_archive(&args[i]) {
+                        self.linker_ordered_items.push(args[i].clone());
                     }
                     self.input_files.push(args[i].clone());
                 }
@@ -782,12 +790,14 @@ impl Driver {
 
         // TempFile guards ensure cleanup on all exit paths (success, error, panic).
         let mut temp_guards: Vec<TempFile> = Vec::new();
-        let mut passthrough_objects: Vec<String> = Vec::new();
+
+        let mut extra_passthrough: Vec<String> = Vec::new();
 
         for input_file in &self.input_files {
             if Self::is_object_or_archive(input_file) {
-                // Pass .o, .a, .so, .os, .od, .lo files directly to the linker
-                passthrough_objects.push(input_file.clone());
+                // Object/archive files are passed to the linker via linker_ordered_items
+                // (populated during argument parsing) to preserve their position relative
+                // to -Wl, and -l flags. This is critical for --whole-archive support.
             } else if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
                 // .s/.S files (or -x assembler): pass to assembler, then link
                 let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
@@ -797,9 +807,9 @@ impl Driver {
                 && Self::looks_like_binary_object(input_file)
             {
                 // Unrecognized extension but file has ELF/archive magic bytes -
-                // treat as object file. This handles non-standard extensions used
-                // by various build systems.
-                passthrough_objects.push(input_file.clone());
+                // treat as object file. These weren't caught by is_object_or_archive
+                // at parse time, so add them to the extra passthrough list.
+                extra_passthrough.push(input_file.clone());
             } else {
                 // Compile .c files to .o
                 let asm = self.compile_to_assembly(input_file)?;
@@ -816,13 +826,16 @@ impl Driver {
             }
         }
 
-        // Combine all object files for linking
+        // Compiled temp objects go first (order relative to linker flags doesn't matter
+        // for freshly compiled objects). Passthrough objects, -l flags, and -Wl, flags
+        // follow in their original command-line order via linker_ordered_items.
+        // Extra passthrough objects (detected by magic bytes at runtime) go after temps.
         let mut all_objects: Vec<&str> = temp_guards.iter().map(|t| t.to_str()).collect();
-        for obj in &passthrough_objects {
+        for obj in &extra_passthrough {
             all_objects.push(obj.as_str());
         }
 
-        // Build linker args from -l, -L, -static flags
+        // Build linker args from -l, -L, -static flags, preserving positional ordering
         let linker_args = self.build_linker_args();
 
         if linker_args.is_empty() {
@@ -1027,7 +1040,13 @@ impl Driver {
         args
     }
 
-    /// Build linker args from collected -l, -L, -static, -shared, and -nostdlib flags.
+    /// Build linker args from collected flags, preserving command-line ordering.
+    ///
+    /// Order-independent flags (-shared, -static, -nostdlib, -L paths) go first.
+    /// Then linker_ordered_items provides the original CLI ordering of positional
+    /// object/archive files, -l flags, and -Wl, pass-through flags. This ordering
+    /// is critical for flags like -Wl,--whole-archive which must appear before
+    /// the archive they affect.
     fn build_linker_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         if self.shared_lib {
@@ -1042,10 +1061,8 @@ impl Driver {
         for path in &self.linker_paths {
             args.push(format!("-L{}", path));
         }
-        for lib in &self.linker_libs {
-            args.push(format!("-l{}", lib));
-        }
-        args.extend_from_slice(&self.linker_extra_args);
+        // Emit objects, -l flags, and -Wl, flags in their original command-line order.
+        args.extend_from_slice(&self.linker_ordered_items);
         args
     }
 

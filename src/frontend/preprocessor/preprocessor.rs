@@ -207,6 +207,19 @@ impl Preprocessor {
                         let expanded = self.macros.expand_line(&pending_line);
                         pending_line.clear();
                         pending_line.push_str(&expanded);
+                    } else if after_hash.starts_with("include") {
+                        // When #include appears in the middle of a multi-line expression
+                        // (e.g. a function call with args spanning lines), flush the
+                        // pending tokens to output first. The included content must appear
+                        // after the preceding tokens, not before them.
+                        let expanded = self.macros.expand_line(&pending_line);
+                        output.push_str(&expanded);
+                        output.push('\n');
+                        for _ in 1..pending_newlines {
+                            output.push('\n');
+                        }
+                        pending_line.clear();
+                        pending_newlines = 0;
                     }
                 }
                 let include_result = self.process_directive(trimmed, source_line_num + 1);
