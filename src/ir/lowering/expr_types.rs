@@ -1830,39 +1830,42 @@ impl Lowerer {
                     }
                     // Resolve this declaration's type, using the local_scope
                     // for typeof expressions that reference earlier declarations.
-                    let resolved_ts = self.resolve_typeof_with_scope(&decl.type_spec, &local_scope);
-                    let ctype = self.build_full_ctype(&resolved_ts, &declarator.derived);
-                    local_scope.insert(declarator.name.clone(), ctype);
+                    // Use try_resolve to avoid emitting warnings during speculative
+                    // scope building; skip declarations where typeof fails rather
+                    // than using a wrong fallback type.
+                    if let Some(resolved_ts) = self.try_resolve_typeof_with_scope(&decl.type_spec, &local_scope) {
+                        let ctype = self.build_full_ctype(&resolved_ts, &declarator.derived);
+                        local_scope.insert(declarator.name.clone(), ctype);
+                    }
+                    // If typeof couldn't be resolved, skip this declaration.
+                    // The caller (get_expr_ctype_with_scope) will retry with
+                    // a broader scope that may include outer compound variables.
                 }
             }
         }
         local_scope
     }
 
-    /// Resolve a TypeSpecifier by replacing Typeof nodes with concrete type specs,
-    /// using both the normal expression type resolution and a supplementary scope
-    /// of resolved variable types from within a compound statement.
-    fn resolve_typeof_with_scope(&self, ts: &TypeSpecifier, scope: &FxHashMap<String, CType>) -> TypeSpecifier {
+    /// Try to resolve a TypeSpecifier by replacing Typeof nodes with concrete
+    /// type specs, using both normal expression type resolution and a
+    /// supplementary scope. Returns None on failure instead of falling back to
+    /// Int. Used during speculative scope building (build_compound_scope) where
+    /// callers need to know if resolution failed to avoid propagating wrong types.
+    fn try_resolve_typeof_with_scope(&self, ts: &TypeSpecifier, scope: &FxHashMap<String, CType>) -> Option<TypeSpecifier> {
         match ts {
             TypeSpecifier::Typeof(expr) => {
-                // Try normal resolution first
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return Self::ctype_to_type_spec(&ctype);
+                    return Some(Self::ctype_to_type_spec(&ctype));
                 }
-                // Try resolving using the supplementary scope
                 if let Some(ctype) = self.get_expr_ctype_with_scope(expr, scope) {
-                    return Self::ctype_to_type_spec(&ctype);
+                    return Some(Self::ctype_to_type_spec(&ctype));
                 }
-                self.emit_warning(
-                    "could not resolve type of 'typeof' expression; defaulting to 'int'",
-                    expr.span(),
-                );
-                TypeSpecifier::Int // ultimate fallback
+                None // caller decides what to do
             }
             TypeSpecifier::TypeofType(inner) => {
-                self.resolve_typeof_with_scope(inner, scope)
+                self.try_resolve_typeof_with_scope(inner, scope)
             }
-            other => other.clone(),
+            other => Some(other.clone()),
         }
     }
 
@@ -1919,6 +1922,28 @@ impl Lowerer {
                     (None, Some(r)) => Some(r),
                     (None, None) => None,
                 }
+            }
+            // Statement expression with outer scope: build a combined scope
+            // (outer + inner declarations) and resolve the last expression.
+            // This handles nested stmt exprs like the kernel's cmpxchg macro where
+            // the inner compound uses typeof() referencing outer compound variables.
+            Expr::StmtExpr(compound, _) => {
+                if let Some(last) = compound.items.last() {
+                    if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
+                        // First try normal resolution
+                        if let Some(ctype) = self.get_expr_ctype(expr) {
+                            return Some(ctype);
+                        }
+                        // Build a combined scope: outer scope + inner declarations
+                        let combined_scope = self.build_compound_scope(compound, Some(scope));
+                        if !combined_scope.is_empty() {
+                            if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &combined_scope) {
+                                return Some(ctype);
+                            }
+                        }
+                    }
+                }
+                None
             }
             _ => None,
         }
