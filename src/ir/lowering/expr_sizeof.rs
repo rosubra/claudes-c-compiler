@@ -67,7 +67,8 @@ impl Lowerer {
         if self.known_functions.contains(name) {
             return 1;
         }
-        4 // default: int
+        // Unknown identifier - sema should have caught this, but fallback to int size
+        4
     }
 
     /// Get the sizeof for a dereference expression.

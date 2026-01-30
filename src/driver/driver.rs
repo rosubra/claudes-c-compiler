@@ -309,6 +309,16 @@ impl Driver {
                 // -dM mode: preprocess the source (to process #define/#undef
                 // directives) then dump all resulting macro definitions.
                 let _ = preprocessor.preprocess(&source);
+
+                // Check for preprocessor errors (missing includes, #error, etc.)
+                let pp_errors = preprocessor.errors();
+                if !pp_errors.is_empty() {
+                    for err in pp_errors {
+                        eprintln!("{}:{}:{}: error: {}", err.file, err.line, err.col, err.message);
+                    }
+                    return Err(format!("{} preprocessor error(s) in {}", pp_errors.len(), filename));
+                }
+
                 let output = preprocessor.dump_defines();
                 if self.output_path_set {
                     std::fs::write(&self.output_path, format!("{}\n", output))
@@ -318,6 +328,15 @@ impl Driver {
                 }
             } else {
                 let preprocessed = preprocessor.preprocess(&source);
+
+                // Check for preprocessor errors (missing includes, #error, etc.)
+                let pp_errors = preprocessor.errors();
+                if !pp_errors.is_empty() {
+                    for err in pp_errors {
+                        eprintln!("{}:{}:{}: error: {}", err.file, err.line, err.col, err.message);
+                    }
+                    return Err(format!("{} preprocessor error(s) in {}", pp_errors.len(), filename));
+                }
 
                 let output = if self.suppress_line_markers {
                     Self::strip_line_markers(&preprocessed)

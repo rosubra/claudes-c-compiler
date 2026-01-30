@@ -136,6 +136,38 @@ _mm_cmplt_epi16(__m128i __a, __m128i __b)
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpgtw128(__b, __a));
 }
 
+/* === Unsigned Saturating Arithmetic === */
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_adds_epu8(__m128i __a, __m128i __b)
+{
+    /* Unsigned saturating add of 16 x 8-bit elements. */
+    unsigned char *__pa = (unsigned char *)&__a;
+    unsigned char *__pb = (unsigned char *)&__b;
+    __m128i __r;
+    unsigned char *__pr = (unsigned char *)&__r;
+    for (int __i = 0; __i < 16; __i++) {
+        unsigned int __s = (unsigned int)__pa[__i] + (unsigned int)__pb[__i];
+        __pr[__i] = (unsigned char)(__s > 255 ? 255 : __s);
+    }
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_adds_epu16(__m128i __a, __m128i __b)
+{
+    /* Unsigned saturating add of 8 x 16-bit elements. */
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++) {
+        unsigned int __s = (unsigned int)__pa[__i] + (unsigned int)__pb[__i];
+        __pr[__i] = (unsigned short)(__s > 65535 ? 65535 : __s);
+    }
+    return __r;
+}
+
 /* === Arithmetic === */
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -247,9 +279,35 @@ _mm_sub_epi16(__m128i __a, __m128i __b)
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
+_mm_mullo_epi16(__m128i __a, __m128i __b)
+{
+    /* Multiply 8 x 16-bit signed integers, return low 16 bits of each 32-bit result. */
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = (unsigned short)((unsigned int)__pa[__i] * (unsigned int)__pb[__i]);
+    return __r;
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
 _mm_mulhi_epi16(__m128i __a, __m128i __b)
 {
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pmulhw128(__a, __b));
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_mulhi_epu16(__m128i __a, __m128i __b)
+{
+    /* Multiply 8 x 16-bit unsigned integers, return high 16 bits of each 32-bit result. */
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = (unsigned short)(((unsigned int)__pa[__i] * (unsigned int)__pb[__i]) >> 16);
+    return __r;
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
@@ -282,6 +340,19 @@ static __inline__ __m128i __attribute__((__always_inline__))
 _mm_cmpgt_epi8(__m128i __a, __m128i __b)
 {
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpgtb128(__a, __b));
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cmpgt_epi32(__m128i __a, __m128i __b)
+{
+    /* Compare 4 x 32-bit signed integers: returns 0xFFFFFFFF where a > b, 0 otherwise. */
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? -1 : 0;
+    return __r;
 }
 
 /* === 32-bit Unsigned Multiply === */

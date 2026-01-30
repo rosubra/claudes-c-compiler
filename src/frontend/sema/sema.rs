@@ -32,6 +32,7 @@ use crate::frontend::parser::ast::{
     ForInit,
     FunctionDef,
     Initializer,
+    SizeofArg,
     Stmt,
     StructFieldDecl,
     TranslationUnit,
@@ -1364,8 +1365,16 @@ impl SemanticAnalyzer {
             Expr::Cast(_, inner, _) => {
                 self.analyze_expr(inner);
             }
-            Expr::Sizeof(..) | Expr::Alignof(..) | Expr::AlignofExpr(..)
-            | Expr::GnuAlignof(..) | Expr::GnuAlignofExpr(..) => {} // sizeof/_Alignof/__alignof are always compile-time
+            Expr::Sizeof(arg, _) => {
+                // sizeof is unevaluated context, but identifiers must still be declared
+                if let SizeofArg::Expr(inner) = arg.as_ref() {
+                    self.analyze_expr(inner);
+                }
+            }
+            Expr::Alignof(..) | Expr::GnuAlignof(..) => {} // alignof(type) - no expr to check
+            Expr::AlignofExpr(inner, _) | Expr::GnuAlignofExpr(inner, _) => {
+                self.analyze_expr(inner);
+            }
             Expr::AddressOf(inner, _) => {
                 self.analyze_expr(inner);
             }
