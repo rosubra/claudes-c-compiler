@@ -1,8 +1,0 @@
-Task: Fix Nix build setup - add --param support
-Status: STOLEN - implementing --param flag support and nix build pipeline
-
-Plan:
-1. Add --param <name>=<value> and --param=<name>=<value> support to CLI parser
-2. Run /verify/setup_nix.sh
-3. Test: cd /workspace/nix-build && CCC_PATH=/workspace/code/target/release/ccc nix build --impure .#hello
-4. Run regression tests to ensure no regressions

@@ -35,6 +35,19 @@ impl Lowerer {
 
     /// Try to lower a __builtin_* call. Returns Some(result) if handled.
     pub(super) fn try_lower_builtin_call(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // If the user has defined a function body with a builtin name, prefer the
+        // user's definition over the builtin. This matches GCC's behavior: a user
+        // can define `double *__builtin_alloca() { return malloc(...); }` and GCC
+        // will call that function instead of emitting the builtin alloca.
+        // We check sema's is_defined flag (not known_functions, which includes mere
+        // declarations) so that `void *__builtin_alloca(size_t);` alone still uses
+        // the builtin, while a user-provided function body overrides it.
+        if let Some(func_info) = self.sema_functions.get(name) {
+            if func_info.is_defined {
+                return None;
+            }
+        }
+
         // Handle __builtin_choose_expr(const_expr, expr1, expr2)
         // This is a compile-time selection: if const_expr is nonzero, returns expr1, else expr2.
         if name == "__builtin_choose_expr" {

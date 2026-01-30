@@ -525,6 +525,17 @@ impl Driver {
                 }
                 "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
 
+                // GCC --param flag: --param <name>=<value> or --param=<name>=<value>
+                // Used by nix CC wrapper for hardening flags like ssp-buffer-size=4
+                "--param" => {
+                    // Skip the next argument (the parameter value)
+                    i += 1;
+                }
+                arg if arg.starts_with("--param=") => {
+                    // Single-argument form: --param=ssp-buffer-size=4
+                    // Silently ignore
+                }
+
                 // Stdin input
                 "-" => {
                     self.input_files.push("-".to_string());
