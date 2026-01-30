@@ -1,0 +1,27 @@
+QEMU Build Support
+==================
+
+Status: Configure passes, full build not yet tested.
+
+The Meson build system now correctly detects our compiler as GCC 14.2.0
+and passes all QEMU configure-time checks. The only configure failure was
+a missing git submodule (keycodemapdb) which is a setup issue, not a
+compiler issue.
+
+Next steps to complete QEMU build support:
+1. Set up QEMU with all submodules (git submodule init/update)
+2. Run `make -j64` to identify any compilation failures
+3. Fix specific C features/edge cases that QEMU uses but we don't support
+4. Run QEMU test suite to verify correctness
+5. Test with multiple QEMU target configurations (not just x86_64-softmmu)
+
+Known potential issues:
+- QEMU uses complex preprocessor macros and GCC extensions extensively
+- QEMU may use GCC builtins we don't implement (e.g., __builtin_clz family,
+  __atomic_* operations, __sync_* operations)
+- QEMU may use statement expressions ({...}) and other GCC extensions
+- QEMU may use _Pragma, __attribute__((cleanup)), etc.
+- The _Float* types are currently mapped to standard C types via macros
+  which loses precision for _Float128 on x86-64
+
+Priority: HIGH - QEMU is a major milestone for the compiler
