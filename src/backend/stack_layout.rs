@@ -1095,7 +1095,7 @@ fn classify_instructions(
                         });
                     }
                 }
-            } else if let Instruction::ParamRef { dest, param_idx, .. } = inst {
+            } else if let Instruction::ParamRef { dest, param_idx, ty } = inst {
                 // ParamRef loads a parameter value from its alloca slot.
                 // Instead of allocating a separate stack slot for the ParamRef
                 // dest, reuse the param alloca's slot. This saves 8 bytes per
@@ -1111,6 +1111,17 @@ fn classify_instructions(
                     let alloca_val = func.param_alloca_values[*param_idx];
                     if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
                         state.value_locations.insert(dest.0, slot);
+                        // Propagate type tracking even when reusing the alloca
+                        // slot, so downstream Copy instructions use the correct
+                        // multi-word paths for wide/i128/f128 values.
+                        if matches!(ty, IrType::I128 | IrType::U128) {
+                            state.i128_values.insert(dest.0);
+                        }
+                        if crate::common::types::target_is_32bit() {
+                            if matches!(ty, IrType::F64 | IrType::I64 | IrType::U64) {
+                                state.wide_values.insert(dest.0);
+                            }
+                        }
                         continue;
                     }
                 }
