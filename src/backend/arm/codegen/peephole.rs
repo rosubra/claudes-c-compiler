@@ -1309,24 +1309,43 @@ fn global_dead_store_elimination(lines: &[String], kinds: &mut [LineKind], n: us
         }
     }
 
-    // Phase 1: Collect all offsets that are loaded from (read)
-    let mut loaded_offsets = std::collections::HashSet::new();
+    // Phase 1: Collect all (offset, size) byte ranges that are loaded from.
+    // We must use byte-range overlap (not exact offset match) because a wide
+    // store (e.g. `str x` at offset 16, 8 bytes) can be partially read by a
+    // narrower load at a different offset (e.g. `ldr w` at offset 20, 4 bytes).
+    let mut loaded_ranges: Vec<(i32, i32)> = Vec::new(); // (offset, size)
     for i in 0..n {
         match kinds[i] {
-            LineKind::LoadSp { offset, .. } | LineKind::LoadswSp { offset, .. } => {
-                loaded_offsets.insert(offset);
+            LineKind::LoadSp { offset, is_word, .. } => {
+                let size = if is_word { 4 } else { 8 };
+                loaded_ranges.push((offset, size));
+            }
+            LineKind::LoadswSp { offset, .. } => {
+                loaded_ranges.push((offset, 4));
             }
             _ => {
-                // Check for loads in Other instructions (e.g., ldp, ldrb, etc.)
+                // Check for loads in Other instructions (e.g., ldp, ldrb, ldrh, etc.)
                 let trimmed = lines[i].trim();
-                if (trimmed.starts_with("ldr") || trimmed.starts_with("ldp") ||
-                    trimmed.starts_with("ldur")) && trimmed.contains("[sp") {
-                    // Extract offset from [sp, #N] or [sp] pattern
-                    if let Some(off) = extract_sp_offset(trimmed) {
-                        loaded_offsets.insert(off);
-                        // For ldp, also mark the second slot (offset + 8)
-                        if trimmed.starts_with("ldp") {
-                            loaded_offsets.insert(off + 8);
+                let load_size = if trimmed.starts_with("ldp ") {
+                    Some(16) // ldp loads two 8-byte registers
+                } else if trimmed.starts_with("ldr x") || trimmed.starts_with("ldur x") {
+                    Some(8)
+                } else if trimmed.starts_with("ldr w") || trimmed.starts_with("ldur w") ||
+                          trimmed.starts_with("ldrsw ") {
+                    Some(4)
+                } else if trimmed.starts_with("ldrh ") || trimmed.starts_with("ldrsh ") {
+                    Some(2)
+                } else if trimmed.starts_with("ldrb ") || trimmed.starts_with("ldrsb ") {
+                    Some(1)
+                } else if trimmed.starts_with("ldr ") || trimmed.starts_with("ldur ") {
+                    Some(8) // default to 8 for unqualified ldr
+                } else {
+                    None
+                };
+                if let Some(sz) = load_size {
+                    if trimmed.contains("[sp") {
+                        if let Some(off) = extract_sp_offset(trimmed) {
+                            loaded_ranges.push((off, sz));
                         }
                     }
                 }
@@ -1334,11 +1353,16 @@ fn global_dead_store_elimination(lines: &[String], kinds: &mut [LineKind], n: us
         }
     }
 
-    // Phase 2: Remove stores to offsets that are never loaded
+    // Phase 2: Remove stores whose byte range does not overlap any load range
     let mut changed = false;
     for i in 0..n {
-        if let LineKind::StoreSp { offset, .. } = kinds[i] {
-            if !loaded_offsets.contains(&offset) {
+        if let LineKind::StoreSp { offset, is_word, .. } = kinds[i] {
+            let store_size = if is_word { 4 } else { 8 };
+            let overlaps_any_load = loaded_ranges.iter().any(|&(load_off, load_sz)| {
+                // Two ranges [a, a+as) and [b, b+bs) overlap iff a < b+bs && b < a+as
+                offset < load_off + load_sz && load_off < offset + store_size
+            });
+            if !overlaps_any_load {
                 kinds[i] = LineKind::Nop;
                 changed = true;
             }
