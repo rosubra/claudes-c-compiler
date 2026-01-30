@@ -11,6 +11,7 @@ use super::parser::Parser;
 impl Parser {
     pub(super) fn parse_compound_stmt(&mut self) -> CompoundStmt {
         let start = self.peek_span();
+        let open_brace = self.peek_span();
         self.expect(&TokenKind::LBrace);
         let mut items = Vec::new();
         let mut local_labels = Vec::new();
@@ -76,7 +77,7 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::RBrace);
+        self.expect_closing(&TokenKind::RBrace, open_brace);
         self.shadowed_typedefs = saved_shadowed;
         CompoundStmt { items, span: start, local_labels }
     }
@@ -104,15 +105,16 @@ impl Parser {
                 } else {
                     Some(self.parse_expr())
                 };
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after return statement");
                 Stmt::Return(expr, span)
             }
             TokenKind::If => {
                 let span = self.peek_span();
                 self.advance();
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let cond = self.parse_expr();
-                self.expect(&TokenKind::RParen);
+                self.expect_closing(&TokenKind::RParen, open);
                 let then_stmt = self.parse_stmt();
                 let else_stmt = if self.consume_if(&TokenKind::Else) {
                     Some(Box::new(self.parse_stmt()))
@@ -124,9 +126,10 @@ impl Parser {
             TokenKind::While => {
                 let span = self.peek_span();
                 self.advance();
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let cond = self.parse_expr();
-                self.expect(&TokenKind::RParen);
+                self.expect_closing(&TokenKind::RParen, open);
                 let body = self.parse_stmt();
                 Stmt::While(cond, Box::new(body), span)
             }
@@ -134,11 +137,12 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let body = self.parse_stmt();
-                self.expect(&TokenKind::While);
+                self.expect_after(&TokenKind::While, "at end of do-while statement");
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let cond = self.parse_expr();
-                self.expect(&TokenKind::RParen);
-                self.expect(&TokenKind::Semicolon);
+                self.expect_closing(&TokenKind::RParen, open);
+                self.expect_after(&TokenKind::Semicolon, "after do-while statement");
                 Stmt::DoWhile(Box::new(body), cond, span)
             }
             TokenKind::For => {
@@ -151,21 +155,22 @@ impl Parser {
             TokenKind::Break => {
                 let span = self.peek_span();
                 self.advance();
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after break statement");
                 Stmt::Break(span)
             }
             TokenKind::Continue => {
                 let span = self.peek_span();
                 self.advance();
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after continue statement");
                 Stmt::Continue(span)
             }
             TokenKind::Switch => {
                 let span = self.peek_span();
                 self.advance();
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let expr = self.parse_expr();
-                self.expect(&TokenKind::RParen);
+                self.expect_closing(&TokenKind::RParen, open);
                 let body = self.parse_stmt();
                 Stmt::Switch(expr, Box::new(body), span)
             }
@@ -199,7 +204,7 @@ impl Parser {
                     // Computed goto: goto *expr;
                     self.advance();
                     let expr = self.parse_expr();
-                    self.expect(&TokenKind::Semicolon);
+                    self.expect_after(&TokenKind::Semicolon, "after goto statement");
                     Stmt::GotoIndirect(Box::new(expr), span)
                 } else {
                     let label = if let TokenKind::Identifier(name) = self.peek() {
@@ -209,7 +214,7 @@ impl Parser {
                     } else {
                         String::new()
                     };
-                    self.expect(&TokenKind::Semicolon);
+                    self.expect_after(&TokenKind::Semicolon, "after goto statement");
                     Stmt::Goto(label, span)
                 }
             }
@@ -228,7 +233,7 @@ impl Parser {
                     Stmt::Label(name_clone, Box::new(stmt), span)
                 } else {
                     let expr = self.parse_expr();
-                    self.expect(&TokenKind::Semicolon);
+                    self.expect_after(&TokenKind::Semicolon, "after expression");
                     Stmt::Expr(Some(expr))
                 }
             }
@@ -241,7 +246,7 @@ impl Parser {
             }
             _ => {
                 let expr = self.parse_expr();
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after expression");
                 Stmt::Expr(Some(expr))
             }
         }
@@ -251,6 +256,7 @@ impl Parser {
     fn parse_for_stmt(&mut self) -> Stmt {
         let span = self.peek_span();
         self.advance();
+        let open = self.peek_span();
         self.expect(&TokenKind::LParen);
 
         let init = if matches!(self.peek(), TokenKind::Semicolon) {
@@ -261,7 +267,7 @@ impl Parser {
             decl.map(|d| Box::new(ForInit::Declaration(d)))
         } else {
             let expr = self.parse_expr();
-            self.expect(&TokenKind::Semicolon);
+            self.expect_after(&TokenKind::Semicolon, "in for statement initializer");
             Some(Box::new(ForInit::Expr(expr)))
         };
 
@@ -270,14 +276,14 @@ impl Parser {
         } else {
             Some(self.parse_expr())
         };
-        self.expect(&TokenKind::Semicolon);
+        self.expect_after(&TokenKind::Semicolon, "in for statement condition");
 
         let inc = if matches!(self.peek(), TokenKind::RParen) {
             None
         } else {
             Some(self.parse_expr())
         };
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
 
         let body = self.parse_stmt();
         Stmt::For(init, cond, inc, Box::new(body), span)

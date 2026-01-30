@@ -579,6 +579,7 @@ impl Parser {
     /// Parse struct or union field declarations inside braces.
     pub(super) fn parse_struct_fields(&mut self) -> Vec<StructFieldDecl> {
         let mut fields = Vec::new();
+        let open = self.peek_span();
         self.expect(&TokenKind::LBrace);
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             self.skip_gcc_extensions();
@@ -595,12 +596,12 @@ impl Parser {
                     self.parse_struct_field_declarators(&type_spec, &mut fields);
                 }
                 self.skip_gcc_extensions();
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after struct field declaration");
             } else {
                 self.advance(); // skip unknown
             }
         }
-        self.expect(&TokenKind::RBrace);
+        self.expect_closing(&TokenKind::RBrace, open);
         fields
     }
 
@@ -752,6 +753,7 @@ impl Parser {
     /// Parse enum variant declarations inside braces.
     pub(super) fn parse_enum_variants(&mut self) -> Vec<EnumVariant> {
         let mut variants = Vec::new();
+        let open = self.peek_span();
         self.expect(&TokenKind::LBrace);
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             if let TokenKind::Identifier(name) = self.peek() {
@@ -768,7 +770,7 @@ impl Parser {
                 self.advance();
             }
         }
-        self.expect(&TokenKind::RBrace);
+        self.expect_closing(&TokenKind::RBrace, open);
         variants
     }
 

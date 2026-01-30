@@ -259,15 +259,16 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 // _Alignof(type) - C11 standard, returns minimum ABI alignment
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 if let Some(ts) = self.parse_type_specifier() {
                     let result_type = self.parse_abstract_declarator_suffix(ts);
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     Expr::Alignof(result_type, span)
                 } else {
                     // GCC extension: __alignof__(expr) - alignment of expression's type
                     let expr = self.parse_assignment_expr();
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     Expr::AlignofExpr(Box::new(expr), span)
                 }
             }
@@ -275,14 +276,15 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 // __alignof / __alignof__ - GCC extension, returns preferred alignment
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 if let Some(ts) = self.parse_type_specifier() {
                     let result_type = self.parse_abstract_declarator_suffix(ts);
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     Expr::GnuAlignof(result_type, span)
                 } else {
                     let expr = self.parse_assignment_expr();
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     Expr::GnuAlignofExpr(Box::new(expr), span)
                 }
             }
@@ -328,7 +330,7 @@ impl Parser {
             match self.peek() {
                 TokenKind::LParen => {
                     // Function call
-                    let span = self.peek_span();
+                    let open = self.peek_span();
                     self.advance();
                     let mut args = Vec::new();
                     if !matches!(self.peek(), TokenKind::RParen) {
@@ -337,15 +339,15 @@ impl Parser {
                             args.push(self.parse_assignment_expr());
                         }
                     }
-                    self.expect(&TokenKind::RParen);
-                    expr = Expr::FunctionCall(Box::new(expr), args, span);
+                    self.expect_closing(&TokenKind::RParen, open);
+                    expr = Expr::FunctionCall(Box::new(expr), args, open);
                 }
                 TokenKind::LBracket => {
-                    let span = self.peek_span();
+                    let open = self.peek_span();
                     self.advance();
                     let index = self.parse_expr();
-                    self.expect(&TokenKind::RBracket);
-                    expr = Expr::ArraySubscript(Box::new(expr), Box::new(index), span);
+                    self.expect_closing(&TokenKind::RBracket, open);
+                    expr = Expr::ArraySubscript(Box::new(expr), Box::new(index), open);
                 }
                 TokenKind::Dot => {
                     let span = self.peek_span();
@@ -550,16 +552,17 @@ impl Parser {
                 Expr::Identifier(name, span)
             }
             TokenKind::LParen => {
+                let open = self.peek_span();
                 self.advance();
                 // Check for GCC statement expression: ({ stmt; stmt; expr; })
                 if matches!(self.peek(), TokenKind::LBrace) {
                     let span = self.peek_span();
                     let compound = self.parse_compound_stmt();
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     Expr::StmtExpr(compound, span)
                 } else {
                     let expr = self.parse_expr();
-                    self.expect(&TokenKind::RParen);
+                    self.expect_closing(&TokenKind::RParen, open);
                     expr
                 }
             }
@@ -579,11 +582,12 @@ impl Parser {
             TokenKind::BuiltinVaArg => {
                 let span = self.peek_span();
                 self.advance();
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let ap_expr = self.parse_assignment_expr();
                 self.expect(&TokenKind::Comma);
                 let type_spec = self.parse_va_arg_type();
-                self.expect(&TokenKind::RParen);
+                self.expect_closing(&TokenKind::RParen, open);
                 Expr::VaArg(Box::new(ap_expr), type_spec, span)
             }
             TokenKind::BuiltinTypesCompatibleP => {
@@ -591,11 +595,12 @@ impl Parser {
                 // Compile-time: 1 if types are compatible (ignoring qualifiers), 0 otherwise.
                 let span = self.peek_span();
                 self.advance();
+                let open = self.peek_span();
                 self.expect(&TokenKind::LParen);
                 let type1 = self.parse_va_arg_type();
                 self.expect(&TokenKind::Comma);
                 let type2 = self.parse_va_arg_type();
-                self.expect(&TokenKind::RParen);
+                self.expect_closing(&TokenKind::RParen, open);
                 Expr::BuiltinTypesCompatibleP(type1, type2, span)
             }
             TokenKind::Typeof => {
@@ -628,6 +633,7 @@ impl Parser {
     fn parse_generic_selection(&mut self) -> Expr {
         let span = self.peek_span();
         self.advance(); // consume _Generic
+        let open = self.peek_span();
         self.expect(&TokenKind::LParen);
         let controlling = self.parse_assignment_expr();
         self.expect(&TokenKind::Comma);
@@ -662,7 +668,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
         Expr::GenericSelection(Box::new(controlling), associations, span)
     }
 }

@@ -382,7 +382,7 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect(&TokenKind::Semicolon);
+                self.expect_after(&TokenKind::Semicolon, "after parameter declaration");
             } else {
                 break;
             }
@@ -599,7 +599,7 @@ impl Parser {
         self.attrs.set_transparent_union(false);
         self.register_typedefs(&declarators);
 
-        self.expect(&TokenKind::Semicolon);
+        self.expect_after(&TokenKind::Semicolon, "after declaration");
         let mut d = Declaration::new(
             type_spec,
             declarators,
@@ -729,7 +729,7 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::Semicolon);
+        self.expect_after(&TokenKind::Semicolon, "after declaration");
         // Merge alignment from _Alignas (captured in parsed_alignas during type specifier parsing)
         // with alignment from __attribute__((aligned(N))) on declarators
         if let Some(a) = self.attrs.parsed_alignas.take() {
@@ -760,6 +760,7 @@ impl Parser {
     /// Parse an initializer: either a braced initializer list or a single expression.
     pub(super) fn parse_initializer(&mut self) -> Initializer {
         if matches!(self.peek(), TokenKind::LBrace) {
+            let open = self.peek_span();
             self.advance();
             let mut items = Vec::new();
             while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
@@ -808,7 +809,7 @@ impl Parser {
                     break;
                 }
             }
-            self.expect(&TokenKind::RBrace);
+            self.expect_closing(&TokenKind::RBrace, open);
             // Expand range designators [lo ... hi] into individual Index items
             let items = Self::expand_range_designators(items);
             Initializer::List(items)
@@ -1109,6 +1110,7 @@ impl Parser {
     pub(super) fn parse_static_assert(&mut self) {
         let assert_span = self.peek_span();
         self.advance(); // consume _Static_assert
+        let open = self.peek_span();
         self.expect(&TokenKind::LParen);
 
         // Parse the constant expression
@@ -1135,7 +1137,7 @@ impl Parser {
             None
         };
 
-        self.expect(&TokenKind::RParen);
+        self.expect_closing(&TokenKind::RParen, open);
         self.consume_if(&TokenKind::Semicolon);
 
         // Evaluate the constant expression

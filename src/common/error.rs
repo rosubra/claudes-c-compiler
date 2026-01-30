@@ -276,6 +276,9 @@ pub struct Diagnostic {
     pub warning_kind: Option<WarningKind>,
     /// Optional follow-up notes providing additional context.
     pub notes: Vec<Diagnostic>,
+    /// Optional fix-it hint: a short suggestion for how to fix the problem.
+    /// Rendered below the snippet as "fix-it hint: insert ';'" etc.
+    pub fix_hint: Option<String>,
 }
 
 impl Diagnostic {
@@ -287,6 +290,7 @@ impl Diagnostic {
             span: None,
             warning_kind: None,
             notes: Vec::new(),
+            fix_hint: None,
         }
     }
 
@@ -298,6 +302,7 @@ impl Diagnostic {
             span: None,
             warning_kind: None,
             notes: Vec::new(),
+            fix_hint: None,
         }
     }
 
@@ -309,6 +314,7 @@ impl Diagnostic {
             span: None,
             warning_kind: Some(kind),
             notes: Vec::new(),
+            fix_hint: None,
         }
     }
 
@@ -320,6 +326,7 @@ impl Diagnostic {
             span: None,
             warning_kind: None,
             notes: Vec::new(),
+            fix_hint: None,
         }
     }
 
@@ -333,6 +340,13 @@ impl Diagnostic {
     /// Used for "note: expression has type '...'" and similar context.
     pub fn with_note(mut self, note: Diagnostic) -> Self {
         self.notes.push(note);
+        self
+    }
+
+    /// Add a fix-it hint suggestion.
+    /// Rendered below the source snippet, e.g., "fix-it hint: insert ';' after expression".
+    pub fn with_fix_hint(mut self, hint: impl Into<String>) -> Self {
+        self.fix_hint = Some(hint.into());
         self
     }
 }
@@ -420,6 +434,7 @@ impl DiagnosticEngine {
                             span: diag.span,
                             warning_kind: diag.warning_kind,
                             notes: diag.notes.clone(),
+                            fix_hint: diag.fix_hint.clone(),
                         };
                         self.render_diagnostic(&promoted);
                         self.error_count += 1;
@@ -433,6 +448,7 @@ impl DiagnosticEngine {
                         span: diag.span,
                         warning_kind: diag.warning_kind,
                         notes: diag.notes.clone(),
+                        fix_hint: diag.fix_hint.clone(),
                     };
                     self.render_diagnostic(&annotated);
                     self.warning_count += 1;
@@ -445,6 +461,7 @@ impl DiagnosticEngine {
                             span: diag.span,
                             warning_kind: None,
                             notes: diag.notes.clone(),
+                            fix_hint: diag.fix_hint.clone(),
                         };
                         self.render_diagnostic(&promoted);
                         self.error_count += 1;
@@ -517,7 +534,7 @@ impl DiagnosticEngine {
     }
 
     /// Render a single diagnostic to stderr, including location, severity,
-    /// message, source snippet with caret, and any follow-up notes.
+    /// message, source snippet with caret, fix-it hints, and any follow-up notes.
     fn render_diagnostic(&self, diag: &Diagnostic) {
         use std::fmt::Write;
         let mut msg = String::new();
@@ -535,6 +552,11 @@ impl DiagnosticEngine {
         // Source snippet with caret underline
         if let Some(span) = diag.span {
             self.render_snippet(span);
+        }
+
+        // Render fix-it hint if present
+        if let Some(ref hint) = diag.fix_hint {
+            eprintln!("  fix-it hint: {}", hint);
         }
 
         // Render any follow-up notes

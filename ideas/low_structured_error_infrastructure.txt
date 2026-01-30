@@ -50,6 +50,20 @@ COMPLETED (2026-01-28):
 - Updated sema diagnostic site to use Display (format with {}) instead of Debug ({:?})
   for CType in the "expression has type '...'" note message
 
+COMPLETED (2026-01-30):
+- Added fix-it hint infrastructure: Diagnostic.fix_hint field rendered below snippets
+- Added expect_after() parser method for context-aware error messages
+  (e.g., "expected ';' after return statement" instead of "expected ';' before '}'")
+- Added expect_closing() parser method for delimiter matching notes
+  (e.g., "note: to match this '(' at file.c:10:5")
+- Updated all statement semicolons with context: return, break, continue, goto,
+  do-while, for-loop, expression statements
+- Updated struct/enum/initializer closing braces with opening brace notes
+- Updated function calls, parenthesized expressions, array subscripts,
+  _Alignof, __alignof__, __builtin_va_arg, __builtin_types_compatible_p,
+  _Generic, _Static_assert with closing paren notes
+- Updated declaration semicolons (external, local, K&R params, struct fields)
+
 REMAINING FOLLOW-UPS:
 1. Add spans to preprocessor errors (#error directives)
 2. Add more WarningKind categories as compiler implements more warnings
@@ -59,9 +73,9 @@ REMAINING FOLLOW-UPS:
    vector type mismatches in compound assignment
 
 Key files:
-- src/common/error.rs (DiagnosticEngine, Diagnostic, Severity, with_note)
+- src/common/error.rs (DiagnosticEngine, Diagnostic, Severity, with_note, with_fix_hint)
 - src/common/source.rs (SourceManager with line map, get_source_line for snippets)
-- src/frontend/parser/parser.rs (uses emit_error/emit_warning)
+- src/frontend/parser/parser.rs (uses emit_error/emit_warning, expect_after, expect_closing)
 - src/frontend/sema/sema.rs (uses diagnostics.error/warning_with_kind with spans)
 - src/ir/lowering/lowering.rs (uses RefCell<DiagnosticEngine> for &self methods)
 - src/frontend/preprocessor/preprocessor.rs (collects errors and warnings Vecs)

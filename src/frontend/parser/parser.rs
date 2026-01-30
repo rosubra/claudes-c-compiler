@@ -421,6 +421,64 @@ impl Parser {
         }
     }
 
+    /// Expect a token with a contextual description of what construct we're parsing.
+    /// Produces messages like "expected ';' after return statement" instead of
+    /// the generic "expected ';' before '}'".
+    ///
+    /// For semicolons: if the next token starts a new statement (e.g., '}', keyword),
+    /// the error points at the previous token's end position and suggests inserting
+    /// the missing token, which matches GCC's behavior.
+    pub(super) fn expect_after(&mut self, expected: &TokenKind, context: &str) -> Span {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
+            let span = self.peek_span();
+            self.advance();
+            span
+        } else {
+            let span = self.peek_span();
+            let diag = crate::common::error::Diagnostic::error(
+                format!("expected {} {} before {}", expected, context, self.peek())
+            )
+            .with_span(span)
+            .with_fix_hint(format!("insert {}", expected));
+            self.error_count += 1;
+            self.diagnostics.emit(&diag);
+            span
+        }
+    }
+
+    /// Expect a closing delimiter (paren, brace, bracket) and if missing,
+    /// attach a note pointing back to where the opening delimiter was.
+    /// Produces messages like:
+    ///   error: expected ')' before ';'
+    ///   note: to match this '(' (at file.c:10:5)
+    pub(super) fn expect_closing(&mut self, expected: &TokenKind, open_span: Span) -> Span {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(expected) {
+            let span = self.peek_span();
+            self.advance();
+            span
+        } else {
+            let span = self.peek_span();
+            let open_tok = match expected {
+                TokenKind::RParen => "'('",
+                TokenKind::RBrace => "'{'",
+                TokenKind::RBracket => "'['",
+                _ => "'?'",
+            };
+            let diag = crate::common::error::Diagnostic::error(
+                format!("expected {} before {}", expected, self.peek())
+            )
+            .with_span(span)
+            .with_note(
+                crate::common::error::Diagnostic::note(
+                    format!("to match this {}", open_tok)
+                ).with_span(open_span)
+            );
+            self.error_count += 1;
+            self.diagnostics.emit(&diag);
+            span
+        }
+    }
+
     pub(super) fn consume_if(&mut self, kind: &TokenKind) -> bool {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(kind) {
             self.advance();
