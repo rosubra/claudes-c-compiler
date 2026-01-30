@@ -219,14 +219,14 @@ impl X86Codegen {
     }
 
     pub(super) fn set_call_ret_eightbyte_classes_impl(&mut self, classes: &[crate::common::types::EightbyteClass]) {
-        self.current_ret_classes = classes.to_vec();
+        self.call_ret_classes = classes.to_vec();
     }
 
     pub(super) fn emit_call_store_result_impl(&mut self, dest: &Value, return_type: IrType) {
         if is_i128_type(return_type) {
             use crate::common::types::EightbyteClass;
-            if self.current_ret_classes.len() == 2 {
-                let (c0, c1) = (self.current_ret_classes[0], self.current_ret_classes[1]);
+            if self.call_ret_classes.len() == 2 {
+                let (c0, c1) = (self.call_ret_classes[0], self.call_ret_classes[1]);
                 match (c0, c1) {
                     (EightbyteClass::Integer, EightbyteClass::Sse) => {
                         if let Some(slot) = self.state.get_slot(dest.0) {

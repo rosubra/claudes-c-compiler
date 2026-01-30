@@ -36,8 +36,10 @@ impl Lowerer {
         if args.is_empty() {
             return Some(Operand::Const(IrConst::I64(0)));
         }
-        let arg = self.lower_expr(&args[0]);
         let ty = Self::intrinsic_type_from_suffix(name);
+        // Cast the argument to the intrinsic's operand width (e.g. zero-extend
+        // a 32-bit size_t to 64-bit for __builtin_clzll on i686).
+        let arg = self.lower_expr_with_type(&args[0], ty);
         let dest = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest, op: ir_op, src: arg, ty });
         Some(Operand::Value(dest))
@@ -50,8 +52,9 @@ impl Lowerer {
         if args.is_empty() {
             return Some(Operand::Const(IrConst::I64(0)));
         }
-        let arg = self.lower_expr(&args[0]);
         let ty = Self::intrinsic_type_from_suffix(name);
+        // Cast arg to the intrinsic's operand width (e.g. zero-extend for "ll" on i686).
+        let arg = self.lower_expr_with_type(&args[0], ty);
 
         // ctz_val = ctz(x)
         let ctz_val = self.fresh_value();
@@ -95,7 +98,6 @@ impl Lowerer {
         if args.is_empty() {
             return Some(Operand::Const(IrConst::I64(0)));
         }
-        let arg = self.lower_expr(&args[0]);
         let ty = if name.contains("64") {
             IrType::I64
         } else if name.contains("16") {
@@ -103,6 +105,8 @@ impl Lowerer {
         } else {
             IrType::I32
         };
+        // Cast arg to the intrinsic's operand width.
+        let arg = self.lower_expr_with_type(&args[0], ty);
         let dest = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Bswap, src: arg, ty });
         // bswap16 returns uint16_t which is promoted to int in C.
@@ -120,8 +124,9 @@ impl Lowerer {
         if args.is_empty() {
             return Some(Operand::Const(IrConst::I64(0)));
         }
-        let arg = self.lower_expr(&args[0]);
         let ty = Self::intrinsic_type_from_suffix(name);
+        // Cast arg to the intrinsic's operand width.
+        let arg = self.lower_expr_with_type(&args[0], ty);
         let pop = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest: pop, op: IrUnaryOp::Popcount, src: arg, ty });
         let one = if ty == IrType::I64 { IrConst::I64(1) } else { IrConst::I32(1) };
@@ -136,8 +141,9 @@ impl Lowerer {
         if args.is_empty() {
             return Some(Operand::Const(IrConst::I64(0)));
         }
-        let arg = self.lower_expr(&args[0]);
         let ty = Self::intrinsic_type_from_suffix(name);
+        // Cast arg to the intrinsic's operand width.
+        let arg = self.lower_expr_with_type(&args[0], ty);
         let bits = if ty == IrType::I64 { 63i64 } else { 31i64 };
 
         // Extract sign bit using logical shift right: sign_bit = x >>> (bits)

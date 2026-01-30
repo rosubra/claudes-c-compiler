@@ -879,6 +879,20 @@ impl Lowerer {
         // operators on non-pointer types, apply C usual arithmetic conversions.
         let lct = self.get_expr_ctype(lhs);
         let rct = self.get_expr_ctype(rhs);
+
+        // Per GCC vector extensions, if either operand is a vector type, the result
+        // is a vector type. The scalar operand is broadcast to all vector lanes.
+        if let Some(ref l) = lct {
+            if l.is_vector() {
+                return Some(l.clone());
+            }
+        }
+        if let Some(ref r) = rct {
+            if r.is_vector() {
+                return Some(r.clone());
+            }
+        }
+
         match (lct, rct) {
             (Some(l), Some(r)) => Some(CType::usual_arithmetic_conversion(&l, &r)),
             (Some(l), None) => Some(Self::integer_promote_ctype(&l)),

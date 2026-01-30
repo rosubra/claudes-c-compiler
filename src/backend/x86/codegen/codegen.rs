@@ -146,6 +146,10 @@ pub struct X86Codegen {
     /// SysV ABI eightbyte classification for the current function's return struct.
     /// Used for mixed INTEGER/SSE returns (e.g., struct { int; float; double; }).
     pub(super) current_ret_classes: Vec<crate::common::types::EightbyteClass>,
+    /// SysV ABI eightbyte classification for the most recent call-site's return struct.
+    /// Separate from current_ret_classes to avoid call sites overwriting the function's
+    /// own return classification.
+    pub(super) call_ret_classes: Vec<crate::common::types::EightbyteClass>,
     /// For variadic functions: number of named integer/pointer parameters (excluding long double)
     pub(super) num_named_int_params: usize,
     /// For variadic functions: number of named float/double parameters (excluding long double)
@@ -177,6 +181,7 @@ impl X86Codegen {
             state: CodegenState::new(),
             current_return_type: IrType::I64,
             current_ret_classes: Vec::new(),
+            call_ret_classes: Vec::new(),
             num_named_int_params: 0,
             num_named_fp_params: 0,
             num_named_stack_bytes: 0,
