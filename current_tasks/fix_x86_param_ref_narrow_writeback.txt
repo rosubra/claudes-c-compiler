@@ -1,0 +1,23 @@
+Task: Fix x86 emit_param_ref_impl skipping writeback for narrow types
+Status: in_progress
+Started: 2026-01-30
+
+Problem:
+When mem2reg promotes a parameter alloca to SSA, emit_param_ref_impl loads
+the param value from its alloca slot using a type-appropriate instruction
+(e.g., movslq for I32). However, when the dest SSA value shares the same
+stack slot as the param alloca, the code skips the store-back as an
+optimization ("value is already there from emit_store_params").
+
+This is wrong for narrow types (I32, I16, I8, etc.) because emit_store_params
+stores the param with a narrow instruction (e.g., movl for I32), leaving only
+4 valid bytes in the 8-byte slot. Later movq loads from this slot read garbage
+in the upper 32 bits, causing crashes (Bus error) in code that uses the value
+as a 64-bit quantity (e.g., VLA size calculations, pointer arithmetic).
+
+Fix:
+Always write back the sign/zero-extended value when the param type is smaller
+than 8 bytes, even when the dest shares the same slot.
+
+Impact:
+Fixes JerryScript VLA Bus errors and likely other projects with similar issues.
