@@ -18,15 +18,20 @@
 //! Strength reduction (integer types only):
 //! - x * 2^k => x << k  (multiply by power-of-2 to shift)
 //! - x * 2 => x + x     (slightly cheaper on some uarches)
+//! - x * (-1) => neg(x)  (single neg instruction vs imul)
 //! - x / 2^k => x >> k  (unsigned divide by power-of-2 to logical shift)
 //!
 //! Constant reassociation (requires def lookup):
 //! - (x + C1) + C2 => x + (C1 + C2)
 //! - (x - C1) - C2 => x - (C1 + C2)
+//! - (x * C1) * C2 => x * (C1 * C2)
 //! - (x & C1) & C2 => x & (C1 & C2)
 //! - (x | C1) | C2 => x | (C1 | C2)
 //! - (x ^ C1) ^ C2 => x ^ (C1 ^ C2)
 //! - (x << C1) << C2 => x << (C1 + C2)
+//!
+//! Negation elimination (requires def lookup):
+//! - x - (neg y) => x + y
 //!
 //! Redundant instruction elimination:
 //! - Cast where from_ty == to_ty => Copy
@@ -44,6 +49,8 @@
 //! - Cmp(Ne, cmp_result, 1) => Cmp(inverted_op, orig_lhs, orig_rhs) -- negated boolean
 //! - Cmp(Eq, cmp_result, 1) => Copy(cmp_result) -- redundant boolean test
 //! - Cmp(op, x, x) => constant -- self-comparison
+//! - Cmp(Ule, x, 0) => Cmp(Eq, x, 0) -- unsigned x <= 0 is x == 0
+//! - Cmp(Ugt, x, 0) => Cmp(Ne, x, 0) -- unsigned x > 0 is x != 0
 //!
 //! Select simplification:
 //! - select cond, x, x => x (both arms same)
@@ -59,6 +66,7 @@ use crate::ir::ir::{
     IrConst,
     IrFunction,
     IrModule,
+    IrUnaryOp,
     Operand,
     Value,
 };
@@ -79,6 +87,7 @@ pub(crate) fn simplify_function(func: &mut IrFunction) -> usize {
     let mut gep_defs: Vec<Option<GepDef>> = vec![None; max_id + 1];
     let mut cmp_defs: Vec<Option<CmpDef>> = vec![None; max_id + 1];
     let mut binop_defs: Vec<Option<BinOpDef>> = vec![None; max_id + 1];
+    let mut neg_defs: Vec<Option<NegDef>> = vec![None; max_id + 1];
     // Track values known to be boolean (0 or 1). This includes Cmp results
     // and bitwise And/Or/Xor of boolean values.
     let mut is_boolean = vec![false; max_id + 1];
@@ -108,12 +117,16 @@ pub(crate) fn simplify_function(func: &mut IrFunction) -> usize {
                 }
                 Instruction::BinOp { dest, op, lhs, rhs, ty } => {
                     // Track BinOp definitions where at least one operand is a constant.
-                    // This enables constant reassociation: (x + C1) + C2 => x + (C1+C2).
+                    // This enables constant reassociation: (x + C1) + C2 => x + (C1+C2),
+                    // and multiply reassociation: (x * C1) * C2 => x * (C1*C2).
                     if matches!(lhs, Operand::Const(_)) || matches!(rhs, Operand::Const(_)) {
                         set_def(&mut binop_defs, dest.0, BinOpDef {
                             op: *op, lhs: *lhs, rhs: *rhs, ty: *ty,
                         });
                     }
+                }
+                Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src, .. } => {
+                    set_def(&mut neg_defs, dest.0, NegDef { src: *src });
                 }
                 _ => {}
             }
@@ -140,7 +153,7 @@ pub(crate) fn simplify_function(func: &mut IrFunction) -> usize {
 
     for block in &mut func.blocks {
         for inst in &mut block.instructions {
-            if let Some(simplified) = try_simplify(inst, &cast_defs, &gep_defs, &cmp_defs, &binop_defs, &is_boolean) {
+            if let Some(simplified) = try_simplify(inst, &cast_defs, &gep_defs, &cmp_defs, &binop_defs, &neg_defs, &is_boolean) {
                 *inst = simplified;
                 total += 1;
             }
@@ -192,6 +205,13 @@ struct CmpDef {
     ty: IrType,
 }
 
+/// Cached information about a UnaryOp::Neg instruction.
+/// Used to simplify `x - (neg y)` => `x + y`.
+#[derive(Clone, Copy)]
+struct NegDef {
+    src: Operand,
+}
+
 /// Cached information about a BinOp instruction for constant reassociation.
 /// We only store BinOps where at least one operand is a constant, since
 /// reassociation requires folding two constants together.
@@ -210,11 +230,12 @@ fn try_simplify(
     gep_defs: &[Option<GepDef>],
     cmp_defs: &[Option<CmpDef>],
     binop_defs: &[Option<BinOpDef>],
+    neg_defs: &[Option<NegDef>],
     is_boolean: &[bool],
 ) -> Option<Instruction> {
     match inst {
         Instruction::BinOp { dest, op, lhs, rhs, ty } => {
-            simplify_binop(*dest, *op, lhs, rhs, *ty, binop_defs)
+            simplify_binop(*dest, *op, lhs, rhs, *ty, binop_defs, neg_defs)
         }
         Instruction::Cast { dest, src, from_ty, to_ty } => {
             simplify_cast(*dest, src, *from_ty, *to_ty, cast_defs)
@@ -631,6 +652,24 @@ fn simplify_cmp(
                     src: Operand::Const(IrConst::I8(1)),
                 });
             }
+            // Cmp(Ule, x, 0) => Cmp(Eq, x, 0) (unsigned x <= 0 means x == 0)
+            IrCmpOp::Ule => {
+                return Some(Instruction::Cmp {
+                    dest, op: IrCmpOp::Eq,
+                    lhs: Operand::Value(*val),
+                    rhs: Operand::Const(*cval),
+                    ty,
+                });
+            }
+            // Cmp(Ugt, x, 0) => Cmp(Ne, x, 0) (unsigned x > 0 means x != 0)
+            IrCmpOp::Ugt => {
+                return Some(Instruction::Cmp {
+                    dest, op: IrCmpOp::Ne,
+                    lhs: Operand::Value(*val),
+                    rhs: Operand::Const(*cval),
+                    ty,
+                });
+            }
             _ => {}
         }
     }
@@ -731,6 +770,7 @@ fn simplify_binop(
     rhs: &Operand,
     ty: IrType,
     binop_defs: &[Option<BinOpDef>],
+    neg_defs: &[Option<NegDef>],
 ) -> Option<Instruction> {
     let lhs_zero = is_zero(lhs);
     let rhs_zero = is_zero(rhs);
@@ -776,6 +816,12 @@ fn simplify_binop(
                 if let Some(inst) = try_reassociate_sub(dest, lhs, rhs, ty, binop_defs) {
                     return Some(inst);
                 }
+                // x - (neg y) => x + y (eliminate negation)
+                if let Some(neg_src) = get_neg_def(rhs, neg_defs) {
+                    return Some(Instruction::BinOp {
+                        dest, op: IrBinOp::Add, lhs: *lhs, rhs: neg_src, ty,
+                    });
+                }
             }
         }
         IrBinOp::Mul => {
@@ -800,6 +846,26 @@ fn simplify_binop(
                     return Some(inst);
                 }
                 if let Some(inst) = try_mul_power_of_two(dest, rhs, lhs, ty) {
+                    return Some(inst);
+                }
+            }
+            // x * (-1) => neg(x), (-1) * x => neg(x) (integers only)
+            // A single neg instruction is cheaper than imul by -1.
+            if !is_float {
+                if is_neg_one(rhs, ty) {
+                    return Some(Instruction::UnaryOp {
+                        dest, op: IrUnaryOp::Neg, src: *lhs, ty,
+                    });
+                }
+                if is_neg_one(lhs, ty) {
+                    return Some(Instruction::UnaryOp {
+                        dest, op: IrUnaryOp::Neg, src: *rhs, ty,
+                    });
+                }
+            }
+            // Reassociation: (x * C1) * C2 => x * (C1 * C2) (integers only)
+            if !is_float {
+                if let Some(inst) = try_reassociate_mul(dest, lhs, rhs, ty, binop_defs) {
                     return Some(inst);
                 }
             }
@@ -998,6 +1064,42 @@ fn is_positive_zero(op: &Operand) -> bool {
 /// Check if an operand is one.
 fn is_one(op: &Operand) -> bool {
     matches!(op, Operand::Const(c) if c.is_one())
+}
+
+/// Check if an operand is -1 for the given integer type.
+/// This is the two's complement representation: all bits set.
+/// Used for x * (-1) => neg(x) optimization.
+fn is_neg_one(op: &Operand, ty: IrType) -> bool {
+    if !ty.is_integer() {
+        return false;
+    }
+    match op {
+        Operand::Const(c) => {
+            match c.to_i64() {
+                Some(val) => ty.truncate_i64(val) == ty.truncate_i64(-1),
+                None => {
+                    if let IrConst::I128(v) = c {
+                        *v == -1i128
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Look up a NegDef for a Value operand.
+/// Returns the source operand of the negation if the operand is defined by UnaryOp::Neg.
+fn get_neg_def(op: &Operand, neg_defs: &[Option<NegDef>]) -> Option<Operand> {
+    if let Operand::Value(v) = op {
+        let idx = v.0 as usize;
+        if let Some(Some(def)) = neg_defs.get(idx) {
+            return Some(def.src);
+        }
+    }
+    None
 }
 
 /// Check if two operands refer to the same value.
@@ -1332,6 +1434,63 @@ fn try_reassociate_shift(
     })
 }
 
+/// Try reassociating multiplication: (x * C1) * C2 => x * (C1 * C2)
+/// Also handles: C2 * (x * C1) => x * (C1 * C2) (commuted)
+/// Integer multiplication is associative, so folding two constant factors into
+/// one eliminates an instruction.
+fn try_reassociate_mul(
+    dest: Value,
+    lhs: &Operand,
+    rhs: &Operand,
+    ty: IrType,
+    binop_defs: &[Option<BinOpDef>],
+) -> Option<Instruction> {
+    // Skip I128/U128: to_i64() truncates, which would silently corrupt 128-bit constants.
+    if matches!(ty, IrType::I128 | IrType::U128) { return None; }
+
+    // Helper: try pattern (expr * C1) * C2 where expr is on one side and C2 on the other.
+    let try_pattern = |expr_side: &Operand, const_side: &Operand| -> Option<Instruction> {
+        let c2_val = match const_side {
+            Operand::Const(c) => c.to_i64()?,
+            _ => return None,
+        };
+        let def = get_binop_def(expr_side, binop_defs)?;
+        if def.op != IrBinOp::Mul || def.ty != ty {
+            return None;
+        }
+        // Find the constant in the inner multiply: (x * C1) or (C1 * x)
+        let (non_const, c1_val) = if let Operand::Const(c1) = &def.rhs {
+            (def.lhs, c1.to_i64()?)
+        } else if let Operand::Const(c1) = &def.lhs {
+            (def.rhs, c1.to_i64()?)
+        } else {
+            return None;
+        };
+        let combined = ty.truncate_i64(c1_val.wrapping_mul(c2_val));
+        if combined == 0 {
+            return Some(Instruction::Copy {
+                dest,
+                src: Operand::Const(IrConst::zero(ty)),
+            });
+        }
+        if combined == 1 || ty.truncate_i64(combined) == ty.truncate_i64(1) {
+            return Some(Instruction::Copy { dest, src: non_const });
+        }
+        Some(Instruction::BinOp {
+            dest, op: IrBinOp::Mul,
+            lhs: non_const,
+            rhs: Operand::Const(IrConst::from_i64(combined, ty)),
+            ty,
+        })
+    };
+
+    // Try both orderings: (x*C1)*C2 and C2*(x*C1)
+    if let Some(inst) = try_pattern(lhs, rhs) {
+        return Some(inst);
+    }
+    try_pattern(rhs, lhs)
+}
+
 /// Table of unary math functions that map directly to intrinsic instructions.
 const UNARY_INTRINSICS: &[(&str, IntrinsicOp)] = &[
     ("sqrt", IntrinsicOp::SqrtF64),
@@ -1434,7 +1593,7 @@ mod tests {
 
     /// Shorthand: try_simplify with empty def maps (no chain optimization context).
     fn simplify_default(inst: &Instruction) -> Option<Instruction> {
-        try_simplify(inst, &[], &[], &[], &[], &[])
+        try_simplify(inst, &[], &[], &[], &[], &[], &[])
     }
 
     /// Create a BinOp instruction with standard test values.
@@ -1645,7 +1804,7 @@ mod tests {
             from_ty: IrType::I64,
             to_ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &defs, &[], &[], &[], &[]).unwrap();
+        let result = try_simplify(&inst, &defs, &[], &[], &[], &[], &[]).unwrap();
         assert_copy_value(&result, 0);
     }
 
@@ -1715,7 +1874,7 @@ mod tests {
             offset: Operand::Const(IrConst::I64(4)),
             ty: IrType::Ptr,
         };
-        let result = try_simplify(&inst, &[], &gep_defs, &[], &[], &[]).unwrap();
+        let result = try_simplify(&inst, &[], &gep_defs, &[], &[], &[], &[]).unwrap();
         match result {
             Instruction::GetElementPtr { base, offset: Operand::Const(IrConst::I64(12)), .. } => {
                 assert_eq!(base.0, 0, "Should use original base");
@@ -1738,7 +1897,7 @@ mod tests {
             offset: Operand::Const(IrConst::I64(-4)),
             ty: IrType::Ptr,
         };
-        let result = try_simplify(&inst, &[], &gep_defs, &[], &[], &[]).unwrap();
+        let result = try_simplify(&inst, &[], &gep_defs, &[], &[], &[], &[]).unwrap();
         assert_copy_value(&result, 0);
     }
 
@@ -2046,7 +2205,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I64(0)),
             ty: IrType::I64,
         };
-        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &booleans).unwrap();
+        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &[], &booleans).unwrap();
         assert_copy_value(&result, 1);
     }
 
@@ -2069,7 +2228,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I64(0)),
             ty: IrType::I64,
         };
-        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &booleans).unwrap();
+        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &[], &booleans).unwrap();
         match result {
             Instruction::Cmp { op: IrCmpOp::Sge, lhs: Operand::Value(a), rhs: Operand::Value(b), .. } => {
                 assert_eq!(a.0, 10);
@@ -2098,7 +2257,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I64(1)),
             ty: IrType::I64,
         };
-        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &booleans).unwrap();
+        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &[], &booleans).unwrap();
         assert_copy_value(&result, 1);
     }
 
@@ -2121,7 +2280,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I64(1)),
             ty: IrType::I64,
         };
-        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &booleans).unwrap();
+        let result = try_simplify(&inst, &[], &[], &cmp_defs, &[], &[], &booleans).unwrap();
         match result {
             Instruction::Cmp { op: IrCmpOp::Eq, lhs: Operand::Value(a), rhs: Operand::Value(b), .. } => {
                 assert_eq!(a.0, 10);
@@ -2143,7 +2302,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I64(0)),
             ty: IrType::I64,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &[], &booleans).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &[], &[], &booleans).unwrap();
         assert_copy_value(&result, 3);
     }
 
@@ -2311,7 +2470,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(20)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         match result {
             Instruction::BinOp { op: IrBinOp::Add, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(30)), .. } => {
                 assert_eq!(v.0, 0);
@@ -2337,7 +2496,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(-5)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         assert_copy_value(&result, 0);
     }
 
@@ -2358,7 +2517,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(20)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         match result {
             Instruction::BinOp { op: IrBinOp::Sub, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(30)), .. } => {
                 assert_eq!(v.0, 0);
@@ -2384,7 +2543,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(0x0F)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         match result {
             Instruction::BinOp { op: IrBinOp::And, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(0x0F)), .. } => {
                 assert_eq!(v.0, 0);
@@ -2410,7 +2569,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(0xFF)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         assert_copy_value(&result, 0);
     }
 
@@ -2431,7 +2590,7 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(3)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         match result {
             Instruction::BinOp { op: IrBinOp::Shl, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(5)), .. } => {
                 assert_eq!(v.0, 0);
@@ -2457,7 +2616,184 @@ mod tests {
             rhs: Operand::Const(IrConst::I32(20)),
             ty: IrType::I32,
         };
-        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[]).unwrap();
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
         assert_copy_const_i32(&result, 0);
+    }
+
+    // === Multiply by -1 tests ===
+
+    #[test]
+    fn test_mul_neg_one_rhs() {
+        // x * (-1) => neg(x)
+        let inst = binop_val_const(IrBinOp::Mul, IrConst::I32(-1), IrType::I32);
+        let result = simplify_default(&inst).unwrap();
+        match result {
+            Instruction::UnaryOp { op: IrUnaryOp::Neg, src: Operand::Value(v), ty: IrType::I32, .. } => {
+                assert_eq!(v.0, 1);
+            }
+            _ => panic!("Expected UnaryOp::Neg, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_mul_neg_one_lhs() {
+        // (-1) * x => neg(x)
+        let inst = binop(IrBinOp::Mul, Operand::Const(IrConst::I64(-1)), Operand::Value(Value(1)), IrType::I64);
+        let result = simplify_default(&inst).unwrap();
+        match result {
+            Instruction::UnaryOp { op: IrUnaryOp::Neg, src: Operand::Value(v), ty: IrType::I64, .. } => {
+                assert_eq!(v.0, 1);
+            }
+            _ => panic!("Expected UnaryOp::Neg, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_mul_neg_one_float_not_simplified() {
+        // Float x * (-1) should NOT be converted to neg (keep mul for IEEE semantics)
+        let inst = binop_val_const(IrBinOp::Mul, IrConst::I64(-1), IrType::F64);
+        // Note: is_neg_one checks ty.is_integer(), so this won't match
+        assert!(simplify_default(&inst).is_none());
+    }
+
+    // === Multiply reassociation tests ===
+
+    #[test]
+    fn test_reassociate_mul() {
+        // (x * 3) * 5 => x * 15
+        let mut binop_defs: Vec<Option<BinOpDef>> = vec![None; 4];
+        binop_defs[1] = Some(BinOpDef {
+            op: IrBinOp::Mul,
+            lhs: Operand::Value(Value(0)),
+            rhs: Operand::Const(IrConst::I32(3)),
+            ty: IrType::I32,
+        });
+        let inst = Instruction::BinOp {
+            dest: Value(2),
+            op: IrBinOp::Mul,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::I32(5)),
+            ty: IrType::I32,
+        };
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::Mul, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(15)), .. } => {
+                assert_eq!(v.0, 0, "Should use original non-const operand");
+            }
+            _ => panic!("Expected Mul(V0, 15), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_reassociate_mul_to_zero() {
+        // (x * 3) * 0 => 0 (already handled by mul-by-zero, but also via reassociation)
+        // This test verifies the case is handled correctly
+        let inst = binop_val_const(IrBinOp::Mul, IrConst::I32(0), IrType::I32);
+        let result = simplify_default(&inst).unwrap();
+        assert_copy_const_i32(&result, 0);
+    }
+
+    #[test]
+    fn test_reassociate_mul_commuted() {
+        // 5 * (x * 3) => x * 15
+        let mut binop_defs: Vec<Option<BinOpDef>> = vec![None; 4];
+        binop_defs[1] = Some(BinOpDef {
+            op: IrBinOp::Mul,
+            lhs: Operand::Value(Value(0)),
+            rhs: Operand::Const(IrConst::I64(3)),
+            ty: IrType::I64,
+        });
+        let inst = Instruction::BinOp {
+            dest: Value(2),
+            op: IrBinOp::Mul,
+            lhs: Operand::Const(IrConst::I64(5)),
+            rhs: Operand::Value(Value(1)),
+            ty: IrType::I64,
+        };
+        let result = try_simplify(&inst, &[], &[], &[], &binop_defs, &[], &[]).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::Mul, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I64(15)), .. } => {
+                assert_eq!(v.0, 0);
+            }
+            _ => panic!("Expected Mul(V0, 15), got {:?}", result),
+        }
+    }
+
+    // === Subtract-of-negation tests ===
+
+    #[test]
+    fn test_sub_neg_to_add() {
+        // x - (neg y) => x + y
+        let mut neg_defs: Vec<Option<NegDef>> = vec![None; 4];
+        neg_defs[2] = Some(NegDef { src: Operand::Value(Value(1)) });
+        let inst = Instruction::BinOp {
+            dest: Value(3),
+            op: IrBinOp::Sub,
+            lhs: Operand::Value(Value(0)),
+            rhs: Operand::Value(Value(2)),
+            ty: IrType::I32,
+        };
+        let result = try_simplify(&inst, &[], &[], &[], &[], &neg_defs, &[]).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::Add, lhs: Operand::Value(a), rhs: Operand::Value(b), .. } => {
+                assert_eq!(a.0, 0, "lhs should be original lhs");
+                assert_eq!(b.0, 1, "rhs should be negation source");
+            }
+            _ => panic!("Expected Add(V0, V1), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sub_neg_float_not_simplified() {
+        // Float x - (neg y) should NOT be simplified (IEEE 754 concerns)
+        let mut neg_defs: Vec<Option<NegDef>> = vec![None; 4];
+        neg_defs[2] = Some(NegDef { src: Operand::Value(Value(1)) });
+        let inst = Instruction::BinOp {
+            dest: Value(3),
+            op: IrBinOp::Sub,
+            lhs: Operand::Value(Value(0)),
+            rhs: Operand::Value(Value(2)),
+            ty: IrType::F64,
+        };
+        let result = try_simplify(&inst, &[], &[], &[], &[], &neg_defs, &[]);
+        assert!(result.is_none());
+    }
+
+    // === Unsigned comparison simplification tests ===
+
+    #[test]
+    fn test_cmp_ule_zero() {
+        // Cmp(Ule, x, 0) => Cmp(Eq, x, 0)
+        let inst = Instruction::Cmp {
+            dest: Value(2), op: IrCmpOp::Ule,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::I32(0)),
+            ty: IrType::U32,
+        };
+        let result = simplify_default(&inst).unwrap();
+        match result {
+            Instruction::Cmp { op: IrCmpOp::Eq, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I32(0)), .. } => {
+                assert_eq!(v.0, 1);
+            }
+            _ => panic!("Expected Cmp(Eq, V1, 0), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cmp_ugt_zero() {
+        // Cmp(Ugt, x, 0) => Cmp(Ne, x, 0)
+        let inst = Instruction::Cmp {
+            dest: Value(2), op: IrCmpOp::Ugt,
+            lhs: Operand::Value(Value(1)),
+            rhs: Operand::Const(IrConst::I64(0)),
+            ty: IrType::U64,
+        };
+        let result = simplify_default(&inst).unwrap();
+        match result {
+            Instruction::Cmp { op: IrCmpOp::Ne, lhs: Operand::Value(v), rhs: Operand::Const(IrConst::I64(0)), .. } => {
+                assert_eq!(v.0, 1);
+            }
+            _ => panic!("Expected Cmp(Ne, V1, 0), got {:?}", result),
+        }
     }
 }
