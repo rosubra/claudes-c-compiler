@@ -468,6 +468,12 @@ impl MacroTable {
             return end_pos;
         }
 
+        // After expanding an object-like macro, the result may end with a function-like
+        // macro name (e.g. `#define i_cmp -c_default_cmp` expands to `-c_default_cmp`).
+        // If the remaining source starts with `(`, we need to chain into function-like
+        // expansion for the trailing identifier.
+        let (expanded, i) = self.expand_trailing_func_macros(expanded, bytes, i, expanding);
+
         let next = if i < len { Some(bytes[i]) } else { None };
         Self::append_with_paste_guard(result, &expanded, next);
         i

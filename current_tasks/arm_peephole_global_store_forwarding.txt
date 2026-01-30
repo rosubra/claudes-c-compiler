@@ -1,0 +1,23 @@
+Task: Add global store forwarding and copy propagation to ARM peephole optimizer
+Status: in_progress
+
+Description:
+The ARM (AArch64) peephole optimizer currently only has local passes (adjacent
+store/load elimination, self-move elimination, move chain optimization, branch
+fusion). The x86 peephole has several global passes that dramatically reduce
+code size and improve runtime performance.
+
+This task ports the most impactful global passes to the ARM peephole:
+
+1. Global store forwarding: Track slot->register mappings across basic blocks.
+   When a load targets a slot that already has a known register value, replace
+   the load with a register move. This eliminates hundreds of redundant loads.
+
+2. Register copy propagation: After store forwarding converts stack loads to
+   register moves, propagate these copies into subsequent instructions.
+
+3. Dead store elimination (global): Remove stores to stack slots that are
+   never loaded in the entire function.
+
+Files to modify:
+- src/backend/arm/codegen/peephole.rs
