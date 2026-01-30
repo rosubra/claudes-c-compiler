@@ -59,6 +59,14 @@ enum VNOperand {
     ValueNum(u32),
 }
 
+/// Key for store-to-load forwarding: identifies a memory location by pointer
+/// value number and access type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StoreFwdKey {
+    ptr_vn: VNOperand,
+    ty: IrType,
+}
+
 /// Mutable state for the GVN pass, threaded through the dominator-tree DFS.
 ///
 /// Groups the value numbering tables, expression maps, and rollback logs that
@@ -81,10 +89,18 @@ struct GvnState {
     /// clobbering instruction is encountered, bump this counter; cached
     /// load entries with older generations are considered stale.
     load_generation: u32,
+    /// Store-to-load forwarding map: (pointer VN, type) -> (stored operand, generation).
+    /// When a Store writes a value to a pointer, we record it here. A subsequent
+    /// Load from the same pointer (same VN) with matching type and generation can
+    /// be replaced with a Copy of the stored value, eliminating the load entirely.
+    /// Uses the same generation counter as load CSE for O(1) invalidation.
+    store_fwd_map: FxHashMap<StoreFwdKey, (Operand, u32)>,
     /// Rollback log for `expr_to_value`: (key, previous_value).
     rollback_log: Vec<(ExprKey, Option<Value>)>,
     /// Rollback log for `load_expr_to_value`: (key, previous_entry).
     load_rollback_log: Vec<(ExprKey, Option<(Value, u32)>)>,
+    /// Rollback log for `store_fwd_map`: (key, previous_entry).
+    store_fwd_rollback_log: Vec<(StoreFwdKey, Option<(Operand, u32)>)>,
     /// Rollback log for `value_numbers`: (index, previous_vn).
     vn_log: Vec<(usize, u32)>,
     /// Total instructions eliminated across all blocks.
@@ -100,8 +116,10 @@ impl GvnState {
             expr_to_value: FxHashMap::default(),
             load_expr_to_value: FxHashMap::default(),
             load_generation: 0,
+            store_fwd_map: FxHashMap::default(),
             rollback_log: Vec::new(),
             load_rollback_log: Vec::new(),
+            store_fwd_rollback_log: Vec::new(),
             vn_log: Vec::new(),
             total_eliminated: 0,
         }
@@ -225,6 +243,7 @@ impl GvnState {
         ScopeCheckpoint {
             rollback_start: self.rollback_log.len(),
             load_rollback_start: self.load_rollback_log.len(),
+            store_fwd_rollback_start: self.store_fwd_rollback_log.len(),
             vn_log_start: self.vn_log.len(),
             saved_load_generation: self.load_generation,
         }
@@ -255,6 +274,17 @@ impl GvnState {
             }
         }
 
+        // Rollback: restore store_fwd_map
+        while self.store_fwd_rollback_log.len() > checkpoint.store_fwd_rollback_start {
+            let (key, old_val) = self.store_fwd_rollback_log.pop()
+                .expect("store_fwd_rollback_log length checked by while condition");
+            if let Some(val) = old_val {
+                self.store_fwd_map.insert(key, val);
+            } else {
+                self.store_fwd_map.remove(&key);
+            }
+        }
+
         // Rollback: restore value_numbers
         while self.vn_log.len() > checkpoint.vn_log_start {
             let (idx, old_vn) = self.vn_log.pop()
@@ -272,6 +302,7 @@ impl GvnState {
 struct ScopeCheckpoint {
     rollback_start: usize,
     load_rollback_start: usize,
+    store_fwd_rollback_start: usize,
     vn_log_start: usize,
     saved_load_generation: u32,
 }
@@ -376,6 +407,20 @@ fn clobbers_memory(inst: &Instruction) -> bool {
     )
 }
 
+/// Check if a Store instruction is eligible for store-to-load forwarding.
+/// Same restrictions as Load CSE: no segment overrides, no float/long-double/i128 types.
+fn is_forwardable_store(inst: &Instruction) -> bool {
+    match inst {
+        Instruction::Store { ty, seg_override, .. } => {
+            *seg_override == AddressSpace::Default
+                && !ty.is_float()
+                && !ty.is_long_double()
+                && !ty.is_128bit()
+        }
+        _ => false,
+    }
+}
+
 /// Process a single basic block for GVN.
 /// Returns the number of instructions eliminated.
 ///
@@ -383,6 +428,11 @@ fn clobbers_memory(inst: &Instruction) -> bool {
 /// with a generation counter for O(1) invalidation on memory clobber. Cross-block
 /// Load CSE propagation is controlled by `gvn_dfs` which invalidates Load
 /// entries at merge points (blocks with multiple CFG predecessors).
+///
+/// Store-to-load forwarding: when a Store writes value V to pointer P, subsequent
+/// Loads from P (same VN, same type, no intervening memory clobber) are replaced
+/// with Copy(V). This eliminates redundant loads after stores, a common pattern
+/// in struct initialization, local variable access, etc.
 fn process_block(
     block_idx: usize,
     func: &mut IrFunction,
@@ -395,15 +445,79 @@ fn process_block(
 
     for inst in func.blocks[block_idx].instructions.drain(..) {
         // Before processing the instruction, check if it clobbers memory.
-        // If so, invalidate all cached Load CSE entries by bumping the
-        // generation counter. This is O(1) instead of iterating all load keys.
+        // If so, invalidate all cached Load CSE and store forwarding entries
+        // by bumping the generation counter. This is O(1) instead of iterating
+        // all keys.
         if clobbers_memory(&inst) {
             state.load_generation += 1;
+        }
+
+        // Store-to-load forwarding: record stored values for subsequent loads.
+        // This happens AFTER the generation bump (since Store itself clobbers memory),
+        // so the stored value is recorded at the new generation and will be visible
+        // to subsequent loads (which haven't bumped the generation yet).
+        if is_forwardable_store(&inst) {
+            if let Instruction::Store { val, ptr, ty, .. } = &inst {
+                let ptr_vn = state.operand_to_vn(&Operand::Value(*ptr));
+                let fwd_key = StoreFwdKey { ptr_vn, ty: *ty };
+                let fwd_key_for_log = fwd_key.clone();
+                let old_val = state.store_fwd_map.insert(fwd_key, (val.clone(), state.load_generation));
+                state.store_fwd_rollback_log.push((fwd_key_for_log, old_val));
+            }
+            // Store has no dest, so no VN to assign. Just keep the instruction.
+            new_instructions.push(inst);
+            continue;
         }
 
         match state.make_expr_key(&inst) {
             Some((expr_key, dest)) => {
                 let is_load = expr_key.is_load();
+
+                // For loads, first try store-to-load forwarding before load CSE.
+                // This catches the pattern: store V -> *P; load *P -> replace with V.
+                if is_load {
+                    if let ExprKey::Load { ptr: ref ptr_vn, ty } = expr_key {
+                        let fwd_key = StoreFwdKey { ptr_vn: ptr_vn.clone(), ty };
+                        if let Some((stored_op, gen)) = state.store_fwd_map.get(&fwd_key) {
+                            if *gen == state.load_generation {
+                                let stored_op = stored_op.clone();
+                                // Forward the stored value to the load destination.
+                                // Assign the dest a VN matching the stored value.
+                                let dest_idx = dest.0 as usize;
+                                let forwarded_vn = match &stored_op {
+                                    Operand::Value(v) => {
+                                        let idx = v.0 as usize;
+                                        if idx < state.value_numbers.len() && state.value_numbers[idx] != u32::MAX {
+                                            state.value_numbers[idx]
+                                        } else {
+                                            state.fresh_vn()
+                                        }
+                                    }
+                                    _ => state.fresh_vn(),
+                                };
+                                if dest_idx < state.value_numbers.len() {
+                                    let old_vn = state.value_numbers[dest_idx];
+                                    state.vn_log.push((dest_idx, old_vn));
+                                    state.value_numbers[dest_idx] = forwarded_vn;
+                                }
+                                // Also update load CSE map so subsequent loads from the
+                                // same pointer can CSE with this load's dest.
+                                let load_key_for_log = expr_key.clone();
+                                let old_load = state.load_expr_to_value.insert(
+                                    expr_key,
+                                    (dest, state.load_generation),
+                                );
+                                state.load_rollback_log.push((load_key_for_log, old_load));
+                                new_instructions.push(Instruction::Copy {
+                                    dest,
+                                    src: stored_op,
+                                });
+                                eliminated += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
 
                 // Look up: check pure expr map, or load map with generation check
                 let existing = if is_load {
@@ -1320,5 +1434,203 @@ mod tests {
             &module.functions[0].blocks[3].instructions[0],
             Instruction::Load { .. }
         ));
+    }
+
+    #[test]
+    fn test_store_to_load_forwarding_same_block() {
+        // store 42 -> *ptr; load *ptr => should be forwarded to Copy(42)
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+            source_spans: Vec::new(),
+        }], 2);
+
+        let mut module = make_module(func);
+        let eliminated = module.for_each_function(run_gvn_function);
+        assert_eq!(eliminated, 1);
+
+        // The load should be replaced with a Copy of the stored constant
+        match &module.functions[0].blocks[0].instructions[1] {
+            Instruction::Copy { dest, src: Operand::Const(IrConst::I32(42)) } => {
+                assert_eq!(dest.0, 1);
+            }
+            other => panic!("Expected Copy of constant 42, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_store_to_load_forwarding_value() {
+        // store %v -> *ptr; load *ptr => should be forwarded to Copy(%v)
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Store {
+                    val: Operand::Value(Value(1)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(2),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            source_spans: Vec::new(),
+        }], 3);
+
+        let mut module = make_module(func);
+        let eliminated = module.for_each_function(run_gvn_function);
+        assert_eq!(eliminated, 1);
+
+        match &module.functions[0].blocks[0].instructions[1] {
+            Instruction::Copy { dest, src: Operand::Value(v) } => {
+                assert_eq!(dest.0, 2);
+                assert_eq!(v.0, 1);
+            }
+            other => panic!("Expected Copy of Value(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_store_to_load_forwarding_invalidated_by_call() {
+        // store 42 -> *ptr; call foo(); load *ptr => NOT forwarded (call may modify memory)
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Call {
+                    func: "foo".to_string(),
+                    info: CallInfo {
+                        dest: Some(Value(1)),
+                        args: vec![],
+                        arg_types: vec![],
+                        return_type: IrType::Void,
+                        is_variadic: false,
+                        num_fixed_args: 0,
+                        struct_arg_sizes: vec![],
+                        struct_arg_aligns: vec![],
+                        struct_arg_classes: vec![],
+                        struct_arg_riscv_float_classes: Vec::new(),
+                        is_sret: false,
+                        is_fastcall: false,
+                        ret_eightbyte_classes: Vec::new(),
+                    },
+                },
+                Instruction::Load {
+                    dest: Value(2),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            source_spans: Vec::new(),
+        }], 3);
+
+        let mut module = make_module(func);
+        let eliminated = module.for_each_function(run_gvn_function);
+        assert_eq!(eliminated, 0); // No forwarding: call invalidates the store
+    }
+
+    #[test]
+    fn test_store_to_load_forwarding_different_store_invalidates() {
+        // store 42 -> *ptr_a; store 99 -> *ptr_b; load *ptr_a
+        // => NOT forwarded because the second store (to any address) invalidates all
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(99)),
+                    ptr: Value(1),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(2),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            source_spans: Vec::new(),
+        }], 3);
+
+        let mut module = make_module(func);
+        let eliminated = module.for_each_function(run_gvn_function);
+        // The second store bumps the generation, invalidating the first store's entry.
+        // However, the second store also records *ptr_b -> 99 at the new generation.
+        // The load from *ptr_a should NOT be forwarded because *ptr_a != *ptr_b.
+        assert_eq!(eliminated, 0);
+    }
+
+    #[test]
+    fn test_store_to_load_forwarding_same_ptr_overwrite() {
+        // store 42 -> *ptr; store 99 -> *ptr; load *ptr => forwarded to 99
+        let func = make_func(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(42)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Store {
+                    val: Operand::Const(IrConst::I32(99)),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+                Instruction::Load {
+                    dest: Value(1),
+                    ptr: Value(0),
+                    ty: IrType::I32,
+                    seg_override: AddressSpace::Default,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(1)))),
+            source_spans: Vec::new(),
+        }], 2);
+
+        let mut module = make_module(func);
+        let eliminated = module.for_each_function(run_gvn_function);
+        assert_eq!(eliminated, 1);
+
+        // Should forward the SECOND store's value (99), not the first (42)
+        match &module.functions[0].blocks[0].instructions[2] {
+            Instruction::Copy { dest, src: Operand::Const(IrConst::I32(99)) } => {
+                assert_eq!(dest.0, 1);
+            }
+            other => panic!("Expected Copy of constant 99, got {:?}", other),
+        }
     }
 }
