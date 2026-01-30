@@ -27,6 +27,80 @@
 use super::super::types::*;
 use super::helpers::*;
 
+/// Look up a register family from a name string that does NOT have the '%' prefix.
+/// This avoids allocating a `format!("%{}", name)` just to call `register_family_fast`.
+/// Intentionally duplicates the core lookup logic from `register_family_fast` in types.rs
+/// to avoid the allocation overhead on this hot path.
+#[inline]
+fn register_family_no_prefix(name: &str) -> RegId {
+    let b = name.as_bytes();
+    let len = b.len();
+    if len < 2 {
+        return REG_NONE;
+    }
+    // Dispatch on first character (same logic as register_family_fast but without '%' prefix)
+    match b[0] {
+        b'r' | b'e' => {
+            if len < 3 {
+                // len==2: only r8, r9 are valid
+                return if b[0] == b'r' { reg_digit_to_id(b[1]) } else { REG_NONE };
+            }
+            match (b[1], b[2]) {
+                (b'a', b'x') => 0,  // rax / eax
+                (b'c', b'x') => 1,  // rcx / ecx
+                (b'd', b'x') => 2,  // rdx / edx
+                (b'd', b'i') => 7,  // rdi / edi
+                (b'b', b'x') => 3,  // rbx / ebx
+                (b'b', b'p') => 5,  // rbp / ebp
+                (b's', b'p') => 4,  // rsp / esp
+                (b's', b'i') => 6,  // rsi / esi
+                (b'8', _)    => 8,  // r8d / r8w / r8b
+                (b'9', _)    => 9,  // r9d / r9w / r9b
+                (b'1', b'0') => 10, (b'1', b'1') => 11, (b'1', b'2') => 12,
+                (b'1', b'3') => 13, (b'1', b'4') => 14, (b'1', b'5') => 15,
+                _ => REG_NONE,
+            }
+        }
+        // 16-bit / 8-bit short forms: ax, al, ah, cx, cl, etc.
+        b'a' => if matches!(b[1], b'x' | b'l' | b'h') { 0 } else { REG_NONE },
+        b'c' => if matches!(b[1], b'x' | b'l' | b'h') { 1 } else { REG_NONE },
+        b'd' => match b[1] { b'i' => 7, b'x' | b'l' | b'h' => 2, _ => REG_NONE },
+        b'b' => match b[1] { b'p' => 5, b'x' | b'l' | b'h' => 3, _ => REG_NONE },
+        b's' => match b[1] { b'p' => 4, b'i' => 6, _ => REG_NONE },
+        _ => REG_NONE,
+    }
+}
+
+/// Check if trimmed instruction matches "movq <first_reg>, <second_reg>" exactly.
+/// `first_reg` and `second_reg` should include the '%' prefix (e.g., "%rax").
+/// Avoids allocating a format!() string for comparison.
+#[inline]
+fn is_movq_reg_reg(trimmed: &str, first_reg: &str, second_reg: &str) -> bool {
+    // Expected: "movq %rXX, %rYY" (regs include '%' prefix from REG_NAMES)
+    let b = trimmed.as_bytes();
+    let expected_len = 5 + first_reg.len() + 2 + second_reg.len(); // "movq " + first + ", " + second
+    if b.len() != expected_len {
+        return false;
+    }
+    trimmed.starts_with("movq ")
+        && trimmed[5..].starts_with(first_reg)
+        && trimmed[5 + first_reg.len()..].starts_with(", ")
+        && trimmed[5 + first_reg.len() + 2..] == *second_reg
+}
+
+/// Check if trimmed instruction matches "movslq <first_reg>, <second_reg>" exactly.
+#[inline]
+fn is_movslq_reg_reg(trimmed: &str, first_reg: &str, second_reg: &str) -> bool {
+    let expected_len = 7 + first_reg.len() + 2 + second_reg.len(); // "movslq " + first + ", " + second
+    if trimmed.len() != expected_len {
+        return false;
+    }
+    trimmed.starts_with("movslq ")
+        && trimmed[7..].starts_with(first_reg)
+        && trimmed[7 + first_reg.len()..].starts_with(", ")
+        && trimmed[7 + first_reg.len() + 2..] == *second_reg
+}
+
 pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
     let len = store.len();
     if len < 4 {
@@ -37,7 +111,6 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
 
     // Build a map of label_name -> line_index for all labels.
     let mut label_positions: Vec<(u32, usize)> = Vec::new();
-    let mut label_branch_count: Vec<u32> = Vec::new();
     let mut max_label_num: u32 = 0;
 
     for i in 0..len {
@@ -55,14 +128,21 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
         return false;
     }
 
+    let table_size = (max_label_num + 1) as usize;
+
     // Build label_num -> line_index lookup
-    let mut label_line: Vec<usize> = vec![usize::MAX; (max_label_num + 1) as usize];
+    let mut label_line: Vec<usize> = vec![usize::MAX; table_size];
     for &(num, idx) in &label_positions {
         label_line[num as usize] = idx;
     }
 
-    // Count branch references to each label
-    label_branch_count.resize((max_label_num + 1) as usize, 0);
+    // Count branch references to each label AND build reverse index from
+    // label_num -> first conditional branch line targeting it.
+    // This eliminates the O(n) scan per trampoline candidate that was the
+    // dominant bottleneck (previously ~20% of total compile time on large files).
+    let mut label_branch_count: Vec<u32> = vec![0; table_size];
+    let mut cond_branch_for_label: Vec<usize> = vec![usize::MAX; table_size];
+
     for i in 0..len {
         if infos[i].is_nop() { continue; }
         match infos[i].kind {
@@ -70,8 +150,14 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
                 let trimmed = infos[i].trimmed(store.get(i));
                 if let Some(target) = extract_jump_target(trimmed) {
                     if let Some(n) = parse_dotl_number(target) {
-                        if (n as usize) < label_branch_count.len() {
+                        if (n as usize) < table_size {
                             label_branch_count[n as usize] += 1;
+                            // Record the first conditional branch targeting this label
+                            if infos[i].kind == LineKind::CondJmp
+                                && cond_branch_for_label[n as usize] == usize::MAX
+                            {
+                                cond_branch_for_label[n as usize] = i;
+                            }
                         }
                     }
                 }
@@ -104,10 +190,8 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
             // Check for movq %regA, %regB
             if let Some(rest) = trimmed.strip_prefix("movq %") {
                 if let Some((src_str, dst_str)) = rest.split_once(", %") {
-                    let src_name = format!("%{}", src_str);
-                    let dst_name = format!("%{}", dst_str.trim());
-                    let src_fam = register_family_fast(&src_name);
-                    let dst_fam = register_family_fast(&dst_name);
+                    let src_fam = register_family_no_prefix(src_str);
+                    let dst_fam = register_family_no_prefix(dst_str.trim());
                     if src_fam != REG_NONE && dst_fam != REG_NONE && src_fam != dst_fam {
                         tramp_moves.push((src_fam, dst_fam));
                         tramp_all_lines.push(j);
@@ -120,10 +204,8 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
             // Check for movslq %regA, %regB
             if let Some(rest) = trimmed.strip_prefix("movslq %") {
                 if let Some((src_str, dst_str)) = rest.split_once(", %") {
-                    let src_name = format!("%{}", src_str);
-                    let dst_name = format!("%{}", dst_str.trim());
-                    let src_fam = register_family_fast(&src_name);
-                    let dst_fam = register_family_fast(&dst_name);
+                    let src_fam = register_family_no_prefix(src_str);
+                    let dst_fam = register_family_no_prefix(dst_str.trim());
                     if src_fam != REG_NONE && dst_fam != REG_NONE && src_fam != dst_fam {
                         tramp_moves.push((src_fam, dst_fam));
                         tramp_all_lines.push(j);
@@ -142,8 +224,7 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
                 if k < len {
                     let next_trimmed = infos[k].trimmed(store.get(k));
                     if let Some(rest) = next_trimmed.strip_prefix("movq %rax, %") {
-                        let dst_name = format!("%{}", rest.trim());
-                        let dst_fam = register_family_fast(&dst_name);
+                        let dst_fam = register_family_no_prefix(rest.trim());
                         if dst_fam != REG_NONE && dst_fam != 0 {
                             has_stack_load = true;
                             tramp_stack_loads.push((offset, dst_fam, j, k));
@@ -180,27 +261,12 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
             continue;
         }
 
-        // Find the conditional branch that targets this trampoline
-        let mut branch_idx = None;
-        for i in 0..len {
-            if infos[i].is_nop() { continue; }
-            if infos[i].kind == LineKind::CondJmp {
-                let trimmed = infos[i].trimmed(store.get(i));
-                if let Some(target) = extract_jump_target(trimmed) {
-                    if let Some(n) = parse_dotl_number(target) {
-                        if n == tramp_num {
-                            branch_idx = Some(i);
-                            break;
-                        }
-                    }
-                }
-            }
+        // Find the conditional branch that targets this trampoline using
+        // the pre-built reverse index (O(1) instead of O(n) scan).
+        let branch_idx = cond_branch_for_label[tramp_num as usize];
+        if branch_idx == usize::MAX {
+            continue;
         }
-
-        let branch_idx = match branch_idx {
-            Some(i) => i,
-            None => continue,
-        };
 
         // Per-move coalescing
         let mut move_coalesced: Vec<bool> = Vec::with_capacity(tramp_moves.len());
@@ -240,14 +306,14 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
                 };
 
                 if modifies_src {
-                    let expected_copy = format!("movq {}, {}", dst_64, src_64);
-                    if trimmed == expected_copy {
+                    // Check if this is the initial copy: "movq <dst_64>, <src_64>"
+                    if is_movq_reg_reg(trimmed, dst_64, src_64) {
                         copy_idx = Some(k);
                         break;
                     }
+                    // Check for movslq variant
                     let dst_32 = REG_NAMES[1][dst_fam as usize];
-                    let expected_movslq = format!("movslq {}, {}", dst_32, src_64);
-                    if trimmed == expected_movslq {
+                    if is_movslq_reg_reg(trimmed, dst_32, src_64) {
                         scan_ok = false;
                         break;
                     }
@@ -406,19 +472,17 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
         } else {
             for (idx, &(src_fam, dst_fam)) in tramp_moves.iter().enumerate() {
                 if !move_coalesced[idx] { continue; }
+                let src_64 = REG_NAMES[0][src_fam as usize];
+                let dst_64 = REG_NAMES[0][dst_fam as usize];
                 for &line_idx in &tramp_all_lines {
                     if infos[line_idx].is_nop() { continue; }
                     let trimmed = infos[line_idx].trimmed(store.get(line_idx));
-                    let src_64 = REG_NAMES[0][src_fam as usize];
-                    let dst_64 = REG_NAMES[0][dst_fam as usize];
-                    let expected = format!("movq {}, {}", src_64, dst_64);
-                    if trimmed == expected {
+                    if is_movq_reg_reg(trimmed, src_64, dst_64) {
                         mark_nop(&mut infos[line_idx]);
                         break;
                     }
                     let src_32 = REG_NAMES[1][src_fam as usize];
-                    let expected2 = format!("movslq {}, {}", src_32, dst_64);
-                    if trimmed == expected2 {
+                    if is_movslq_reg_reg(trimmed, src_32, dst_64) {
                         mark_nop(&mut infos[line_idx]);
                         break;
                     }
