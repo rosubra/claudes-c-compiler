@@ -355,10 +355,17 @@ pub fn peephole_optimize(asm: String) -> String {
         rounds += 1;
     }
 
+    // NOTE: Branch-over-branch optimization is not safe on RISC-V because
+    // B-type branches have ±4KB range while the `jump label, t6` instruction
+    // (auipc+jalr) has unlimited range. Inverting a branch to directly target
+    // a far label would cause R_RISCV_JAL relocation truncation errors in
+    // large functions. The codegen already uses the near/far pattern correctly.
+
     // Phase 2: Global passes (run once)
     let mut global_changed = false;
     global_changed |= global_store_forwarding(&mut lines, &mut kinds, n);
     global_changed |= propagate_register_copies(&mut lines, &mut kinds, n);
+    global_changed |= eliminate_dead_reg_moves(&lines, &mut kinds, n);
     global_changed |= global_dead_store_elimination(&lines, &mut kinds, n);
 
     // Phase 3: Local cleanup after global passes (up to 4 rounds)
@@ -372,6 +379,7 @@ pub fn peephole_optimize(asm: String) -> String {
             changed2 |= eliminate_self_moves(&mut kinds, n);
             changed2 |= eliminate_redundant_mv_chain(&mut lines, &mut kinds, n);
             changed2 |= eliminate_li_mv_chain(&mut lines, &mut kinds, n);
+            changed2 |= eliminate_dead_reg_moves(&lines, &mut kinds, n);
             rounds2 += 1;
         }
     }
@@ -797,6 +805,129 @@ fn propagate_register_copies(lines: &mut [String], kinds: &mut [LineKind], n: us
     changed
 }
 
+// ── Dead register move elimination ──────────────────────────────────────────
+//
+// After copy propagation, some `mv` instructions may have dead destinations:
+// the destination register is overwritten before being read. Scan forward
+// from each `mv` instruction (within the same basic block, up to a window)
+// to check if the destination is read before being overwritten.
+//
+// If the destination is overwritten without being read, the move is dead.
+
+fn eliminate_dead_reg_moves(lines: &[String], kinds: &mut [LineKind], n: usize) -> bool {
+    let mut changed = false;
+    let window = 16; // look ahead up to 16 instructions
+
+    for i in 0..n {
+        let (dst, _src) = match kinds[i] {
+            LineKind::Move { dst, src } => (dst, src),
+            _ => continue,
+        };
+
+        // Only eliminate moves to temp registers (t0-t6).
+        // Callee-saved registers might be live across basic blocks.
+        if dst > REG_T6 {
+            continue;
+        }
+
+        let dst_name = reg_name(dst);
+
+        // Scan forward to check if dst is read before being overwritten
+        let mut is_dead = false;
+        let mut count = 0;
+        let mut j = i + 1;
+
+        while j < n && count < window {
+            if kinds[j] == LineKind::Nop {
+                j += 1;
+                continue;
+            }
+
+            // Stop at control flow boundaries and any unclassified instruction
+            match kinds[j] {
+                LineKind::Label | LineKind::Jump | LineKind::Branch |
+                LineKind::Ret | LineKind::Call | LineKind::Directive => break,
+                LineKind::Other => {
+                    // Conservatively assume Other instructions may read the register
+                    break;
+                }
+                _ => {}
+            }
+
+            // For well-classified instructions, check reads precisely
+            let reads_dst = match kinds[j] {
+                LineKind::Move { src, .. } => src == dst,
+                LineKind::SextW { src, .. } => src == dst,
+                LineKind::StoreS0 { reg: store_reg, .. } => store_reg == dst,
+                LineKind::LoadS0 { .. } => false, // only writes to dest
+                LineKind::LoadImm { .. } => false, // only writes
+                LineKind::Alu => {
+                    // Check source positions (after first comma)
+                    let trimmed = lines[j].trim();
+                    if let Some(comma_pos) = trimmed.find(',') {
+                        let after_dest = &trimmed[comma_pos + 1..];
+                        has_whole_word(after_dest, dst_name)
+                    } else {
+                        // Single-operand: conservative
+                        true
+                    }
+                }
+                _ => true, // conservative for anything else
+            };
+
+            if reads_dst {
+                break;
+            }
+
+            // Check if this instruction writes to dst (overwrites it)
+            let dest_of_j = match kinds[j] {
+                LineKind::Move { dst: d, .. } => Some(d),
+                LineKind::LoadImm { dst: d } => Some(d),
+                LineKind::SextW { dst: d, .. } => Some(d),
+                LineKind::LoadS0 { reg: d, .. } => Some(d),
+                LineKind::Alu => parse_alu_dest(&lines[j]),
+                _ => None,
+            };
+
+            if dest_of_j == Some(dst) {
+                // dst is overwritten without being read: the move is dead!
+                is_dead = true;
+                break;
+            }
+
+            count += 1;
+            j += 1;
+        }
+
+        if is_dead {
+            kinds[i] = LineKind::Nop;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Check if `text` contains `word` at a word boundary (no adjacent alphanumeric).
+fn has_whole_word(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let word_bytes = word.as_bytes();
+    let word_len = word_bytes.len();
+    let text_len = bytes.len();
+
+    let mut i = 0;
+    while i + word_len <= text_len {
+        if &bytes[i..i + word_len] == word_bytes {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let after_ok = i + word_len >= text_len || !bytes[i + word_len].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Replace a register name in source operand positions of an instruction.
 /// Returns None if the register is the destination (first operand) or not found.
 fn replace_source_reg_in_instruction(line: &str, old_reg: &str, new_reg: &str) -> Option<String> {
@@ -1156,5 +1287,32 @@ mod tests {
     ret\n";
         let result = peephole_optimize(input.to_string());
         assert!(result.contains("addw t2, s1, t1"));
+    }
+
+    #[test]
+    fn test_dead_reg_move() {
+        // mv t1, t0 ; li t1, 42 → (t1 overwritten, first mv is dead)
+        let input = "\
+    mv t1, t0\n\
+    li t1, 42\n\
+    mv a0, t1\n\
+    ret\n";
+        let result = peephole_optimize(input.to_string());
+        assert!(!result.contains("mv t1, t0"), "Expected dead move eliminated, got:\n{}", result);
+        assert!(result.contains("li t1, 42"));
+    }
+
+    #[test]
+    fn test_full_bb_copy_prop() {
+        // mv t0, s1 ; mv t1, t0 ; add t2, t1, t0
+        // → (after copy prop) add uses s1 directly
+        let input = "\
+    mv t0, s1\n\
+    mv t1, t0\n\
+    add t2, t1, t0\n\
+    ret\n";
+        let result = peephole_optimize(input.to_string());
+        // t1 should be resolved to s1, t0 should be resolved to s1
+        assert!(result.contains("add t2, s1, s1"), "Expected transitive copy prop, got:\n{}", result);
     }
 }
