@@ -1,0 +1,25 @@
+Task: Add store-to-load forwarding to the GVN pass
+Status: in_progress
+
+The GVN pass currently does Load CSE (two loads from the same pointer without
+intervening memory clobber are de-duplicated), but does NOT forward stored values
+to subsequent loads.
+
+That is, after:
+  store V -> *P
+  ... (no memory clobber) ...
+  %x = load *P
+
+The load of *P should be replaced with a Copy of V, since we know the value
+at *P is V.
+
+This is a common pattern in C code (struct field initialization followed by
+reads, local variable writes/reads, etc.) and will eliminate redundant loads
+across all backends.
+
+The implementation will:
+1. Track Store instructions in the GVN state (pointer -> stored value)
+2. On Load, check if we have a stored value for that pointer
+3. If so, replace the load with the stored value (type-matched)
+4. Properly invalidate stored value tracking on memory clobbers
+5. Include proper rollback support for dominator-tree DFS scoping
