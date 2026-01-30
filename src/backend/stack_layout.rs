@@ -1158,7 +1158,14 @@ fn classify_alloca(
 ) {
     let effective_align = align;
     let extra = if effective_align > 16 { effective_align - 1 } else { 0 };
-    let raw_size = if size == 0 { crate::common::types::target_ptr_size() as i64 } else { size as i64 };
+    let ptr_size = crate::common::types::target_ptr_size() as i64;
+    // Alloca slots must be at least pointer-sized (8 bytes on 64-bit, 4 on 32-bit)
+    // to safely hold ParamRef values that store via movq/sd (full register width).
+    let raw_size = if size == 0 {
+        ptr_size
+    } else {
+        (size as i64).max(ptr_size)
+    };
 
     state.alloca_values.insert(dest.0);
     state.alloca_types.insert(dest.0, ty);
@@ -1217,7 +1224,24 @@ fn classify_value(
 ) {
     let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
     let is_f128 = matches!(inst.result_type(), Some(IrType::F128));
-    let slot_size: i64 = if is_i128 || is_f128 { 16 } else { 8 };
+
+    // Detect small values (types that fit in 4 bytes on 64-bit targets).
+    // Currently used to populate small_slot_values for future store/load
+    // width optimization. Slot allocation remains 8-byte minimum because
+    // the backend's store/load paths aren't fully type-safe yet (some paths
+    // always use movq/sd/str x0 regardless of IR type).
+    let is_small = !crate::common::types::target_is_32bit() && matches!(
+        inst.result_type(),
+        Some(IrType::I8) | Some(IrType::U8) |
+        Some(IrType::I16) | Some(IrType::U16) |
+        Some(IrType::I32) | Some(IrType::U32) |
+        Some(IrType::F32)
+    );
+    let slot_size: i64 = if is_i128 || is_f128 {
+        16
+    } else {
+        8
+    };
 
     if is_i128 {
         state.i128_values.insert(dest.0);
@@ -1265,6 +1289,12 @@ fn classify_value(
     // Dedup multi-def values (phi results appear in multiple blocks).
     if !collected_values.insert(dest.0) {
         return;
+    }
+
+    // Track values that use 4-byte slots so store/load paths can emit
+    // 4-byte instructions (movl, sw/lw, str/ldr w-reg) instead of 8-byte.
+    if is_small {
+        state.small_slot_values.insert(dest.0);
     }
 
     if let Some(target_blk) = coalescable_group(dest.0, ctx) {
@@ -1596,6 +1626,11 @@ fn resolve_copy_aliases(
     for (&dest_id, &root_id) in copy_alias {
         if let Some(&slot) = state.value_locations.get(&root_id) {
             state.value_locations.insert(dest_id, slot);
+        }
+        // Propagate small-slot property: if the root uses a 4-byte slot,
+        // the aliased copy must also use 4-byte store/load to avoid overflow.
+        if state.small_slot_values.contains(&root_id) {
+            state.small_slot_values.insert(dest_id);
         }
         // If root has no slot (optimized away or reg-assigned), the aliased
         // value also gets no slot. The Copy works via accumulator path.

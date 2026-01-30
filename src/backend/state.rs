@@ -156,6 +156,11 @@ pub struct CodegenState {
     /// On AArch64, these need GOT-indirect addressing because the linker
     /// rejects R_AARCH64_ADR_PREL_PG_HI21 against symbols that may bind externally.
     pub weak_extern_symbols: FxHashSet<String>,
+    /// SSA values that use 4-byte (32-bit) stack slots instead of the default 8-byte.
+    /// On 64-bit targets, I32/U32/F32 and smaller types can use 4-byte slots,
+    /// reducing stack frame sizes by ~40%. Store/load paths check this set to
+    /// emit 4-byte instructions (movl, sw/lw, str/ldr w-reg) instead of 8-byte.
+    pub small_slot_values: FxHashSet<u32>,
     /// Values that were assigned to callee-saved registers and have no stack slot.
     /// Used by resolve_slot_addr to return a dummy Indirect slot for these values,
     /// which is safe because all Indirect codepaths check reg_assignments first.
@@ -221,6 +226,7 @@ impl CodegenState {
             code_model_kernel: false,
             no_jump_tables: false,
             weak_extern_symbols: FxHashSet::default(),
+            small_slot_values: FxHashSet::default(),
             reg_assigned_values: FxHashSet::default(),
             asm_output_values: FxHashSet::default(),
             debug_info: false,
@@ -294,6 +300,7 @@ impl CodegenState {
         self.reg_cache.invalidate_all();
         self.f128_direct_slots.clear();
         self.f128_load_sources.clear();
+        self.small_slot_values.clear();
         self.reg_assigned_values.clear();
         self.asm_output_values.clear();
         self.uses_sret = false;
@@ -321,6 +328,15 @@ impl CodegenState {
 
     pub fn is_i128_value(&self, v: u32) -> bool {
         self.i128_values.contains(&v)
+    }
+
+    /// Check if a value uses a 4-byte (small) stack slot.
+    /// Used by store/load paths to emit 4-byte instructions instead of 8-byte.
+    /// Currently infrastructure-only: backends don't use this yet because
+    /// store/load paths aren't fully type-safe (some always use 8-byte ops).
+    #[allow(dead_code)]
+    pub fn is_small_slot(&self, v: u32) -> bool {
+        self.small_slot_values.contains(&v)
     }
 
     /// Check if a value is a "wide" type on 32-bit targets (F64, I64, U64).
