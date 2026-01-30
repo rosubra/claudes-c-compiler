@@ -809,6 +809,22 @@ impl StructLayout {
                     }
                 }
             }
+            // Vector types: classify element-wise according to the element type.
+            // float/double vectors -> SSE, integer vectors -> INTEGER.
+            CType::Vector(elem_ty, total_size) => {
+                let elem_size = elem_ty.size();
+                if elem_size > 0 {
+                    let num_elems = total_size / elem_size;
+                    for i in 0..num_elems {
+                        Self::classify_field_type(elem_ty, base_offset + i * elem_size, classes, n_eightbytes, ctx);
+                    }
+                } else {
+                    let eb_idx = base_offset / 8;
+                    if eb_idx < n_eightbytes {
+                        classes[eb_idx] = classes[eb_idx].merge(EightbyteClass::Integer);
+                    }
+                }
+            }
             // All other types (integers, pointers, enums, etc.) -> INTEGER
             _ => {
                 let eb_idx = base_offset / 8;

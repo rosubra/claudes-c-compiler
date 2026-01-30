@@ -501,6 +501,10 @@ impl Lowerer {
                     let sz = self.resolve_ctype_size(pointee_ty);
                     if sz > 0 { return Some(sz); }
                 }
+                CType::Vector(elem_ty, _) => {
+                    let sz = self.resolve_ctype_size(elem_ty);
+                    if sz > 0 { return Some(sz); }
+                }
                 _ => {}
             }
         }
@@ -538,6 +542,10 @@ impl Lowerer {
                     if sz > 0 { return sz; }
                 }
                 CType::Array(elem, _) => {
+                    let sz = self.resolve_ctype_size(elem);
+                    if sz > 0 { return sz; }
+                }
+                CType::Vector(elem, _) => {
                     let sz = self.resolve_ctype_size(elem);
                     if sz > 0 { return sz; }
                 }

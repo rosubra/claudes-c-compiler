@@ -471,6 +471,26 @@ impl Lowerer {
             }
         }
 
+        // Pre-pass: register struct/union layouts from all declarations and function
+        // definitions so that function signature registration (below) can compute
+        // correct SysV eightbyte classification for struct return types.
+        // Without this, structs/unions defined via typedef before a function that
+        // returns them would not have their layout available during classify_sysv_eightbytes.
+        for decl in &tu.decls {
+            match decl {
+                ExternalDecl::Declaration(decl) => {
+                    self.register_struct_type(&decl.type_spec);
+                }
+                ExternalDecl::FunctionDef(func) => {
+                    self.register_struct_type(&func.return_type);
+                    for p in &func.params {
+                        self.register_struct_type(&p.type_spec);
+                    }
+                }
+                ExternalDecl::TopLevelAsm(_) => {}
+            }
+        }
+
         // First pass: collect all function signatures (return types, param types,
         // variadic status, sret) so we can distinguish functions from globals and
         // insert proper casts/ABI handling during lowering.

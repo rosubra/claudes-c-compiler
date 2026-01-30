@@ -357,6 +357,19 @@ impl Parser {
             "jmp_buf", "sigjmp_buf",
             // <dirent.h>
             "DIR",
+            // GCC builtin NEON vector types (AArch64).
+            // These are compiler-internal types used by bits/math-vector.h when
+            // __GNUC_PREREQ(9, 0). They only appear in typedef/function declarations
+            // behind #ifdef __aarch64__ guards, so listing them unconditionally is safe.
+            "__Float32x4_t", "__Float64x2_t",
+            // GCC builtin SVE scalable vector types (AArch64).
+            // Used by bits/math-vector.h when __GNUC_PREREQ(10, 0).
+            // SVE types are runtime-sized in real GCC, but we model them as fixed
+            // 16-byte vectors for parsing (the functions using these are never called).
+            "__SVFloat32_t", "__SVFloat64_t", "__SVBool_t",
+            "__SVInt8_t", "__SVInt16_t", "__SVInt32_t", "__SVInt64_t",
+            "__SVUint8_t", "__SVUint16_t", "__SVUint32_t", "__SVUint64_t",
+            "__SVFloat16_t",
         ].iter().map(|s| s.to_string()).collect()
     }
 

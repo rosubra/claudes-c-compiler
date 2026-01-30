@@ -167,6 +167,48 @@ impl Lowerer {
         let uint64_ct = if is_32bit { CType::ULongLong } else { CType::ULong };
         self.types.typedefs.insert("__int64_t".to_string(), int64_ct);
         self.types.typedefs.insert("__uint64_t".to_string(), uint64_ct);
+
+        // GCC builtin NEON and SVE vector types for AArch64.
+        // These appear in bits/math-vector.h (included transitively from <math.h>)
+        // behind __GNUC_PREREQ(9, 0) and __GNUC_PREREQ(10, 0) guards.
+        // We model them as fixed-size 128-bit vectors so the typedef/function
+        // declarations in system headers parse correctly. The SVE types are
+        // technically scalable (runtime-sized) in real GCC, but since these
+        // functions are never called from compiled code, fixed sizes suffice.
+        if matches!(self.target, crate::backend::Target::Aarch64) {
+            // NEON types (128-bit fixed-width SIMD)
+            self.types.typedefs.insert("__Float32x4_t".to_string(),
+                CType::Vector(Box::new(CType::Float), 16));
+            self.types.typedefs.insert("__Float64x2_t".to_string(),
+                CType::Vector(Box::new(CType::Double), 16));
+            // SVE float vector types (model as 128-bit vectors)
+            self.types.typedefs.insert("__SVFloat32_t".to_string(),
+                CType::Vector(Box::new(CType::Float), 16));
+            self.types.typedefs.insert("__SVFloat64_t".to_string(),
+                CType::Vector(Box::new(CType::Double), 16));
+            self.types.typedefs.insert("__SVFloat16_t".to_string(),
+                CType::Vector(Box::new(CType::Short), 16));
+            // SVE integer vector types
+            self.types.typedefs.insert("__SVInt8_t".to_string(),
+                CType::Vector(Box::new(CType::Char), 16));
+            self.types.typedefs.insert("__SVInt16_t".to_string(),
+                CType::Vector(Box::new(CType::Short), 16));
+            self.types.typedefs.insert("__SVInt32_t".to_string(),
+                CType::Vector(Box::new(CType::Int), 16));
+            self.types.typedefs.insert("__SVInt64_t".to_string(),
+                CType::Vector(Box::new(CType::Long), 16));
+            self.types.typedefs.insert("__SVUint8_t".to_string(),
+                CType::Vector(Box::new(CType::UChar), 16));
+            self.types.typedefs.insert("__SVUint16_t".to_string(),
+                CType::Vector(Box::new(CType::UShort), 16));
+            self.types.typedefs.insert("__SVUint32_t".to_string(),
+                CType::Vector(Box::new(CType::UInt), 16));
+            self.types.typedefs.insert("__SVUint64_t".to_string(),
+                CType::Vector(Box::new(CType::ULong), 16));
+            // SVE predicate type (model as 16-byte unsigned char vector)
+            self.types.typedefs.insert("__SVBool_t".to_string(),
+                CType::Vector(Box::new(CType::UChar), 16));
+        }
     }
 
     /// Seed known libc math function signatures for correct calling convention.
