@@ -972,7 +972,8 @@ impl Lowerer {
 
 impl Lowerer {
     /// Evaluate a string literal address expression for static initializers.
-    /// Handles: `"hello"`, `"hello" + 2`, `"hello" - 1`, `(type*)"hello"`, etc.
+    /// Handles: `"hello"`, `"hello" + 2`, `"hello" - 1`, `(type*)"hello"`,
+    /// `&"hello"[2]`, etc.
     pub(super) fn eval_string_literal_addr_expr(&mut self, expr: &Expr) -> Option<GlobalInit> {
         match expr {
             Expr::BinaryOp(BinOp::Add, lhs, rhs, _) => {
@@ -981,6 +982,16 @@ impl Lowerer {
             }
             Expr::BinaryOp(BinOp::Sub, lhs, rhs, _) => {
                 self.eval_string_literal_with_offset(lhs, rhs, true)
+            }
+            // &"string"[index] -> intern string literal + byte offset
+            // This is equivalent to "string" + index, but expressed as
+            // address-of array subscript on a string literal.
+            Expr::AddressOf(inner, _) => {
+                if let Expr::ArraySubscript(base, index, _) = inner.as_ref() {
+                    self.eval_string_literal_with_offset(base, index, false)
+                } else {
+                    None
+                }
             }
             Expr::Cast(_, inner, _) => self.eval_string_literal_addr_expr(inner),
             Expr::StringLiteral(s, _) => {

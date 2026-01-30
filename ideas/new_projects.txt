@@ -33,3 +33,4 @@ QBE - ARM: pass, x86: pass, riscv: fail, i686: pass. Notes: FIXED - two parser i
 rc - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: was listed as failing but now passes on all architectures
 scc - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: was listed as failing but now passes on all architectures
 flatcc - ARM: untested, x86: fail, riscv: untested, i686: untested. Notes: FIXED link error (dead statics pass was removing static const globals referenced by address-taken static always_inline functions, e.g. XXH_PRIME32_1 in xxhash.h). Build now succeeds but flatcc binary segfaults at runtime (separate codegen bug).
+json-c - ARM: fail, x86: pass, riscv: pass, i686: fail. Notes: FIXED x86/riscv - &"string_literal"[index] pattern in static struct array initializers was producing NULL instead of pointer-into-literal. i686 has separate float formatting issue (12.3 prints as Infinity). ARM has separate issue.
