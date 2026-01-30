@@ -775,11 +775,15 @@ impl Lowerer {
             Expr::FunctionCall(func, _, _) => {
                 self.resolve_func_call_struct_layout(func, expr, true)
             }
-            Expr::Conditional(_, then_expr, _, _) => {
+            Expr::Conditional(_, then_expr, else_expr, _) => {
+                // Try both branches: one may be a typed struct pointer and
+                // the other may be (void*)0 (e.g., ql_last macro pattern).
                 self.get_pointed_struct_layout(then_expr)
+                    .or_else(|| self.get_pointed_struct_layout(else_expr))
             }
-            Expr::GnuConditional(cond, _, _) => {
+            Expr::GnuConditional(cond, else_expr, _) => {
                 self.get_pointed_struct_layout(cond)
+                    .or_else(|| self.get_pointed_struct_layout(else_expr))
             }
             Expr::Comma(_, last, _) => {
                 self.get_pointed_struct_layout(last)

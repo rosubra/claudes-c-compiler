@@ -150,6 +150,16 @@ pub struct Driver {
     /// the assembler adds operand/address-size override prefixes for 16-bit
     /// real mode execution. Used by the Linux kernel boot code.
     pub(super) code16gcc: bool,
+    /// Whether -M or -MM was specified (dependency-only mode).
+    /// In this mode, the compiler preprocesses the source and outputs
+    /// make-compatible dependency rules instead of compiling. -M includes
+    /// system headers in the output, -MM skips them (but our minimal
+    /// implementation doesn't list headers at all).
+    pub(super) dep_only: bool,
+    /// Dependency rule target from -MT flag (e.g., `-MT src/foo.o`).
+    /// When set, overrides the default target in the dependency rule.
+    /// Default: derive from input filename (replace extension with .o).
+    pub(super) dep_target: Option<String>,
     /// Whether to suppress line markers in preprocessor output (-P flag).
     /// When true, `# <line> "<file>"` directives are stripped from -E output.
     /// Used by the Linux kernel's cc-version.sh to detect the compiler.
@@ -240,6 +250,8 @@ impl Driver {
             assembler_extra_args: Vec::new(),
             dep_file: None,
             code16gcc: false,
+            dep_only: false,
+            dep_target: None,
             suppress_line_markers: false,
             nostdinc: false,
             undef_macros: Vec::new(),
@@ -290,6 +302,32 @@ impl Driver {
                 // For .S files, delegate preprocessing to gcc which understands
                 // assembly-specific preprocessor behavior
                 self.preprocess_assembly(input_file)?;
+                continue;
+            }
+
+            // -M/-MM: dependency-only mode. Output make rules and exit.
+            // TODO: Currently only lists the source file as a dependency.
+            // A full implementation should preprocess and list all #included
+            // headers in the dependency rule (like GCC's -M output).
+            if self.dep_only {
+                // Determine the target for the dependency rule.
+                let target = if let Some(ref t) = self.dep_target {
+                    t.clone()
+                } else {
+                    // Default: derive from input filename by replacing extension with .o
+                    let p = std::path::Path::new(input_file);
+                    let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+                    format!("{}.o", stem)
+                };
+                let input_name = if input_file == "-" { "<stdin>" } else { input_file };
+                let dep_line = format!("{}: {}\n", target, input_name);
+
+                if self.output_path_set {
+                    std::fs::write(&self.output_path, &dep_line)
+                        .map_err(|e| format!("Cannot write {}: {}", self.output_path, e))?;
+                } else {
+                    print!("{}", dep_line);
+                }
                 continue;
             }
 

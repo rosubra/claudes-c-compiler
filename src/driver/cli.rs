@@ -417,14 +417,26 @@ impl Driver {
                         self.dep_file = Some(String::new());
                     }
                 }
-                "-MP" | "-M" | "-MM" => {}
+                "-MP" => {}
+                "-M" | "-MM" => {
+                    // -M/-MM: dependency-only mode. Preprocess and output
+                    // make rules instead of compiling. GCC treats -M/-MM
+                    // as implying -E.
+                    self.dep_only = true;
+                    self.mode = CompileMode::PreprocessOnly;
+                }
                 "-MF" => {
                     i += 1;
                     if i < args.len() {
                         self.dep_file = Some(args[i].clone());
                     }
                 }
-                "-MT" | "-MQ" => { i += 1; }
+                "-MT" | "-MQ" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.dep_target = Some(args[i].clone());
+                    }
+                }
 
                 // Misc flags
                 "-rdynamic" => {
