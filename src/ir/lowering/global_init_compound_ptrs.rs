@@ -780,13 +780,31 @@ impl Lowerer {
                         }
                     }
                 } else {
-                    // Array of structs without pointer fields: byte serialization
+                    // Array of structs without pointer fields: byte serialization.
+                    // Handles both braced sub-items (List) and flat/brace-elided
+                    // scalar items (Expr) that fill struct fields sequentially.
                     let struct_size = elem_layout.size;
-                    for (ai, item) in items.iter().enumerate() {
+                    let mut sub_idx = 0usize;
+                    let mut ai = 0usize;
+                    let arr_size = match field_ty {
+                        CType::Array(_, Some(s)) => *s,
+                        _ => items.len(),
+                    };
+                    while ai < arr_size && sub_idx < items.len() {
                         let elem_offset = offset + ai * struct_size;
-                        if let Initializer::List(ref sub_items) = item.init {
-                            self.fill_struct_global_bytes(sub_items, &elem_layout, bytes, elem_offset);
+                        match &items[sub_idx].init {
+                            Initializer::List(ref sub_items) => {
+                                self.fill_struct_global_bytes(sub_items, &elem_layout, bytes, elem_offset);
+                                sub_idx += 1;
+                            }
+                            Initializer::Expr(_) => {
+                                // Flat/brace-elided init: pass remaining items to fill
+                                // this struct element field-by-field.
+                                let consumed = self.fill_struct_global_bytes(&items[sub_idx..], &elem_layout, bytes, elem_offset);
+                                sub_idx += consumed;
+                            }
                         }
+                        ai += 1;
                     }
                 }
             } else if let CType::Array(ref inner_elem, Some(inner_size)) = elem_ty.as_ref() {
