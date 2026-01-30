@@ -62,7 +62,7 @@ pub fn peephole_optimize(asm: String) -> String {
     let mut pass_count = 0;
     while changed && pass_count < MAX_LOCAL_PASS_ITERATIONS {
         changed = false;
-        let local_changed = combined_local_pass(&store, &mut infos);
+        let local_changed = combined_local_pass(&mut store, &mut infos);
         changed |= local_changed;
         // Fuse movq %REG, %rax + movl %eax, %eax -> movl %REGd, %eax
         changed |= fuse_movq_ext_truncation(&mut store, &mut infos);
@@ -96,7 +96,7 @@ pub fn peephole_optimize(asm: String) -> String {
         let mut pass_count2 = 0;
         while changed2 && pass_count2 < MAX_POST_GLOBAL_ITERATIONS {
             changed2 = false;
-            changed2 |= combined_local_pass(&store, &mut infos);
+            changed2 |= combined_local_pass(&mut store, &mut infos);
             changed2 |= fuse_movq_ext_truncation(&mut store, &mut infos);
             changed2 |= eliminate_dead_stores(&store, &mut infos);
             pass_count2 += 1;
@@ -118,7 +118,7 @@ pub fn peephole_optimize(asm: String) -> String {
         let mut pass_count3 = 0;
         while changed3 && pass_count3 < MAX_POST_GLOBAL_ITERATIONS {
             changed3 = false;
-            changed3 |= combined_local_pass(&store, &mut infos);
+            changed3 |= combined_local_pass(&mut store, &mut infos);
             changed3 |= fuse_movq_ext_truncation(&mut store, &mut infos);
             changed3 |= eliminate_dead_stores(&store, &mut infos);
             pass_count3 += 1;
@@ -348,7 +348,7 @@ fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [LineInfo]) {
 //   4. eliminate_redundant_cltq: cltq after movslq/movq$ to %rax
 //   5. eliminate_redundant_zero_extend: redundant zero/sign extensions
 
-fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
+fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
     let mut changed = false;
     let len = store.len();
 
@@ -468,6 +468,63 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
                 if found_redundant {
                     i += 1;
                     continue;
+                }
+            }
+        }
+
+        // --- Pattern: conditional branch inversion for fall-through ---
+        // Detects:
+        //   jCC .Ltrue        (conditional jump)
+        //   jmp .Lfalse       (unconditional jump)
+        //   .Ltrue:           (label matching the conditional target)
+        //
+        // Transforms to:
+        //   j!CC .Lfalse      (inverted condition, jump to false target)
+        //   .Ltrue:           (fall through naturally)
+        //
+        // This eliminates one instruction per conditional branch where the true
+        // target is the fall-through block. Common in loop headers and if-else.
+        if infos[i].kind == LineKind::CondJmp {
+            let cond_line = infos[i].trimmed(store.get(i));
+            // Parse: "jCC target" -> extract CC and target
+            if let Some(space_pos) = cond_line.find(' ') {
+                let cc = &cond_line[1..space_pos]; // e.g., "l", "ge", "ne"
+                let cond_target = cond_line[space_pos + 1..].trim();
+                // Find the next non-NOP line (should be jmp)
+                let mut j = i + 1;
+                while j < len && infos[j].is_nop() {
+                    j += 1;
+                }
+                if j < len && infos[j].kind == LineKind::Jmp {
+                    let jmp_line = infos[j].trimmed(store.get(j));
+                    if let Some(jmp_target) = jmp_line.strip_prefix("jmp ") {
+                        let jmp_target = jmp_target.trim();
+                        // Find the next non-NOP/non-empty line after jmp (should be a label)
+                        let mut k = j + 1;
+                        while k < len && (infos[k].is_nop() || infos[k].kind == LineKind::Empty) {
+                            k += 1;
+                        }
+                        if k < len && infos[k].kind == LineKind::Label {
+                            let label_line = infos[k].trimmed(store.get(k));
+                            if let Some(label_name) = label_line.strip_suffix(':') {
+                                if label_name == cond_target {
+                                    // The conditional target is the fall-through label.
+                                    // Invert the condition and jump to the jmp's target instead.
+                                    let inv_cc = invert_cc(cc);
+                                    // Only apply if inversion actually changed the CC
+                                    // (invert_cc returns the same string if unknown)
+                                    if inv_cc != cc {
+                                        let new_line = format!("    j{} {}", inv_cc, jmp_target);
+                                        replace_line(store, &mut infos[i], i, new_line);
+                                        mark_nop(&mut infos[j]); // Remove the jmp
+                                        changed = true;
+                                        i += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3252,5 +3309,64 @@ mod tests {
             "should eliminate frac copy: {}", result);
         assert!(result.contains("jne .LBB10"),
             "should redirect branch to loop header: {}", result);
+    }
+
+    #[test]
+    fn test_condbranch_inversion_fallthrough() {
+        // Pattern: jl .LBB2 ; jmp .LBB4 ; .LBB2:
+        // Should become: jge .LBB4 ; .LBB2:
+        let asm = [
+            "    cmpl %r8d, %eax",
+            "    jl .LBB2",
+            "    jmp .LBB4",
+            ".LBB2:",
+            "    movq %rax, %rcx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The jl should be inverted to jge, and jmp removed
+        assert!(result.contains("jge .LBB4"),
+            "should invert jl to jge: {}", result);
+        assert!(!result.contains("jl .LBB2"),
+            "should remove original jl: {}", result);
+        assert!(!result.contains("jmp .LBB4"),
+            "should remove the jmp: {}", result);
+        assert!(result.contains(".LBB2:"),
+            "should keep the label: {}", result);
+    }
+
+    #[test]
+    fn test_condbranch_inversion_je_to_jne() {
+        // Pattern: je .Ltrue ; jmp .Lfalse ; .Ltrue:
+        // Should become: jne .Lfalse ; .Ltrue:
+        let asm = [
+            "    testq %rax, %rax",
+            "    je .Ltrue",
+            "    jmp .Lfalse",
+            ".Ltrue:",
+            "    ret",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("jne .Lfalse"),
+            "should invert je to jne: {}", result);
+        assert!(!result.contains("jmp .Lfalse"),
+            "should remove the jmp: {}", result);
+    }
+
+    #[test]
+    fn test_condbranch_no_inversion_when_not_fallthrough() {
+        // Pattern: jl .LBB5 ; jmp .LBB4 ; .LBB2:
+        // NOT a fallthrough (label is .LBB2, not .LBB5) -- should NOT invert
+        let asm = [
+            "    cmpl %r8d, %eax",
+            "    jl .LBB5",
+            "    jmp .LBB4",
+            ".LBB2:",
+            "    movq %rax, %rcx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // Should keep both jumps (possibly the jmp .LBB4 is eliminated if .LBB4
+        // happens to be next, but jl .LBB5 should remain)
+        assert!(result.contains("jl .LBB5"),
+            "should keep jl when not fallthrough: {}", result);
     }
 }
