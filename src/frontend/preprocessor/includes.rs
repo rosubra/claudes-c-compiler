@@ -131,9 +131,16 @@ fn detect_include_guard(source: &str) -> Option<String> {
                         // This #endif closes the guard
                         found_endif = true;
                     }
+                } else if (after_hash.starts_with("else") || after_hash.starts_with("elif")) && if_depth == 1 {
+                    // An #else/#elif at the outermost guard level means the
+                    // header has different behavior on re-inclusion (e.g.,
+                    // libev's ev_wrap.h defines macros on first include and
+                    // #undef's them on second include via the #else branch).
+                    // Such headers must NOT be skipped on re-inclusion.
+                    return None;
                 }
                 // Other directives (#define, #include, #elif, #else, etc.)
-                // inside the guard are fine
+                // inside nested #if blocks are fine
             }
         } else {
             // Non-directive, non-empty line
