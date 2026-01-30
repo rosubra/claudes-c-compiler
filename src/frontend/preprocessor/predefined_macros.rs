@@ -298,6 +298,25 @@ impl Preprocessor {
         }
     }
 
+    /// Define __OPTIMIZE__ and __OPTIMIZE_SIZE__ based on the optimization level.
+    ///
+    /// GCC defines __OPTIMIZE__ for any optimization level >= 1 (-O, -O1, -O2, -O3, -Os, -Oz).
+    /// GCC defines __OPTIMIZE_SIZE__ for -Os and -Oz.
+    /// The Linux kernel relies on __OPTIMIZE__ for BUILD_BUG() and related compile-time
+    /// assertion macros that expand to noreturn function calls when optimization is enabled.
+    pub fn set_optimize(&mut self, optimize: bool, optimize_size: bool) {
+        if optimize {
+            self.define_simple_macro("__OPTIMIZE__", "1");
+        } else {
+            self.macros.undefine("__OPTIMIZE__");
+        }
+        if optimize_size {
+            self.define_simple_macro("__OPTIMIZE_SIZE__", "1");
+        } else {
+            self.macros.undefine("__OPTIMIZE_SIZE__");
+        }
+    }
+
     /// Define or undefine __PIC__/__pic__ based on whether PIC mode is active.
     /// GCC defines these to 1 for -fpic and 2 for -fPIC; we always use 2.
     /// When PIC is disabled (e.g. -fno-PIC), these must not be defined, as

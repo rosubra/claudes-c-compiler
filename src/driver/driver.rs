@@ -39,6 +39,12 @@ pub struct Driver {
     output_path_set: bool,
     input_files: Vec<String>,
     opt_level: u32,
+    /// Whether optimization is enabled (any -O level except -O0).
+    /// Used to define __OPTIMIZE__ predefined macro.
+    optimize: bool,
+    /// Whether size optimization is requested (-Os or -Oz).
+    /// Used to define __OPTIMIZE_SIZE__ predefined macro.
+    optimize_size: bool,
     verbose: bool,
     mode: CompileMode,
     debug_info: bool,
@@ -179,6 +185,8 @@ impl Driver {
             output_path_set: false,
             input_files: Vec::new(),
             opt_level: 2, // All levels run the same optimizations; default to max
+            optimize: false, // Only set to true when user explicitly passes -O1 or higher
+            optimize_size: false,
             verbose: false,
             mode: CompileMode::Full,
             debug_info: false,
@@ -360,8 +368,20 @@ impl Driver {
                 "-dM" => self.dump_defines = true,
 
                 // Optimization levels
-                "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" => {
+                "-O0" => {
+                    self.opt_level = 2; // internally always optimize
+                    self.optimize = false;
+                    self.optimize_size = false;
+                }
+                "-O" | "-O1" | "-O2" | "-O3" => {
                     self.opt_level = 2;
+                    self.optimize = true;
+                    self.optimize_size = false;
+                }
+                "-Os" | "-Oz" => {
+                    self.opt_level = 2;
+                    self.optimize = true;
+                    self.optimize_size = true;
                 }
 
                 // Debug info
@@ -701,6 +721,10 @@ impl Driver {
         if self.gnu89_inline {
             preprocessor.set_gnu89_inline(true);
         }
+        // Set optimization macros: __OPTIMIZE__ for -O1+, __OPTIMIZE_SIZE__ for -Os/-Oz.
+        // The Linux kernel's BUILD_BUG() relies on __OPTIMIZE__ to expand to a noreturn
+        // function call instead of a no-op.
+        preprocessor.set_optimize(self.optimize, self.optimize_size);
         // Set PIC mode: defines __PIC__/__pic__ only when -fPIC is active.
         // This is critical for kernel code where RIP_REL_REF() checks #ifndef __pic__
         // to decide whether to use RIP-relative inline asm for early boot code.

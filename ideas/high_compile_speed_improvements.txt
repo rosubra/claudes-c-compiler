@@ -2,7 +2,12 @@ Compile Speed Improvements
 ===========================
 Priority: HIGH
 
-Profiled on kernel/softirq.c (callgrind, 2.31B instructions).
+Profiled on sqlite3.c (callgrind, 20.2B instructions after fixes).
+Previous profile: kernel/softirq.c (2.31B instructions).
+
+FIXED: Peephole loop trampoline O(n*labels) quadratic scan was 19.76%
+of total compile time. Pre-built reverse index reduces it to 0.21%.
+Overall 22.7% instruction count reduction (26.1B -> 20.2B).
 
 Remaining bottlenecks:
 

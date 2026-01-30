@@ -206,13 +206,17 @@ impl SemanticAnalyzer {
             (ty, p.name.clone())
         }).collect();
 
+        // Preserve noreturn from a prior declaration (e.g., the prototype may have
+        // __attribute__((noreturn)) even if the definition doesn't repeat it).
+        let prior_noreturn = self.result.functions.get(&func.name)
+            .map_or(false, |fi| fi.is_noreturn);
         let func_info = FunctionInfo {
             name: func.name.clone(),
             return_type: return_type.clone(),
             params: params.clone(),
             variadic: func.variadic,
             is_defined: true,
-            is_noreturn: func.attrs.is_noreturn(),
+            is_noreturn: func.attrs.is_noreturn() || prior_noreturn,
         };
 
         // Register in function table
@@ -1038,19 +1042,29 @@ impl SemanticAnalyzer {
     }
 
     /// Determine the outcome of a case segment: does it return, break, or fall through?
+    ///
+    /// Walks items sequentially: if an earlier item diverges (returns/breaks),
+    /// subsequent items are dead code and don't affect the outcome. This handles
+    /// patterns like `return NULL; break;` where the break is unreachable.
     fn segment_outcome(&self, segment: &[BlockItem]) -> SwitchSegmentOutcome {
         if segment.is_empty() {
             return SwitchSegmentOutcome::FallsThrough;
         }
 
-        let last = &segment[segment.len() - 1];
-        match last {
-            BlockItem::Declaration(_) => SwitchSegmentOutcome::FallsThrough,
-            BlockItem::Statement(stmt) => {
-                let inner = self.unwrap_case_label(stmt);
-                self.stmt_switch_outcome(inner)
+        for item in segment {
+            let outcome = match item {
+                BlockItem::Declaration(_) => continue,
+                BlockItem::Statement(stmt) => {
+                    let inner = self.unwrap_case_label(stmt);
+                    self.stmt_switch_outcome(inner)
+                }
+            };
+            // If this item returns or breaks, subsequent items are dead code
+            if outcome != SwitchSegmentOutcome::FallsThrough {
+                return outcome;
             }
         }
+        SwitchSegmentOutcome::FallsThrough
     }
 
     /// Determine what a statement does in a switch context: return, break, or fall through.
@@ -1063,13 +1077,18 @@ impl SemanticAnalyzer {
             Stmt::Continue(_) => SwitchSegmentOutcome::Returns,
 
             Stmt::Compound(compound) => {
-                if compound.items.is_empty() {
-                    return SwitchSegmentOutcome::FallsThrough;
+                // Walk items sequentially: if an item diverges (returns/breaks),
+                // subsequent items are dead code. This handles `return x; break;`.
+                for item in &compound.items {
+                    let outcome = match item {
+                        BlockItem::Declaration(_) => continue,
+                        BlockItem::Statement(s) => self.stmt_switch_outcome(s),
+                    };
+                    if outcome != SwitchSegmentOutcome::FallsThrough {
+                        return outcome;
+                    }
                 }
-                match compound.items.last().unwrap() {
-                    BlockItem::Statement(s) => self.stmt_switch_outcome(s),
-                    BlockItem::Declaration(_) => SwitchSegmentOutcome::FallsThrough,
-                }
+                SwitchSegmentOutcome::FallsThrough
             }
 
             Stmt::If(_, then_br, else_br, _) => match else_br {
@@ -1198,6 +1217,12 @@ impl SemanticAnalyzer {
                             | "exit"
                             | "_exit"
                             | "_Exit"
+                            | "quick_exit"
+                            | "__assert_fail"
+                            | "__assert_rtn"
+                            | "longjmp"
+                            | "siglongjmp"
+                            | "__longjmp_chk"
                     ) {
                         return true;
                     }
@@ -1212,6 +1237,8 @@ impl SemanticAnalyzer {
             }
             // Handle comma expressions: (void)0, __builtin_unreachable()
             Expr::Comma(_, rhs, _) => self.is_noreturn_call(rhs),
+            // Handle cast expressions: (void)noreturn_call()
+            Expr::Cast(_, inner, _) => self.is_noreturn_call(inner),
             _ => false,
         }
     }
