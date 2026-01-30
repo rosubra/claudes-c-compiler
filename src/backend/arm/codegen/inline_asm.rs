@@ -165,15 +165,18 @@ impl ArmCodegen {
         } else {
             reg
         };
-        // Extract the register number from any register form (x, w, d, s, q)
+        // Extract the register number from any register form (x, w, d, s, q, v)
         let reg_num = || -> Option<&str> {
             if reg.starts_with('x') || reg.starts_with('w') || reg.starts_with('d')
-                || reg.starts_with('s') || reg.starts_with('q') {
+                || reg.starts_with('s') || reg.starts_with('q') || reg.starts_with('v') {
                 Some(&reg[1..])
             } else {
                 None
             }
         };
+        // Check if this is a FP/SIMD register (d, s, q, v prefix)
+        let is_fp_reg = reg.starts_with('d') || reg.starts_with('s')
+            || reg.starts_with('q') || reg.starts_with('v');
         match modifier {
             Some('w') => {
                 // Convert to w-register (32-bit GP)
@@ -196,7 +199,7 @@ impl ArmCodegen {
             Some('d') => {
                 // Convert to d-register (64-bit FP/double)
                 if let Some(num) = reg_num() {
-                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                    if is_fp_reg {
                         return format!("d{}", num);
                     }
                 }
@@ -205,7 +208,7 @@ impl ArmCodegen {
             Some('s') => {
                 // Convert to s-register (32-bit FP/float)
                 if let Some(num) = reg_num() {
-                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                    if is_fp_reg {
                         return format!("s{}", num);
                     }
                 }
@@ -214,7 +217,7 @@ impl ArmCodegen {
             Some('q') => {
                 // Convert to q-register (128-bit SIMD)
                 if let Some(num) = reg_num() {
-                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                    if is_fp_reg {
                         return format!("q{}", num);
                     }
                 }
@@ -223,7 +226,7 @@ impl ArmCodegen {
             Some('h') => {
                 // Convert to h-register (16-bit FP/half)
                 if let Some(num) = reg_num() {
-                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                    if is_fp_reg {
                         return format!("h{}", num);
                     }
                 }
@@ -232,7 +235,7 @@ impl ArmCodegen {
             Some('b') => {
                 // Convert to b-register (8-bit)
                 if let Some(num) = reg_num() {
-                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                    if is_fp_reg {
                         return format!("b{}", num);
                     }
                 }
@@ -249,15 +252,57 @@ impl ArmCodegen {
                     format!("[{}]", reg)
                 }
             }
+            None => {
+                // No modifier: for FP/SIMD registers, emit as vN (GCC behavior).
+                // This ensures `%0.16b` produces `v16.16b` not `d16.16b`.
+                if is_fp_reg {
+                    if let Some(num) = reg_num() {
+                        return format!("v{}", num);
+                    }
+                }
+                reg.to_string()
+            }
             _ => reg.to_string(),
         }
     }
 
-    /// Convert a d-register name to its s-register counterpart (same register number).
-    /// e.g., "d16" -> "s16"
-    pub(super) fn d_to_s_reg(reg: &str) -> String {
-        if let Some(rest) = reg.strip_prefix('d') {
+    /// Convert a FP/SIMD register name to its s-register counterpart (same register number).
+    /// e.g., "d16" -> "s16", "v16" -> "s16"
+    pub(super) fn fp_to_s_reg(reg: &str) -> String {
+        if let Some(rest) = reg.strip_prefix('d')
+            .or_else(|| reg.strip_prefix('v'))
+            .or_else(|| reg.strip_prefix('s'))
+            .or_else(|| reg.strip_prefix('q'))
+        {
             format!("s{rest}")
+        } else {
+            reg.to_string()
+        }
+    }
+
+    /// Convert a FP/SIMD register name to its d-register counterpart (same register number).
+    /// e.g., "v16" -> "d16", "s16" -> "d16"
+    pub(super) fn fp_to_d_reg(reg: &str) -> String {
+        if let Some(rest) = reg.strip_prefix('v')
+            .or_else(|| reg.strip_prefix('d'))
+            .or_else(|| reg.strip_prefix('s'))
+            .or_else(|| reg.strip_prefix('q'))
+        {
+            format!("d{rest}")
+        } else {
+            reg.to_string()
+        }
+    }
+
+    /// Convert a FP/SIMD register name to its q-register counterpart (same register number).
+    /// e.g., "v16" -> "q16", "d16" -> "q16"
+    pub(super) fn fp_to_q_reg(reg: &str) -> String {
+        if let Some(rest) = reg.strip_prefix('v')
+            .or_else(|| reg.strip_prefix('d'))
+            .or_else(|| reg.strip_prefix('s'))
+            .or_else(|| reg.strip_prefix('q'))
+        {
+            format!("q{rest}")
         } else {
             reg.to_string()
         }

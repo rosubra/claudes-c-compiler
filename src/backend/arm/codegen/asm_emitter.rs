@@ -16,8 +16,11 @@ use super::codegen::{ArmCodegen, is_arm_fp_reg};
 /// AArch64 scratch registers for inline asm (caller-saved temporaries).
 pub(super) const ARM_GP_SCRATCH: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];
 /// AArch64 FP/SIMD scratch registers for inline asm (d8-d15 are callee-saved,
-/// d16-d31 are caller-saved; we use d16+ as scratch to avoid save/restore).
-const ARM_FP_SCRATCH: &[&str] = &["d16", "d17", "d18", "d19", "d20", "d21", "d22", "d23", "d24", "d25"];
+/// d16-d31 are caller-saved; we use v16+ as scratch to avoid save/restore).
+/// We use the 'v' prefix so that unmodified %0 in templates like `eor %0.16b, %1.16b, %2.16b`
+/// correctly produces `v16.16b` (GCC behavior). Modifiers (%d0, %s0, etc.) convert
+/// to the appropriate scalar view in format_reg_static.
+const ARM_FP_SCRATCH: &[&str] = &["v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25"];
 
 impl InlineAsmEmitter for ArmCodegen {
     fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
@@ -106,13 +109,21 @@ impl InlineAsmEmitter for ArmCodegen {
 
     fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         if matches!(kind, AsmOperandKind::FpReg) {
-            let idx = self.asm_fp_scratch_idx;
-            self.asm_fp_scratch_idx += 1;
-            if idx < ARM_FP_SCRATCH.len() {
-                ARM_FP_SCRATCH[idx].to_string()
-            } else {
-                format!("d{}", 16 + idx)
+            // Safety: limit iterations to avoid infinite loop if all regs are excluded
+            for _ in 0..32 {
+                let idx = self.asm_fp_scratch_idx;
+                self.asm_fp_scratch_idx += 1;
+                let reg = if idx < ARM_FP_SCRATCH.len() {
+                    ARM_FP_SCRATCH[idx].to_string()
+                } else {
+                    format!("v{}", 16 + idx)
+                };
+                if !excluded.iter().any(|e| e == &reg) {
+                    return reg;
+                }
             }
+            // Fallback: return next register even if excluded
+            format!("v{}", 16 + self.asm_fp_scratch_idx)
         } else {
             loop {
                 let idx = self.asm_scratch_idx;
@@ -152,6 +163,7 @@ impl InlineAsmEmitter for ArmCodegen {
                     // Load FP constant: extract IEEE 754 bit pattern, move to GP reg,
                     // then fmov to FP reg. to_i64() returns None for floats, so we
                     // must use to_bits() to get the bit-level representation.
+                    // fmov requires d/s register form, not v.
                     let bits = match c {
                         IrConst::F32(v) => v.to_bits() as i64,
                         IrConst::F64(v) => v.to_bits() as i64,
@@ -159,11 +171,11 @@ impl InlineAsmEmitter for ArmCodegen {
                     };
                     self.emit_load_imm64("x9", bits);
                     if op.operand_type == IrType::F32 {
-                        // Convert d-register name to s-register for single-precision
-                        let s_reg = Self::d_to_s_reg(reg);
+                        let s_reg = Self::fp_to_s_reg(reg);
                         self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
                     } else {
-                        self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
+                        let d_reg = Self::fp_to_d_reg(reg);
+                        self.state.emit_fmt(format_args!("    fmov {}, x9", d_reg));
                     }
                 } else if is_sp {
                     // ARM64: can't use ldr/mov imm to sp directly in most cases.
@@ -177,14 +189,21 @@ impl InlineAsmEmitter for ArmCodegen {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if is_fp {
-                        // Load FP value from stack: load raw bits to GP reg, then fmov
-                        if op.operand_type == IrType::F32 {
+                        // Load FP value from stack: use ldr with d/s register form.
+                        // For SIMD vector types (>= 16 bytes), use ldr with q register.
+                        let type_size = op.operand_type.size();
+                        if type_size == 16 {
+                            // 128-bit vector: load directly with ldr qN
+                            let q_reg = Self::fp_to_q_reg(reg);
+                            self.emit_load_from_sp(&q_reg, slot.0, "ldr");
+                        } else if op.operand_type == IrType::F32 || type_size == 4 {
                             self.state.emit_fmt(format_args!("    ldr w9, [sp, #{}]", slot.0));
-                            let s_reg = Self::d_to_s_reg(reg);
+                            let s_reg = Self::fp_to_s_reg(reg);
                             self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
                         } else {
                             self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
-                            self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
+                            let d_reg = Self::fp_to_d_reg(reg);
+                            self.state.emit_fmt(format_args!("    fmov {}, x9", d_reg));
                         }
                     } else if is_sp {
                         // ARM64: can't use ldr to load directly into sp.
@@ -210,14 +229,20 @@ impl InlineAsmEmitter for ArmCodegen {
         let is_fp = is_arm_fp_reg(reg);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_fp {
-                // Load current FP value for read-write constraint
-                if op.operand_type == IrType::F32 {
+                // Load current FP value for read-write constraint.
+                // fmov requires d/s register form, not v.
+                let type_size = op.operand_type.size();
+                if type_size == 16 {
+                    let q_reg = Self::fp_to_q_reg(reg);
+                    self.emit_load_from_sp(&q_reg, slot.0, "ldr");
+                } else if op.operand_type == IrType::F32 || type_size == 4 {
                     self.state.emit_fmt(format_args!("    ldr w9, [sp, #{}]", slot.0));
-                    let s_reg = Self::d_to_s_reg(reg);
+                    let s_reg = Self::fp_to_s_reg(reg);
                     self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
                 } else {
                     self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
-                    self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
+                    let d_reg = Self::fp_to_d_reg(reg);
+                    self.state.emit_fmt(format_args!("    fmov {}, x9", d_reg));
                 }
             } else if reg == "sp" {
                 // ARM64: can't use ldr to load directly into sp.
@@ -270,13 +295,19 @@ impl InlineAsmEmitter for ArmCodegen {
         let is_fp = is_arm_fp_reg(reg);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if is_fp {
-                // Store FP register output: fmov to GP reg, then store to stack
-                if op.operand_type == IrType::F32 {
-                    let s_reg = Self::d_to_s_reg(reg);
+                // Store FP/SIMD register output. fmov requires d/s form, not v.
+                let type_size = op.operand_type.size();
+                if type_size == 16 {
+                    // 128-bit vector: store directly with str qN
+                    let q_reg = Self::fp_to_q_reg(reg);
+                    self.emit_store_to_sp(&q_reg, slot.0, "str");
+                } else if op.operand_type == IrType::F32 || type_size == 4 {
+                    let s_reg = Self::fp_to_s_reg(reg);
                     self.state.emit_fmt(format_args!("    fmov w9, {}", s_reg));
                     self.state.emit_fmt(format_args!("    str w9, [sp, #{}]", slot.0));
                 } else {
-                    self.state.emit_fmt(format_args!("    fmov x9, {}", reg));
+                    let d_reg = Self::fp_to_d_reg(reg);
+                    self.state.emit_fmt(format_args!("    fmov x9, {}", d_reg));
                     self.state.emit_fmt(format_args!("    str x9, [sp, #{}]", slot.0));
                 }
             } else if reg == "sp" {

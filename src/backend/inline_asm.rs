@@ -333,9 +333,19 @@ pub fn expand_dialect_alternatives(template: &str) -> Cow<'_, str> {
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '{' {
-            // Found the start of a dialect alternatives group.
-            // Extract the first alternative (AT&T syntax, before '|').
+        if chars[i] == '%' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            // GCC escape sequence %{ -> literal '{'
+            result.push('{');
+            i += 2;
+        } else if chars[i] == '%' && i + 1 < chars.len() && chars[i + 1] == '}' {
+            // GCC escape sequence %} -> literal '}'
+            result.push('}');
+            i += 2;
+        } else if chars[i] == '{' {
+            // Could be a dialect alternatives group {att|intel} or literal braces
+            // used in ARM NEON instructions like ld1 {v0.4s}, [x0].
+            // Scan ahead to find matching '}' and check for '|'.
+            let brace_start = i;
             i += 1; // skip '{'
             let start = i;
             let mut depth = 1;
@@ -352,10 +362,20 @@ pub fn expand_dialect_alternatives(template: &str) -> Cow<'_, str> {
                 }
                 i += 1;
             }
-            // Extract the first alternative (before '|')
-            let end = if let Some(p) = pipe_pos { p } else { i };
-            let alt: String = chars[start..end].iter().collect();
-            result.push_str(&alt);
+            if let Some(p) = pipe_pos {
+                // This IS a dialect alternatives group: {alt1|alt2}
+                // Extract the first alternative (before '|')
+                let alt: String = chars[start..p].iter().collect();
+                result.push_str(&alt);
+            } else {
+                // No pipe found: these are literal braces (e.g., ARM NEON {v0.4s}).
+                // Preserve the braces and their content as-is.
+                let content: String = chars[brace_start..i].iter().collect();
+                result.push_str(&content);
+                if i < chars.len() && chars[i] == '}' {
+                    result.push('}');
+                }
+            }
             if i < chars.len() && chars[i] == '}' {
                 i += 1; // skip '}'
             }
@@ -608,6 +628,22 @@ fn collect_excluded_registers(
                     if n <= 30 {
                         specific_regs.push(format!("x{}", n));
                         specific_regs.push(format!("w{}", n));
+                    }
+                }
+            }
+        }
+        // ARM64: v/d/s/q registers are all views of the same physical FP/SIMD register.
+        // Add all aliases so scratch allocation avoids conflicts.
+        let fp_suffix = clobber.strip_prefix('v')
+            .or_else(|| clobber.strip_prefix('d'))
+            .or_else(|| clobber.strip_prefix('s'))
+            .or_else(|| clobber.strip_prefix('q'));
+        if let Some(suffix) = fp_suffix {
+            if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                for prefix in &["v", "d", "s", "q"] {
+                    let alias = format!("{}{}", prefix, suffix);
+                    if !specific_regs.contains(&alias) {
+                        specific_regs.push(alias);
                     }
                 }
             }
