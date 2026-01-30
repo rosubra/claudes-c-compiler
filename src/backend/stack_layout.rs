@@ -393,11 +393,68 @@ fn compute_coalescable_allocas(
 ///
 /// Any discovered callee-saved PhysRegs are appended to `used` (deduplicated).
 /// This shared helper eliminates duplicated scan loops in x86 and RISC-V.
+///
+/// When a generic register class constraint (e.g. "r", "q", "g") is found that
+/// doesn't map to a specific register, ALL callee-saved registers from
+/// `all_callee_saved` are conservatively marked as clobbered. This prevents the
+/// register allocator from assigning callee-saved registers to values whose live
+/// ranges span the inline asm block, since the scratch register allocator may
+/// pick any callee-saved register at codegen time. This is especially important
+/// on i686 where there are only 3 callee-saved GP registers (ebx, esi, edi) and
+/// the scratch pool includes all of them.
 pub fn collect_inline_asm_callee_saved(
     func: &IrFunction,
     used: &mut Vec<super::regalloc::PhysReg>,
     constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
     clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+) {
+    collect_inline_asm_callee_saved_inner(func, used, constraint_to_phys, clobber_to_phys, &[])
+}
+
+/// Like `collect_inline_asm_callee_saved`, but with an additional
+/// `all_callee_saved` list. When a constraint is a generic GP register class
+/// (like "r", "q", "g") that doesn't map to a specific callee-saved register,
+/// all registers in `all_callee_saved` are conservatively marked as clobbered.
+pub fn collect_inline_asm_callee_saved_with_generic(
+    func: &IrFunction,
+    used: &mut Vec<super::regalloc::PhysReg>,
+    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+    all_callee_saved: &[super::regalloc::PhysReg],
+) {
+    collect_inline_asm_callee_saved_inner(func, used, constraint_to_phys, clobber_to_phys, all_callee_saved)
+}
+
+/// Returns true if the constraint string (after stripping `=`, `+`, `&`)
+/// contains a generic GP register class character that could cause the scratch
+/// allocator to pick any GP register, including callee-saved ones.
+fn is_generic_gp_constraint(constraint: &str) -> bool {
+    // Skip explicit register constraints like {eax}
+    if constraint.starts_with('{') { return false; }
+    // Skip tied operands (all digits)
+    if !constraint.is_empty() && constraint.chars().all(|ch| ch.is_ascii_digit()) { return false; }
+    // Skip condition code constraints (@cc...)
+    if constraint.starts_with("@cc") { return false; }
+    // Check for generic GP register class characters
+    for ch in constraint.chars() {
+        match ch {
+            // 'r', 'q', 'R', 'Q', 'l' = any GP register
+            // 'g' = general operand (GP reg, memory, or immediate)
+            'r' | 'q' | 'R' | 'Q' | 'l' | 'g' => return true,
+            // Specific register letters are not generic
+            'a' | 'b' | 'c' | 'd' | 'S' | 'D' => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn collect_inline_asm_callee_saved_inner(
+    func: &IrFunction,
+    used: &mut Vec<super::regalloc::PhysReg>,
+    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+    all_callee_saved: &[super::regalloc::PhysReg],
 ) {
     let mut already: FxHashSet<u8> = used.iter().map(|r| r.0).collect();
     for block in &func.blocks {
@@ -407,12 +464,23 @@ pub fn collect_inline_asm_callee_saved(
                     let c = constraint.trim_start_matches(['=', '+', '&']);
                     if let Some(phys) = constraint_to_phys(c) {
                         if already.insert(phys.0) { used.push(phys); }
+                    } else if !all_callee_saved.is_empty() && is_generic_gp_constraint(c) {
+                        // Generic register class: conservatively mark all
+                        // callee-saved registers as clobbered since the
+                        // scratch allocator may pick any of them.
+                        for &phys in all_callee_saved {
+                            if already.insert(phys.0) { used.push(phys); }
+                        }
                     }
                 }
                 for (constraint, _, _) in inputs {
                     let c = constraint.trim_start_matches(['=', '+', '&']);
                     if let Some(phys) = constraint_to_phys(c) {
                         if already.insert(phys.0) { used.push(phys); }
+                    } else if !all_callee_saved.is_empty() && is_generic_gp_constraint(c) {
+                        for &phys in all_callee_saved {
+                            if already.insert(phys.0) { used.push(phys); }
+                        }
                     }
                 }
                 for clobber in clobbers {

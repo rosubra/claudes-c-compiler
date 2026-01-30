@@ -4,7 +4,7 @@ use crate::ir::ir::{IrFunction, Value};
 use crate::common::types::IrType;
 use crate::backend::generation::{
     is_i128_type, calculate_stack_space_common, run_regalloc_and_merge_clobbers,
-    filter_available_regs, find_param_alloca, collect_inline_asm_callee_saved,
+    filter_available_regs, find_param_alloca, collect_inline_asm_callee_saved_with_generic,
 };
 use crate::backend::call_emit::{ParamClass, classify_params};
 use crate::emit;
@@ -31,11 +31,16 @@ impl I686Codegen {
         }
 
         // Run register allocator before stack space computation.
+        // Use the _with_generic variant to conservatively mark all callee-saved
+        // registers as clobbered when generic register constraints (r, q, g) are
+        // present. On i686, the scratch allocator may pick esi/edi/ebx for generic
+        // constraints, which would clobber values the register allocator placed there.
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();
-        collect_inline_asm_callee_saved(
+        collect_inline_asm_callee_saved_with_generic(
             func, &mut asm_clobbered_regs,
             i686_constraint_to_phys,
             i686_clobber_to_phys,
+            I686_CALLEE_SAVED,
         );
         // In PIC mode, %ebx (PhysReg(0)) is reserved as the GOT base pointer.
         if self.state.pic_mode {

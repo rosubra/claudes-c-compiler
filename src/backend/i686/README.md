@@ -19,5 +19,6 @@ Code generation targeting 32-bit x86 (i686) with the cdecl calling convention.
 
 ## Known Limitations
 
-- mbedtls project test fails (pre-existing)
 - Division-by-constant pass disabled (generates 64-bit arithmetic the backend can't handle)
+- All 12 standard projects pass (zlib, lua, libsodium, mquickjs, libpng, jq, libjpeg, mbedtls, libuv, libffi, musl, tcc)
+- Unit tests: 100% pass rate (692/692 applicable tests)

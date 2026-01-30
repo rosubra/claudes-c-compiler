@@ -1374,6 +1374,7 @@ pub fn is_wide_int_type(ty: IrType) -> bool {
 // continue to work without changes to downstream code.
 pub use super::stack_layout::{
     collect_inline_asm_callee_saved,
+    collect_inline_asm_callee_saved_with_generic,
     run_regalloc_and_merge_clobbers,
     filter_available_regs,
     calculate_stack_space_common,
