@@ -403,6 +403,15 @@ impl<'a> ExprTypeChecker<'a> {
             }
         }
 
+        // GCC vector extensions: if either operand is a vector type, the result
+        // is that vector type.  usual_arithmetic_conversion doesn't handle vectors.
+        if let Some(ref l) = lct {
+            if l.is_vector() { return lct; }
+        }
+        if let Some(ref r) = rct {
+            if r.is_vector() { return rct; }
+        }
+
         // Arithmetic/bitwise: usual arithmetic conversions
         match (lct, rct) {
             (Some(l), Some(r)) => Some(CType::usual_arithmetic_conversion(&l, &r)),
