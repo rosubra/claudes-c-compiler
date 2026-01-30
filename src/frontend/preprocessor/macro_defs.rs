@@ -155,6 +155,32 @@ impl MacroTable {
         self.line_value.set(line);
     }
 
+    /// Set the __FILE__ macro body without allocating a full MacroDef.
+    /// If __FILE__ already exists in the table, only its body is updated.
+    /// Otherwise, a new entry is created.
+    /// This avoids 2 full MacroDef allocations per #include directive.
+    pub fn set_file(&mut self, body: String) {
+        if let Some(existing) = self.macros.get_mut("__FILE__") {
+            existing.body = body;
+        } else {
+            self.macros.insert("__FILE__".to_string(), MacroDef {
+                name: "__FILE__".to_string(),
+                is_function_like: false,
+                params: Vec::new(),
+                is_variadic: false,
+                has_named_variadic: false,
+                body,
+                is_predefined: true,
+            });
+        }
+    }
+
+    /// Get the current __FILE__ macro body.
+    /// Returns None if __FILE__ is not defined.
+    pub fn get_file_body(&self) -> Option<&str> {
+        self.macros.get("__FILE__").map(|m| m.body.as_str())
+    }
+
     /// Expand macros in a line of text.
     /// Returns the expanded text.
     pub fn expand_line(&self, line: &str) -> String {
@@ -316,8 +342,26 @@ impl MacroTable {
             } else if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
                 i = Self::copy_ppnumber(bytes, i, &mut result);
             } else if b < 0x80 {
-                result.push(b as char);
+                // Batch consecutive non-special ASCII bytes into a single push_str.
+                // This avoids per-byte push overhead for sequences of operators,
+                // whitespace, punctuation etc.
+                let start = i;
                 i += 1;
+                while i < len {
+                    let c = bytes[i];
+                    if c == b'"' || c == b'\'' || c == BLUE_PAINT_MARKER
+                        || is_ident_start_byte(c)
+                        || (c == b'/' && i + 1 < len && (bytes[i + 1] == b'*' || bytes[i + 1] == b'/'))
+                        || c.is_ascii_digit()
+                        || (c == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit())
+                        || c >= 0x80
+                    {
+                        break;
+                    }
+                    i += 1;
+                }
+                let slice = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+                result.push_str(slice);
             } else {
                 let ch = text[i..].chars().next().unwrap();
                 result.push(ch);
@@ -329,14 +373,17 @@ impl MacroTable {
     }
 
     /// Copy a blue-painted identifier verbatim (never re-expanded).
-    fn copy_blue_painted(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+    /// Uses batch slice copy for the identifier bytes after the marker.
+    fn copy_blue_painted(bytes: &[u8], i: usize, result: &mut String) -> usize {
         result.push(BLUE_PAINT_MARKER as char);
-        i += 1;
-        while i < bytes.len() && is_ident_cont_byte(bytes[i]) {
-            result.push(bytes[i] as char);
-            i += 1;
+        let start = i + 1;
+        let mut j = start;
+        while j < bytes.len() && is_ident_cont_byte(bytes[j]) {
+            j += 1;
         }
-        i
+        let slice = std::str::from_utf8(&bytes[start..j]).unwrap_or("");
+        result.push_str(slice);
+        j
     }
 
     /// Process an identifier: expand macros, handle builtins, or copy verbatim.
@@ -480,50 +527,57 @@ impl MacroTable {
     }
 
     /// Copy a C-style block comment verbatim.
-    fn copy_block_comment(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+    /// Uses batch slice copy instead of per-byte push for the comment body.
+    fn copy_block_comment(bytes: &[u8], i: usize, result: &mut String) -> usize {
         let len = bytes.len();
-        result.push('/');
-        result.push('*');
-        i += 2;
-        while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-            result.push(bytes[i] as char);
-            i += 1;
+        let start = i;
+        let mut j = i + 2; // skip /*
+        while j + 1 < len && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+            j += 1;
         }
-        if i + 1 < len {
-            result.push('*');
-            result.push('/');
-            i += 2;
+        if j + 1 < len {
+            j += 2; // skip */
         }
-        i
+        // All comment content is ASCII, safe to copy as str slice
+        // SAFETY: bytes came from a valid UTF-8 str, and comments contain only ASCII
+        let slice = std::str::from_utf8(&bytes[start..j]).unwrap_or("");
+        result.push_str(slice);
+        j
     }
 
     /// Copy a line comment verbatim.
-    fn copy_line_comment(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
-        while i < bytes.len() && bytes[i] != b'\n' {
-            result.push(bytes[i] as char);
-            i += 1;
+    /// Uses batch slice copy instead of per-byte push.
+    fn copy_line_comment(bytes: &[u8], i: usize, result: &mut String) -> usize {
+        let len = bytes.len();
+        let mut j = i;
+        while j < len && bytes[j] != b'\n' {
+            j += 1;
         }
-        i
+        let slice = std::str::from_utf8(&bytes[i..j]).unwrap_or("");
+        result.push_str(slice);
+        j
     }
 
     /// Copy a pp-number (numeric literal) verbatim.
-    fn copy_ppnumber(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+    /// Uses batch slice copy instead of per-byte push.
+    fn copy_ppnumber(bytes: &[u8], i: usize, result: &mut String) -> usize {
         let len = bytes.len();
-        while i < len {
-            if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_' {
-                result.push(bytes[i] as char);
-                i += 1;
-            } else if (bytes[i] == b'+' || bytes[i] == b'-')
-                && i > 0
-                && matches!(bytes[i - 1], b'e' | b'E' | b'p' | b'P')
+        let mut j = i;
+        while j < len {
+            if bytes[j].is_ascii_alphanumeric() || bytes[j] == b'.' || bytes[j] == b'_' {
+                j += 1;
+            } else if (bytes[j] == b'+' || bytes[j] == b'-')
+                && j > i
+                && matches!(bytes[j - 1], b'e' | b'E' | b'p' | b'P')
             {
-                result.push(bytes[i] as char);
-                i += 1;
+                j += 1;
             } else {
                 break;
             }
         }
-        i
+        let slice = std::str::from_utf8(&bytes[i..j]).unwrap_or("");
+        result.push_str(slice);
+        j
     }
 
     /// Parse function-like macro arguments from bytes starting at the opening paren.
@@ -888,16 +942,27 @@ impl MacroTable {
             }
 
             if bytes[i] < 0x80 {
-                result.push(bytes[i] as char);
+                // Batch consecutive non-special ASCII bytes
+                let start = i;
+                i += 1;
+                while i < len
+                    && bytes[i] < 0x80
+                    && bytes[i] != PASTE_PROTECT_START
+                    && bytes[i] != b'"'
+                    && bytes[i] != b'\''
+                    && !is_ident_start_byte(bytes[i])
+                {
+                    i += 1;
+                }
+                let slice = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+                result.push_str(slice);
             } else {
                 let s = std::str::from_utf8(&bytes[i..])
                     .expect("substitute_params: source text is not valid UTF-8");
                 let ch = s.chars().next().unwrap();
                 result.push(ch);
                 i += ch.len_utf8();
-                continue;
             }
-            i += 1;
         }
 
         result

@@ -75,6 +75,9 @@ pub struct Preprocessor {
     /// On subsequent #include of the same file, if the guard macro is still defined,
     /// we skip re-processing entirely (same optimization as GCC/Clang).
     pub(super) include_guard_macros: FxHashMap<PathBuf, String>,
+    /// Reusable FxHashSet for directive-level macro expansion (handle_if, handle_elif,
+    /// handle_line_directive, #error). Avoids allocating a new FxHashSet per directive.
+    directive_expanding: FxHashSet<String>,
 }
 
 impl Preprocessor {
@@ -99,6 +102,7 @@ impl Preprocessor {
             force_include_output: String::new(),
             include_resolve_cache: FxHashMap::default(),
             include_guard_macros: FxHashMap::default(),
+            directive_expanding: FxHashSet::default(),
         };
         pp.define_predefined_macros();
         define_builtin_macros(&mut pp.macros);
@@ -445,15 +449,7 @@ impl Preprocessor {
     /// Set the filename for __FILE__ and __BASE_FILE__ macros and set as the base include directory.
     pub fn set_filename(&mut self, filename: &str) {
         self.filename = filename.to_string();
-        self.macros.define(MacroDef {
-            name: "__FILE__".to_string(),
-            is_function_like: false,
-            params: Vec::new(),
-            is_variadic: false,
-            has_named_variadic: false,
-            body: format!("\"{}\"", filename),
-            is_predefined: true,
-        });
+        self.macros.set_file(format!("\"{}\"", filename));
         // __BASE_FILE__ always expands to the main input file name,
         // unlike __FILE__ which changes during #include processing.
         self.macros.define(MacroDef {
@@ -556,17 +552,9 @@ impl Preprocessor {
         // Push onto include stack
         self.include_stack.push(resolved.clone());
 
-        // Save and set __FILE__
-        let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
-        self.macros.define(super::macro_defs::MacroDef {
-            name: "__FILE__".to_string(),
-            is_function_like: false,
-            params: Vec::new(),
-            is_variadic: false,
-            has_named_variadic: false,
-            body: format!("\"{}\"", resolved.display()),
-            is_predefined: true,
-        });
+        // Save and set __FILE__ (uses set_file to avoid full MacroDef allocation)
+        let old_file = self.macros.get_file_body().map(|s| s.to_string());
+        self.macros.set_file(format!("\"{}\"", resolved.display()));
 
         // Preprocess the included content (macros persist; any pragma synthetic tokens
         // like __ccc_visibility_push_hidden are collected and prepended to main output)
@@ -582,15 +570,7 @@ impl Preprocessor {
 
         // Restore __FILE__
         if let Some(old) = old_file {
-            self.macros.define(super::macro_defs::MacroDef {
-                name: "__FILE__".to_string(),
-                is_function_like: false,
-                params: Vec::new(),
-                is_variadic: false,
-                has_named_variadic: false,
-                body: old,
-                is_predefined: true,
-            });
+            self.macros.set_file(old);
         }
 
         // Pop include stack
@@ -669,7 +649,7 @@ impl Preprocessor {
             }
             "error" => {
                 // Expand macros in error message
-                let expanded = self.macros.expand_line(rest);
+                let expanded = self.macros.expand_line_reuse(rest, &mut self.directive_expanding);
                 self.errors.push(format!("#error {}", expanded));
             }
             "warning" => {
@@ -719,8 +699,8 @@ impl Preprocessor {
     fn handle_if(&mut self, expr: &str) {
         // First expand macros, then resolve `defined(X)` and `defined X`
         let resolved = self.resolve_defined_in_expr(expr);
-        // Expand macros in the resolved expression
-        let expanded = self.macros.expand_line(&resolved);
+        // Expand macros in the resolved expression (reuse directive_expanding set)
+        let expanded = self.macros.expand_line_reuse(&resolved, &mut self.directive_expanding);
         // Replace any remaining identifiers with 0 (standard C behavior for #if)
         let final_expr = self.replace_remaining_idents_with_zero(&expanded);
         let condition = evaluate_condition(&final_expr, &self.macros);
@@ -729,7 +709,7 @@ impl Preprocessor {
 
     fn handle_elif(&mut self, expr: &str) {
         let resolved = self.resolve_defined_in_expr(expr);
-        let expanded = self.macros.expand_line(&resolved);
+        let expanded = self.macros.expand_line_reuse(&resolved, &mut self.directive_expanding);
         let final_expr = self.replace_remaining_idents_with_zero(&expanded);
         let condition = evaluate_condition(&final_expr, &self.macros);
         self.conditionals.handle_elif(condition);
@@ -738,7 +718,7 @@ impl Preprocessor {
     fn handle_line_directive(&mut self, rest: &str, source_line_num: usize) {
         // #line digit-sequence ["filename"]
         // The argument undergoes macro expansion first
-        let expanded = self.macros.expand_line(rest);
+        let expanded = self.macros.expand_line_reuse(rest, &mut self.directive_expanding);
         let expanded = expanded.trim();
 
         // Parse the line number (first token)
@@ -755,15 +735,7 @@ impl Preprocessor {
                 if let Some(filename_str) = parts.next() {
                     let filename = filename_str.trim_matches('"');
                     if !filename.is_empty() {
-                        self.macros.define(MacroDef {
-                            name: "__FILE__".to_string(),
-                            is_function_like: false,
-                            params: Vec::new(),
-                            is_variadic: false,
-                            has_named_variadic: false,
-                            body: format!("\"{}\"", filename),
-                            is_predefined: true,
-                        });
+                        self.macros.set_file(format!("\"{}\"", filename));
                     }
                 }
             }

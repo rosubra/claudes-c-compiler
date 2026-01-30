@@ -167,7 +167,7 @@ pub struct TypeContext {
 
 impl TypeContext {
     pub fn new() -> Self {
-        Self {
+        let mut tc = Self {
             struct_layouts: RefCell::new(FxHashMap::default()),
             enum_constants: FxHashMap::default(),
             typedefs: FxHashMap::default(),
@@ -181,6 +181,140 @@ impl TypeContext {
             ctype_cache: RefCell::new(FxHashMap::default()),
             scope_stack: RefCell::new(Vec::new()),
             anon_ctype_counter: std::cell::Cell::new(0),
+        };
+        tc.seed_builtin_typedefs();
+        tc
+    }
+
+    /// Pre-populate typedef mappings for builtin/standard C types so that
+    /// sema can correctly resolve types like `uint64_t`, `size_t`, etc.
+    /// even when the source code does not `#include <stdint.h>`.
+    ///
+    /// Without this, sema's `resolve_typedef` falls back to `CType::Int`
+    /// for unresolved typedefs, causing functions returning `uint64_t`
+    /// to be recorded with a 32-bit return type.
+    fn seed_builtin_typedefs(&mut self) {
+        use crate::common::types::target_is_32bit;
+        let is_32bit = target_is_32bit();
+
+        // On ILP32 (i686): long=32bit, so 64-bit types must use LongLong
+        // On LP64 (x86-64, arm64, riscv64): long=64bit
+        let i64_type = if is_32bit { CType::LongLong } else { CType::Long };
+        let u64_type = if is_32bit { CType::ULongLong } else { CType::ULong };
+        let size_type = if is_32bit { CType::UInt } else { CType::ULong };
+        let ssize_type = if is_32bit { CType::Int } else { CType::Long };
+        let ptrdiff_type = if is_32bit { CType::Int } else { CType::Long };
+        let intptr_type = if is_32bit { CType::Int } else { CType::Long };
+        let uintptr_type = if is_32bit { CType::UInt } else { CType::ULong };
+        let fast_s = if is_32bit { CType::Int } else { CType::Long };
+        let fast_u = if is_32bit { CType::UInt } else { CType::ULong };
+        let long_s = CType::Long;
+        let long_u = CType::ULong;
+
+        let builtins: &[(&str, CType)] = &[
+            // <stddef.h>
+            ("size_t", size_type.clone()),
+            ("ssize_t", ssize_type.clone()),
+            ("ptrdiff_t", ptrdiff_type),
+            ("wchar_t", CType::Int),
+            ("wint_t", CType::UInt),
+            // <stdint.h> - exact width types
+            ("int8_t", CType::Char),
+            ("int16_t", CType::Short),
+            ("int32_t", CType::Int),
+            ("int64_t", i64_type.clone()),
+            ("uint8_t", CType::UChar),
+            ("uint16_t", CType::UShort),
+            ("uint32_t", CType::UInt),
+            ("uint64_t", u64_type.clone()),
+            ("intptr_t", intptr_type),
+            ("uintptr_t", uintptr_type),
+            ("intmax_t", i64_type.clone()),
+            ("uintmax_t", u64_type.clone()),
+            // least types
+            ("int_least8_t", CType::Char),
+            ("int_least16_t", CType::Short),
+            ("int_least32_t", CType::Int),
+            ("int_least64_t", i64_type.clone()),
+            ("uint_least8_t", CType::UChar),
+            ("uint_least16_t", CType::UShort),
+            ("uint_least32_t", CType::UInt),
+            ("uint_least64_t", u64_type.clone()),
+            // fast types
+            ("int_fast8_t", CType::Char),
+            ("int_fast16_t", fast_s.clone()),
+            ("int_fast32_t", fast_s.clone()),
+            ("int_fast64_t", i64_type.clone()),
+            ("uint_fast8_t", CType::UChar),
+            ("uint_fast16_t", fast_u.clone()),
+            ("uint_fast32_t", fast_u),
+            ("uint_fast64_t", u64_type.clone()),
+            // <signal.h>
+            ("sig_atomic_t", CType::Int),
+            // <time.h>
+            ("time_t", long_s.clone()),
+            ("clock_t", long_s.clone()),
+            ("timer_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("clockid_t", CType::Int),
+            // <sys/types.h>
+            ("off_t", long_s.clone()),
+            ("pid_t", CType::Int),
+            ("uid_t", CType::UInt),
+            ("gid_t", CType::UInt),
+            ("mode_t", CType::UInt),
+            ("dev_t", u64_type.clone()),
+            ("ino_t", u64_type.clone()),
+            ("nlink_t", u64_type.clone()),
+            ("blksize_t", long_s.clone()),
+            ("blkcnt_t", long_s),
+            // GNU/glibc common
+            ("ulong", long_u),
+            ("ushort", CType::UShort),
+            ("uint", CType::UInt),
+            ("__u8", CType::UChar),
+            ("__u16", CType::UShort),
+            ("__u32", CType::UInt),
+            ("__u64", u64_type.clone()),
+            ("__s8", CType::Char),
+            ("__s16", CType::Short),
+            ("__s32", CType::Int),
+            ("__s64", i64_type.clone()),
+            // <locale.h>
+            ("locale_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            // <pthread.h>
+            ("pthread_t", size_type),
+            ("pthread_mutex_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_cond_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_key_t", CType::UInt),
+            ("pthread_attr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_once_t", CType::Int),
+            ("pthread_mutexattr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("pthread_condattr_t", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            // <setjmp.h>
+            ("jmp_buf", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("sigjmp_buf", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            // <stdio.h>
+            ("FILE", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            ("fpos_t", ssize_type),
+            // <dirent.h>
+            ("DIR", CType::Pointer(Box::new(CType::Void), AddressSpace::Default)),
+            // POSIX internal names
+            ("__u_char", CType::UChar),
+            ("__u_short", CType::UShort),
+            ("__u_int", CType::UInt),
+            ("__u_long", CType::ULong),
+            ("__int8_t", CType::Char),
+            ("__int16_t", CType::Short),
+            ("__int32_t", CType::Int),
+            ("__uint8_t", CType::UChar),
+            ("__uint16_t", CType::UShort),
+            ("__uint32_t", CType::UInt),
+            // __int64_t/__uint64_t: must be LongLong on ILP32, Long on LP64
+            ("__int64_t", i64_type),
+            ("__uint64_t", u64_type),
+        ];
+        for (name, ct) in builtins {
+            self.typedefs.insert(name.to_string(), ct.clone());
         }
     }
 

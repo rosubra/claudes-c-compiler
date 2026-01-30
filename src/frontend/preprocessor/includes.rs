@@ -344,17 +344,9 @@ impl Preprocessor {
                     // Push onto include stack
                     self.include_stack.push(resolved_path.clone());
 
-                    // Update __FILE__
-                    let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
-                    self.macros.define(MacroDef {
-                        name: "__FILE__".to_string(),
-                        is_function_like: false,
-                        params: Vec::new(),
-                        is_variadic: false,
-                        has_named_variadic: false,
-                        body: format!("\"{}\"", resolved_path.display()),
-                        is_predefined: true,
-                    });
+                    // Update __FILE__ (uses set_file to avoid full MacroDef allocation)
+                    let old_file = self.macros.get_file_body().map(|s| s.to_string());
+                    self.macros.set_file(format!("\"{}\"", resolved_path.display()));
 
                     // Emit line marker for entering the included file
                     // Flag 1 indicates entering a new include file (GCC convention)
@@ -365,15 +357,7 @@ impl Preprocessor {
 
                     // Restore __FILE__
                     if let Some(old) = old_file {
-                        self.macros.define(MacroDef {
-                            name: "__FILE__".to_string(),
-                            is_function_like: false,
-                            params: Vec::new(),
-                            is_variadic: false,
-                            has_named_variadic: false,
-                            body: old,
-                            is_predefined: true,
-                        });
+                        self.macros.set_file(old);
                     }
 
                     // Pop include stack
@@ -467,16 +451,8 @@ impl Preprocessor {
 
                     self.include_stack.push(resolved_path.clone());
 
-                    let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
-                    self.macros.define(MacroDef {
-                        name: "__FILE__".to_string(),
-                        is_function_like: false,
-                        params: Vec::new(),
-                        is_variadic: false,
-                        has_named_variadic: false,
-                        body: format!("\"{}\"", resolved_path.display()),
-                        is_predefined: true,
-                    });
+                    let old_file = self.macros.get_file_body().map(|s| s.to_string());
+                    self.macros.set_file(format!("\"{}\"", resolved_path.display()));
 
                     // Emit line marker for entering the included file
                     // Flag 1 indicates entering a new include file (GCC convention)
@@ -485,15 +461,7 @@ impl Preprocessor {
                     result.push_str(&self.preprocess_included(&content));
 
                     if let Some(old) = old_file {
-                        self.macros.define(MacroDef {
-                            name: "__FILE__".to_string(),
-                            is_function_like: false,
-                            params: Vec::new(),
-                            is_variadic: false,
-                            has_named_variadic: false,
-                            body: old,
-                            is_predefined: true,
-                        });
+                        self.macros.set_file(old);
                     }
 
                     self.include_stack.pop();
