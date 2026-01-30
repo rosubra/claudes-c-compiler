@@ -109,7 +109,31 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     // Type queries (compile-time constants)
     m.insert("__builtin_constant_p", BuiltinInfo::intrinsic(BuiltinIntrinsic::ConstantP));
     m.insert("__builtin_object_size", BuiltinInfo::intrinsic(BuiltinIntrinsic::ObjectSize));
+    m.insert("__builtin_dynamic_object_size", BuiltinInfo::intrinsic(BuiltinIntrinsic::ObjectSize));
     m.insert("__builtin_classify_type", BuiltinInfo::intrinsic(BuiltinIntrinsic::ClassifyType));
+
+    // Fortification builtins: __builtin___*_chk variants used by glibc's _FORTIFY_SOURCE.
+    // These forward all arguments to the glibc __*_chk runtime function.
+    m.insert("__builtin___memcpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___memmove_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___memset_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___strcpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___strncpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___strcat_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___strncat_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___sprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___snprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___vsprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___vsnprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___printf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___fprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___vprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___vfprintf_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___mempcpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___stpcpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin___stpncpy_chk", BuiltinInfo::intrinsic(BuiltinIntrinsic::FortifyChk));
+    m.insert("__builtin_va_arg_pack", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaArgPack));
+    m.insert("__builtin_va_arg_pack_len", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaArgPack));
     // Note: __builtin_types_compatible_p is handled as a special AST node (BuiltinTypesCompatibleP),
     // parsed directly in the parser and evaluated at compile-time in the lowerer.
 
@@ -588,6 +612,10 @@ pub enum BuiltinIntrinsic {
     X86Pextrb128,      // _mm_extract_epi8 (PEXTRB)
     X86Pinsrq128,      // _mm_insert_epi64 (PINSRQ)
     X86Pextrq128,      // _mm_extract_epi64 (PEXTRQ)
+    /// __builtin___*_chk: fortification builtins that forward to unchecked libc equivalents
+    FortifyChk,
+    /// __builtin_va_arg_pack(): used in always_inline fortification wrappers, returns 0
+    VaArgPack,
 }
 
 impl BuiltinInfo {

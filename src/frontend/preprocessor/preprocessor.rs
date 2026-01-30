@@ -652,6 +652,11 @@ impl Preprocessor {
         });
     }
 
+    /// Undefine a macro by name.
+    pub fn undefine_macro(&mut self, name: &str) {
+        self.macros.undefine(name);
+    }
+
     /// Add an include search path for #include directives (-I flag).
     /// Adds regardless of whether the directory currently exists.
     pub fn add_include_path(&mut self, path: &str) {

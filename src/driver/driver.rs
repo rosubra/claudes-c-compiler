@@ -607,6 +607,14 @@ impl Driver {
         for def in &self.defines {
             preprocessor.define_macro(&def.name, &def.value);
         }
+        // Disable _FORTIFY_SOURCE: glibc's fortification headers define extern
+        // always_inline wrapper functions that use __builtin_va_arg_pack() and
+        // __builtin_va_arg_pack_len(), which are GCC-specific constructs that
+        // only work when the wrapper is inlined into the caller. Since we cannot
+        // fully support these constructs, the wrappers produce incorrect code
+        // (infinite recursion or wrong control flow). Undefining _FORTIFY_SOURCE
+        // prevents these wrappers from being emitted.
+        preprocessor.undefine_macro("_FORTIFY_SOURCE");
         for path in &self.include_paths {
             preprocessor.add_include_path(path);
         }

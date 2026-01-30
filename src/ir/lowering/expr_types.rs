@@ -351,6 +351,20 @@ impl Lowerer {
             // CPU feature detection builtins return int
             "__builtin_cpu_init" => Some(IrType::I32),
             "__builtin_cpu_supports" => Some(IrType::I32),
+            // Fortification builtins: return type matches the underlying libc function
+            // Memory/string functions return pointer (dest)
+            "__builtin___memcpy_chk" | "__builtin___memmove_chk" | "__builtin___memset_chk"
+            | "__builtin___strcpy_chk" | "__builtin___strncpy_chk"
+            | "__builtin___strcat_chk" | "__builtin___strncat_chk"
+            | "__builtin___mempcpy_chk" | "__builtin___stpcpy_chk"
+            | "__builtin___stpncpy_chk" => Some(IrType::Ptr),
+            // printf/fprintf/sprintf/snprintf return int
+            "__builtin___sprintf_chk" | "__builtin___snprintf_chk"
+            | "__builtin___vsprintf_chk" | "__builtin___vsnprintf_chk"
+            | "__builtin___printf_chk" | "__builtin___fprintf_chk"
+            | "__builtin___vprintf_chk" | "__builtin___vfprintf_chk" => Some(IrType::I32),
+            // __builtin_va_arg_pack / __builtin_va_arg_pack_len return int
+            "__builtin_va_arg_pack" | "__builtin_va_arg_pack_len" => Some(IrType::I32),
             _ => None,
         }
     }

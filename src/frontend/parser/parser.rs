@@ -191,6 +191,20 @@ impl ParsedDeclAttrs {
     fn set_flag(&mut self, mask: u32, v: bool) {
         if v { self.flags |= mask; } else { self.flags &= !mask; }
     }
+
+    /// Save the packed boolean flags for later restoration.
+    /// Used to prevent storage-class flags from leaking out of compound
+    /// statements and typeof expressions.
+    #[inline]
+    pub fn save_flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Restore previously saved packed boolean flags.
+    #[inline]
+    pub fn restore_flags(&mut self, saved: u32) {
+        self.flags = saved;
+    }
 }
 
 impl std::fmt::Debug for ParsedDeclAttrs {

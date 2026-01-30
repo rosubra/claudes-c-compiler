@@ -406,6 +406,21 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Pinsrq128 | BuiltinIntrinsic::X86Pextrq128 => {
                 self.lower_x86_intrinsic(intrinsic, args)
             }
+            // __builtin___*_chk: fortification builtins forward to unchecked libc equivalents.
+            // Each __builtin___X_chk(args..., extra_check_args...) becomes X(args...).
+            BuiltinIntrinsic::FortifyChk => {
+                return self.lower_fortify_chk(name, args);
+            }
+            // TODO: __builtin_va_arg_pack / __builtin_va_arg_pack_len are stubbed
+            // to return 0. Proper implementation requires forwarding the caller's
+            // variadic args during inlining. Since _FORTIFY_SOURCE is disabled,
+            // this code path should not be reached in practice.
+            BuiltinIntrinsic::VaArgPack => {
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                Some(Operand::Const(IrConst::I32(0)))
+            }
             // __builtin_frame_address(level) / __builtin_return_address(level)
             // Only level 0 is supported; higher levels return 0.
             BuiltinIntrinsic::FrameAddress | BuiltinIntrinsic::ReturnAddress => {
@@ -438,6 +453,79 @@ impl Lowerer {
                 }
             }
         }
+    }
+
+    /// Lower __builtin___X_chk fortification builtins by forwarding all arguments
+    /// to the glibc __X_chk runtime function (e.g., __builtin___snprintf_chk -> __snprintf_chk).
+    /// This avoids infinite recursion when glibc's fortification headers redefine functions
+    /// like snprintf as always_inline wrappers that call __builtin___snprintf_chk.
+    fn lower_fortify_chk(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // Map __builtin___X_chk to the glibc runtime __X_chk function.
+        // All arguments are forwarded as-is (the runtime function does the checking).
+        let libc_chk_name: &str = match name {
+            "__builtin___memcpy_chk" => "__memcpy_chk",
+            "__builtin___memmove_chk" => "__memmove_chk",
+            "__builtin___memset_chk" => "__memset_chk",
+            "__builtin___strcpy_chk" => "__strcpy_chk",
+            "__builtin___strncpy_chk" => "__strncpy_chk",
+            "__builtin___strcat_chk" => "__strcat_chk",
+            "__builtin___strncat_chk" => "__strncat_chk",
+            "__builtin___sprintf_chk" => "__sprintf_chk",
+            "__builtin___snprintf_chk" => "__snprintf_chk",
+            "__builtin___vsprintf_chk" => "__vsprintf_chk",
+            "__builtin___vsnprintf_chk" => "__vsnprintf_chk",
+            "__builtin___printf_chk" => "__printf_chk",
+            "__builtin___fprintf_chk" => "__fprintf_chk",
+            "__builtin___vprintf_chk" => "__vprintf_chk",
+            "__builtin___vfprintf_chk" => "__vfprintf_chk",
+            "__builtin___mempcpy_chk" => "__mempcpy_chk",
+            "__builtin___stpcpy_chk" => "__stpcpy_chk",
+            "__builtin___stpncpy_chk" => "__stpncpy_chk",
+            _ => {
+                // Unknown _chk variant: lower all args for side effects, return 0
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                return Some(Operand::Const(IrConst::I64(0)));
+            }
+        };
+
+        // Only the non-v* printf-family _chk builtins are truly variadic (they take ...).
+        // The v* variants (vsprintf_chk, etc.) take a va_list argument instead, which is
+        // a regular pointer parameter, not variadic.
+        let is_variadic = matches!(name,
+            "__builtin___sprintf_chk" | "__builtin___snprintf_chk"
+            | "__builtin___printf_chk" | "__builtin___fprintf_chk"
+        );
+
+        // Lower all arguments in order
+        let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+        let arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
+
+        let dest = self.fresh_value();
+        let return_type = Self::builtin_return_type(name)
+            .unwrap_or(crate::common::types::target_int_ir_type());
+        let n_fixed = arg_vals.len(); // All explicitly passed args are "fixed" from our perspective
+        let struct_arg_sizes = vec![None; arg_vals.len()];
+        self.emit(Instruction::Call {
+            func: libc_chk_name.to_string(),
+            info: CallInfo {
+                dest: Some(dest),
+                args: arg_vals,
+                arg_types,
+                return_type,
+                is_variadic,
+                num_fixed_args: n_fixed,
+                struct_arg_sizes,
+                struct_arg_aligns: vec![],
+                struct_arg_classes: Vec::new(),
+                struct_arg_riscv_float_classes: Vec::new(),
+                is_sret: false,
+                is_fastcall: false,
+                ret_eightbyte_classes: Vec::new(),
+            },
+        });
+        Some(Operand::Value(dest))
     }
 
     /// Lower __builtin_is{greater,less,unordered,...} float comparison builtins.

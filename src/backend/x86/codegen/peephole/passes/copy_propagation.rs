@@ -28,6 +28,11 @@ fn try_propagate_into(
     src_id: RegId,
     dst_id: RegId,
 ) -> bool {
+    // Never propagate into opaque lines (inline asm, multi-instruction sequences)
+    if infos[j].has_indirect_mem {
+        return false;
+    }
+
     let trimmed = infos[j].trimmed(store.get(j));
 
     // The instruction must reference the destination register
@@ -119,6 +124,16 @@ pub(super) fn propagate_register_copies(store: &mut LineStore, infos: &mut [Line
         }
 
         if infos[i].is_nop() {
+            i += 1;
+            continue;
+        }
+
+        // Lines with indirect memory access (including semicolon-separated
+        // inline asm like "pushf ; pop %rcx") are opaque: don't propagate
+        // into them and invalidate all copies, since we can't determine which
+        // registers the multi-instruction sequence reads or writes.
+        if infos[i].has_indirect_mem {
+            copy_src = [REG_NONE; 16];
             i += 1;
             continue;
         }

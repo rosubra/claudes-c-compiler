@@ -19,6 +19,14 @@ impl Parser {
         // Save typedef shadowing state for this scope
         let saved_shadowed = self.shadowed_typedefs.clone();
 
+        // Save declaration attribute flags so that storage-class specifiers
+        // (extern, static, typedef, etc.) from declarations inside this
+        // compound statement do not leak into the enclosing context.
+        // This is critical for statement expressions inside typeof():
+        //   typeof(({ extern void f(void); 42; })) x = 10;
+        // Without this, the `extern` from `f` leaks and makes `x` extern.
+        let saved_attr_flags = self.attrs.save_flags();
+
         // Parse GNU __label__ declarations at the start of the block.
         // These must appear before any statements or declarations.
         // Syntax: __label__ ident1, ident2, ... ;
@@ -79,6 +87,7 @@ impl Parser {
 
         self.expect_closing(&TokenKind::RBrace, open_brace);
         self.shadowed_typedefs = saved_shadowed;
+        self.attrs.restore_flags(saved_attr_flags);
         CompoundStmt { items, span: start, local_labels }
     }
 
