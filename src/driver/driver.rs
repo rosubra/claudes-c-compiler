@@ -452,7 +452,7 @@ impl Driver {
                 // Machine/target flags
                 "-mfunction-return=thunk-extern" => self.function_return_thunk = true,
                 "-mindirect-branch=thunk-extern" => self.indirect_branch_thunk = true,
-                "-m16" => self.gcc_fallback = true,
+                "-m16" => self.gcc_fallback = true, // TODO: replace with I686 once -m32 working
                 "-m32" => {
                     // When USE_MY_32=1 environment variable is set, use our i686 backend
                     // instead of falling back to GCC. This allows iterative testing of

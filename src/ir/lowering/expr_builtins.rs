@@ -57,7 +57,8 @@ impl Lowerer {
                 // __builtin_alloca should still be overridable by user definitions.
                 let is_sse_intrinsic = name.starts_with("__builtin_ia32_")
                     || name.starts_with("_mm_")
-                    || name.starts_with("_mm256_");
+                    || name.starts_with("_mm256_")
+                    || name.starts_with("_mm512_");
                 if !is_sse_intrinsic {
                     return None;
                 }

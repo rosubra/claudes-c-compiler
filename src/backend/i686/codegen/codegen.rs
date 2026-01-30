@@ -1517,6 +1517,46 @@ impl ArchCodegen for I686Codegen {
         // Use the classified parameter offsets from emit_store_params for accuracy.
         use crate::backend::call_emit::ParamClass;
 
+        // Optimization: if the ParamRef destination slot is the same as the param's
+        // alloca slot (which emit_store_params already populated), skip the redundant
+        // load-store. The stack layout pass coalesces ParamRef dest slots with param
+        // alloca slots, so this is the common case when mem2reg cannot promote the alloca.
+        if param_idx < self.state.param_alloca_slots.len() {
+            if let Some((alloca_slot, _alloca_ty)) = self.state.param_alloca_slots[param_idx] {
+                if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                    if dest_slot.0 == alloca_slot.0 {
+                        // emit_store_params already copied the parameter value into
+                        // this slot -- emitting another copy is a no-op self-store.
+                        return;
+                    }
+                }
+                // Dest is a different slot: load from the alloca (already populated)
+                // instead of re-reading the original parameter location.
+                if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                    if is_i128_type(ty) {
+                        for i in (0..16).step_by(4) {
+                            emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0 + i as i64);
+                            emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + i as i64);
+                        }
+                    } else if ty == IrType::F128 {
+                        emit!(self.state, "    fldt {}(%ebp)", alloca_slot.0);
+                        emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                        self.state.f128_direct_slots.insert(dest.0);
+                    } else if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
+                        emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0);
+                        emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0);
+                        emit!(self.state, "    movl {}(%ebp), %eax", alloca_slot.0 + 4);
+                        emit!(self.state, "    movl %eax, {}(%ebp)", dest_slot.0 + 4);
+                    } else {
+                        let load_instr = self.mov_load_for_type(ty);
+                        emit!(self.state, "    {} {}(%ebp), %eax", load_instr, alloca_slot.0);
+                        self.store_eax_to(dest);
+                    }
+                    return;
+                }
+            }
+        }
+
         // For fastcall register params, the value was already stored to the param's
         // alloca slot by emit_store_params (from ecx/edx). Read from that slot.
         if self.is_fastcall && param_idx < self.fastcall_reg_param_count {
