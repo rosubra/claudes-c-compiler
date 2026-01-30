@@ -21,6 +21,7 @@
 use crate::ir::ir::IrConst;
 use crate::frontend::parser::ast::{BinOp, Expr};
 use super::const_arith;
+use super::types::target_is_32bit;
 
 /// Evaluate a literal expression to an IrConst.
 /// Returns None for non-literal expressions.
@@ -101,21 +102,46 @@ pub fn eval_builtin_call(
             let v = val.to_i64()? as u64;
             Some(IrConst::I64(v.swap_bytes() as i64))
         }
-        "__builtin_clz" | "__builtin_clzl" => {
+        // For 'l' suffix builtins, the operand width depends on the target:
+        // LP64 (x86-64, ARM64, RISC-V 64): long is 64-bit
+        // ILP32 (i686): long is 32-bit
+        "__builtin_clz" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u32;
             Some(IrConst::I32(v.leading_zeros() as i32))
+        }
+        "__builtin_clzl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as u32;
+                Some(IrConst::I32(v.leading_zeros() as i32))
+            } else {
+                let v = val.to_i64()? as u64;
+                Some(IrConst::I32(v.leading_zeros() as i32))
+            }
         }
         "__builtin_clzll" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u64;
             Some(IrConst::I32(v.leading_zeros() as i32))
         }
-        "__builtin_ctz" | "__builtin_ctzl" => {
+        "__builtin_ctz" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u32;
             if v == 0 { Some(IrConst::I32(32)) }
             else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
+        }
+        "__builtin_ctzl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as u32;
+                if v == 0 { Some(IrConst::I32(32)) }
+                else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
+            } else {
+                let v = val.to_i64()? as u64;
+                if v == 0 { Some(IrConst::I32(64)) }
+                else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
+            }
         }
         "__builtin_ctzll" => {
             let val = eval_fn(args.first()?)?;
@@ -123,21 +149,43 @@ pub fn eval_builtin_call(
             if v == 0 { Some(IrConst::I32(64)) }
             else { Some(IrConst::I32(v.trailing_zeros() as i32)) }
         }
-        "__builtin_popcount" | "__builtin_popcountl" => {
+        "__builtin_popcount" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u32;
             Some(IrConst::I32(v.count_ones() as i32))
+        }
+        "__builtin_popcountl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as u32;
+                Some(IrConst::I32(v.count_ones() as i32))
+            } else {
+                let v = val.to_i64()? as u64;
+                Some(IrConst::I32(v.count_ones() as i32))
+            }
         }
         "__builtin_popcountll" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u64;
             Some(IrConst::I32(v.count_ones() as i32))
         }
-        "__builtin_ffs" | "__builtin_ffsl" => {
+        "__builtin_ffs" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u32;
             if v == 0 { Some(IrConst::I32(0)) }
             else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
+        }
+        "__builtin_ffsl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as u32;
+                if v == 0 { Some(IrConst::I32(0)) }
+                else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
+            } else {
+                let v = val.to_i64()? as u64;
+                if v == 0 { Some(IrConst::I32(0)) }
+                else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
+            }
         }
         "__builtin_ffsll" => {
             let val = eval_fn(args.first()?)?;
@@ -145,22 +193,46 @@ pub fn eval_builtin_call(
             if v == 0 { Some(IrConst::I32(0)) }
             else { Some(IrConst::I32(v.trailing_zeros() as i32 + 1)) }
         }
-        "__builtin_parity" | "__builtin_parityl" => {
+        "__builtin_parity" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u32;
             Some(IrConst::I32((v.count_ones() % 2) as i32))
+        }
+        "__builtin_parityl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as u32;
+                Some(IrConst::I32((v.count_ones() % 2) as i32))
+            } else {
+                let v = val.to_i64()? as u64;
+                Some(IrConst::I32((v.count_ones() % 2) as i32))
+            }
         }
         "__builtin_parityll" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as u64;
             Some(IrConst::I32((v.count_ones() % 2) as i32))
         }
-        "__builtin_clrsb" | "__builtin_clrsbl" => {
+        "__builtin_clrsb" => {
             let val = eval_fn(args.first()?)?;
             let v = val.to_i64()? as i32;
             let result = if v < 0 { (!v as u32).leading_zeros() as i32 - 1 }
                          else { (v as u32).leading_zeros() as i32 - 1 };
             Some(IrConst::I32(result))
+        }
+        "__builtin_clrsbl" => {
+            let val = eval_fn(args.first()?)?;
+            if target_is_32bit() {
+                let v = val.to_i64()? as i32;
+                let result = if v < 0 { (!v as u32).leading_zeros() as i32 - 1 }
+                             else { (v as u32).leading_zeros() as i32 - 1 };
+                Some(IrConst::I32(result))
+            } else {
+                let v = val.to_i64()?;
+                let result = if v < 0 { (!v as u64).leading_zeros() as i32 - 1 }
+                             else { (v as u64).leading_zeros() as i32 - 1 };
+                Some(IrConst::I32(result))
+            }
         }
         "__builtin_clrsbll" => {
             let val = eval_fn(args.first()?)?;
