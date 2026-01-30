@@ -662,6 +662,14 @@ impl Lowerer {
     }
 
     pub(super) fn lower_address_of(&mut self, inner: &Expr) -> Operand {
+        // Try to constant-fold offsetof patterns: &((type*)0)->member
+        // This is critical for BUILD_BUG_ON / __compiletime_assert in the Linux kernel,
+        // which uses __builtin_offsetof (expanded to this pattern) in if-conditions
+        // that must be dead-code-eliminated.
+        if let Some(constant) = self.eval_offsetof_pattern(inner) {
+            return Operand::Const(constant);
+        }
+
         if let Expr::CompoundLiteral(type_spec, init, _) = inner {
             let ty = self.type_spec_to_ir(type_spec);
             let size = self.sizeof_type(type_spec);

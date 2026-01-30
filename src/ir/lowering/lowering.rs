@@ -703,7 +703,10 @@ impl Lowerer {
                         && func.attrs.is_inline() && !func.attrs.is_extern()
                         && !func.attrs.is_static() && !func.attrs.is_gnu_inline()
                         && !self.has_non_inline_decl.contains(&func.name);
-                    if is_c99_inline_only {
+                    if is_c99_inline_only && !func.attrs.is_always_inline() {
+                        // C99 inline-only functions don't provide an external definition
+                        // and can be skipped entirely. However, always_inline functions
+                        // must be lowered (as static) so their body is available for inlining.
                         continue;
                     }
                     let can_skip = if func.attrs.is_static() {
@@ -711,6 +714,10 @@ impl Lowerer {
                         true
                     } else if is_gnu_inline_no_extern_def {
                         // extern inline (gnu89 or gnu_inline attr): no external def, skip if unreferenced
+                        true
+                    } else if is_c99_inline_only && func.attrs.is_always_inline() {
+                        // C99 inline-only + always_inline: lowered as static for inlining,
+                        // skip if unreferenced
                         true
                     } else {
                         false

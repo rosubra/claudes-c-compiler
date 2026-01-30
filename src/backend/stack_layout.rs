@@ -1189,24 +1189,24 @@ fn classify_instructions(
                 if *param_idx < func.param_alloca_values.len() {
                     let alloca_val = func.param_alloca_values[*param_idx];
                     if !modified_param_allocas.contains(&alloca_val.0) {
-                    if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
-                        state.value_locations.insert(dest.0, slot);
-                        // Propagate type tracking even when reusing the alloca
-                        // slot, so downstream Copy instructions use the correct
-                        // multi-word paths for wide/i128/f128 values.
-                        if matches!(ty, IrType::I128 | IrType::U128) {
-                            state.i128_values.insert(dest.0);
-                        }
-                        if crate::common::types::target_is_32bit() {
-                            if matches!(ty, IrType::F64 | IrType::I64 | IrType::U64) {
-                                state.wide_values.insert(dest.0);
+                        if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
+                            state.value_locations.insert(dest.0, slot);
+                            // Propagate type tracking even when reusing the alloca
+                            // slot, so downstream Copy instructions use the correct
+                            // multi-word paths for wide/i128/f128 values.
+                            if matches!(ty, IrType::I128 | IrType::U128) {
+                                state.i128_values.insert(dest.0);
                             }
+                            if crate::common::types::target_is_32bit() {
+                                if matches!(ty, IrType::F64 | IrType::I64 | IrType::U64) {
+                                    state.wide_values.insert(dest.0);
+                                }
+                            }
+                            continue;
                         }
-                        continue;
-                    }
                     }
                 }
-                // Fallthrough: if no alloca slot found, classify normally.
+                // Fallthrough: if alloca not found or modified, classify normally.
                 classify_value(
                     state, *dest, inst, ctx, reg_assigned,
                     &mut collected_values, multi_block_values,

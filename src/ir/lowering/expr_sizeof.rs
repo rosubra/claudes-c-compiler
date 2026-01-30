@@ -164,8 +164,11 @@ impl Lowerer {
     /// Get the sizeof for a member access expression.
     fn sizeof_member_access(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> usize {
         if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_pointer) {
-            let sz = self.ctype_size(&ctype);
-            if sz > 0 { return sz; }
+            // Trust the CType-based size when we have a resolved field type.
+            // Size 0 is valid for zero-length arrays (char arr[0]) and empty structs/unions.
+            // The IrType fallback below would incorrectly return pointer size (8) for arrays
+            // because IrType::from_ctype decays all arrays to IrType::Ptr.
+            return self.ctype_size(&ctype);
         }
         if is_pointer {
             let (_, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);

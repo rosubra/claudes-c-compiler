@@ -277,6 +277,15 @@ impl Lowerer {
             }
             return None;
         }
+        // For typeof(expr), resolve through the expression's CType.
+        // This handles patterns like typeof(*ptr) where ptr is a struct pointer,
+        // which appear in offsetof patterns: &((typeof(*ptr) *)0)->member
+        if let TypeSpecifier::Typeof(expr) = ts {
+            if let Some(ctype) = self.get_expr_ctype(expr) {
+                return self.struct_layout_from_ctype(&ctype);
+            }
+            return None;
+        }
         let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {

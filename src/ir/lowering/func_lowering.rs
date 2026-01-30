@@ -536,8 +536,11 @@ impl Lowerer {
         // static. This ensures all TUs that take the address of an inline function
         // resolve to the same symbol, and the strong `extern inline` definition
         // from the TU that provides it overrides the weak copies at link time.
+        // Exception: C99 inline + always_inline functions are lowered as static
+        // since they must be inlined and don't need an external definition.
+        let is_c99_inline_always_inline = is_c99_inline_def && func.attrs.is_always_inline();
         let is_static = func.attrs.is_static() || self.static_functions.contains(&func.name)
-            || is_gnu_inline_no_extern_def;
+            || is_gnu_inline_no_extern_def || is_c99_inline_always_inline;
         let next_val = self.func_mut().next_value;
         let param_alloca_vals = std::mem::take(&mut self.func_mut().param_alloca_values);
         let global_init_labels = std::mem::take(&mut self.func_mut().global_init_label_blocks);
@@ -556,7 +559,7 @@ impl Lowerer {
             next_value_id: next_val,
             section: func.attrs.section.clone(),
             visibility: func.attrs.visibility.clone(),
-            is_weak: func.attrs.is_weak() || is_c99_inline_def,
+            is_weak: func.attrs.is_weak() || (is_c99_inline_def && !is_c99_inline_always_inline),
             is_used: func.attrs.is_used(),
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,

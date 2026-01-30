@@ -379,7 +379,7 @@ impl Lowerer {
     /// Evaluate the offsetof pattern: &((type*)0)->member
     /// Also handles nested member access like &((type*)0)->data.x
     /// Returns Some(IrConst with offset) if the expression matches the pattern.
-    fn eval_offsetof_pattern(&self, expr: &Expr) -> Option<IrConst> {
+    pub(super) fn eval_offsetof_pattern(&self, expr: &Expr) -> Option<IrConst> {
         let (offset, _ty) = self.eval_offsetof_pattern_with_type(expr)?;
         Some(IrConst::ptr_int(offset as i64))
     }
