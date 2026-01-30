@@ -90,7 +90,9 @@ impl Lowerer {
                 }
             }
         }
-        let sret_threshold = if crate::common::types::target_is_32bit() { 8 } else { 16 };
+        // On i686, the i386 SysV ABI uses sret for ALL struct sizes (threshold 0).
+        // On 64-bit targets, structs > 16 bytes use sret.
+        let sret_threshold = if crate::common::types::target_is_32bit() { 0 } else { 16 };
         if struct_size > sret_threshold {
             let src_addr = self.get_struct_base_addr(e);
             let sret_ptr = self.fresh_value();
@@ -196,7 +198,13 @@ impl Lowerer {
     }
 
     /// Try small struct return (<= 8 bytes loaded as I64).
+    /// Only used on 64-bit targets; on i686, ALL structs use sret.
     fn try_small_struct_return(&mut self, e: &Expr) -> Option<Operand> {
+        // On i686, the i386 SysV ABI uses sret for ALL struct returns.
+        // Small structs must not be packed into eax:edx registers.
+        if crate::common::types::target_is_32bit() {
+            return None;
+        }
         // Complex types are handled by try_complex_return, not struct return paths.
         // Packed complex float params have is_struct=true but must not be treated as
         // struct returns -- they need proper complex-to-scalar conversion.

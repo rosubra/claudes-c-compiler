@@ -1,0 +1,17 @@
+Fix do-while loop pointer register mistrack
+
+Bug: When a pointer variable is incremented in a do-while loop and then used
+after the loop exits, the compiler uses a different register (r11, which was
+never assigned) instead of the register holding the updated pointer (r10).
+
+Example:
+  const char *in = ...;
+  do { in++; } while (tbl[(int)*in]);
+  return in - start;  // uses wrong register for 'in'
+
+Root cause: The register allocator or codegen loses track of which register
+holds the pointer variable after the loop back-edge. The loop correctly
+increments r10, but the post-loop code reads from r11 (uninitialized).
+
+Affects: lacc (all tests fail), likely many other projects with similar patterns
+Status: in_progress

@@ -2768,8 +2768,7 @@ impl ArchCodegen for I686Codegen {
         if let Some(val) = val {
             let ret_ty = self.current_return_type;
             // I64/U64 returns on i686: load both halves into eax:edx.
-            // This is used for small struct returns (5-8 bytes packed as I64)
-            // and for long long return values.
+            // This is used for long long return values and _Complex float.
             if ret_ty == IrType::I64 || ret_ty == IrType::U64 {
                 self.emit_load_acc_pair(val);
                 self.emit_epilogue_and_ret(frame_size);

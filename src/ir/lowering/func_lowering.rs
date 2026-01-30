@@ -120,16 +120,15 @@ impl Lowerer {
             if sig.two_reg_ret_size.is_some() {
                 return IrType::I128;
             }
-            // Small struct/vector returns (≤8 bytes) are packed into I64 by
-            // try_small_struct_return. On 32-bit targets, the function return type
-            // must be I64 (not Ptr) so the codegen uses the eax:edx register pair
-            // for the full 8-byte value.
-            // On 64-bit targets, small vector returns also need I64 (not Ptr) so
-            // the codegen returns the packed data in a register, not as a pointer.
+            // Small vector returns (≤8 bytes) are packed into I64 by the
+            // lowering. On 64-bit targets, small struct returns also use I64.
+            // On 32-bit targets (i686), ALL struct/union returns use sret, so
+            // this struct branch is now unreachable for i686; kept as a safety
+            // fallback for indirect calls with missing signatures.
             if sig.sret_size.is_none() && sig.two_reg_ret_size.is_none() {
                 if let Some(ref rc) = sig.return_ctype {
                     if rc.is_struct_or_union() && crate::common::types::target_is_32bit() {
-                        return IrType::I64;
+                        return IrType::Ptr;
                     }
                     if rc.is_vector() {
                         // Small vectors (≤8 bytes) must return I64 so the packed
