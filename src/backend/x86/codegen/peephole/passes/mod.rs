@@ -747,7 +747,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: memory fold doesn't handle Cmp-classified instructions yet
     fn test_mem_fold_cmpq_rcx() {
         let asm = [
             "    movq -8(%rbp), %rcx",
@@ -756,6 +755,17 @@ mod tests {
         let result = peephole_optimize(asm);
         assert!(result.contains("cmpq -8(%rbp), %rax"),
             "should fold load+cmp into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_testq_rcx() {
+        let asm = [
+            "    movq -16(%rbp), %rcx",
+            "    testq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("testq -16(%rbp), %rax"),
+            "should fold load+test into memory operand: {}", result);
     }
 
     #[test]

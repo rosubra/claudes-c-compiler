@@ -43,7 +43,7 @@ use super::type_context::{TypeContext, FunctionTypedefInfo};
 use super::const_eval::{SemaConstEval, ConstMap};
 
 use std::cell::{Cell, RefCell};
-use crate::common::fx_hash::FxHashMap;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 
 /// Outcome of a case segment in a switch statement for -Wreturn-type analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +130,12 @@ pub struct SemanticAnalyzer {
     /// Uses RefCell for interior mutability so that &self methods (e.g.,
     /// eval_const_expr_as_usize from TypeConvertContext) can emit diagnostics.
     diagnostics: RefCell<DiagnosticEngine>,
+    /// Set of struct/union keys that have been defined (with a body, even if
+    /// empty). Used to distinguish `struct X {}` (defined, complete) from
+    /// `struct X;` (forward declaration, incomplete) for the incomplete type
+    /// check. Uses RefCell for interior mutability since resolve_struct_or_union
+    /// takes &self.
+    defined_structs: RefCell<FxHashSet<String>>,
 }
 
 impl SemanticAnalyzer {
@@ -140,6 +146,7 @@ impl SemanticAnalyzer {
             enum_counter: 0,
             anon_struct_counter: Cell::new(0),
             diagnostics: RefCell::new(DiagnosticEngine::new()),
+            defined_structs: RefCell::new(FxHashSet::default()),
         };
         // Pre-populate with common implicit declarations
         analyzer.declare_implicit_functions();
@@ -446,6 +453,32 @@ impl SemanticAnalyzer {
                         is_noreturn: false,
                     };
                     self.result.functions.insert(init_decl.name.clone(), func_info);
+                }
+            }
+
+            // Check for incomplete struct/union types in variable declarations.
+            // A variable with an incomplete type (forward-declared struct/union with no
+            // definition) cannot be allocated. This is only an error for definitions,
+            // not for extern declarations (which don't allocate storage).
+            // Also catches arrays of incomplete element types.
+            // GCC error: "storage size of 'x' isn't known"
+            if !decl.is_extern() && !matches!(full_type, CType::Function(_)) {
+                // Extract the innermost element type (unwrap arrays)
+                let mut elem_type = &full_type;
+                while let CType::Array(inner, _) = elem_type {
+                    elem_type = inner;
+                }
+                let is_incomplete = match elem_type {
+                    CType::Struct(key) | CType::Union(key) => {
+                        !self.defined_structs.borrow().contains(&**key)
+                    }
+                    _ => false,
+                };
+                if is_incomplete {
+                    self.diagnostics.borrow_mut().error(
+                        format!("storage size of '{}' isn't known", init_decl.name),
+                        init_decl.span,
+                    );
                 }
             }
 
@@ -1635,6 +1668,13 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
             self.anon_struct_counter.set(id + 1);
             format!("__anon_struct_{}", id)
         };
+        // Track whether this struct/union has been defined (has a body in the
+        // AST, e.g. `struct X { ... }` or `struct X {}`), as opposed to just
+        // forward-declared (`struct X;`). This distinction is needed for the
+        // incomplete type check in analyze_declaration.
+        if fields.is_some() {
+            self.defined_structs.borrow_mut().insert(key.clone());
+        }
         if !struct_fields.is_empty() {
             let mut layout = if is_union {
                 StructLayout::for_union_with_packing(&struct_fields, max_field_align, &*self.result.type_context.borrow_struct_layouts())

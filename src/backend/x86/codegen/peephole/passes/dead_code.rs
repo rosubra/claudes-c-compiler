@@ -173,7 +173,9 @@ pub(super) fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -
                 }
             }
 
-            if matches!(infos[j].kind, LineKind::Other { .. }) {
+            // Check Other and Cmp lines for rbp references. Cmp lines can
+            // have memory operands after memory fold (e.g., cmpq -N(%rbp), %rax).
+            if matches!(infos[j].kind, LineKind::Other { .. } | LineKind::Cmp) {
                 if infos[j].has_indirect_mem {
                     slot_read = true;
                     break;

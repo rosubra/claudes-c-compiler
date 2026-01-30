@@ -1,0 +1,1 @@
+Extend memory fold to cmp/test instructions in peephole optimizer

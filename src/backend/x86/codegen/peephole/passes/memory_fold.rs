@@ -10,7 +10,7 @@
 //! Transformed to:
 //!   addq  -N(%rbp), %rax       ; rax = rax + mem[rbp-N]
 //!
-//! Supported ALU ops: add, sub, and, or, xor, cmp (with q/l suffixes).
+//! Supported ALU ops: add, sub, and, or, xor, cmp, test (with q/l suffixes).
 //! The loaded register must be used as the first (source) operand in AT&T syntax.
 //! We only fold when the loaded register is one of the scratch registers (rax=0,
 //! rcx=1, rdx=2) to avoid breaking live register values.
@@ -23,7 +23,7 @@ fn format_rbp_offset(offset: i32) -> String {
 }
 
 /// Try to parse an ALU instruction of the form "OPsuffix %src, %dst"
-/// where OP is add/sub/and/or/xor/cmp.
+/// where OP is add/sub/and/or/xor/cmp/test.
 /// Returns (op_name_with_suffix, dst_reg_str, src_family, dst_family).
 fn parse_alu_reg_reg(trimmed: &str) -> Option<(&str, &str, RegId, RegId)> {
     let b = trimmed.as_bytes();
@@ -34,6 +34,7 @@ fn parse_alu_reg_reg(trimmed: &str) -> Option<(&str, &str, RegId, RegId)> {
         else if b.starts_with(b"and") { 3 }
         else if b.starts_with(b"xor") { 3 }
         else if b.starts_with(b"cmp") { 3 }
+        else if b.starts_with(b"test") { 4 }
         else if b.starts_with(b"or") && b.len() > 2 && (b[2] == b'q' || b[2] == b'l' || b[2] == b'w' || b[2] == b'b') { 2 }
         else { return None; };
 
@@ -103,7 +104,9 @@ pub(super) fn fold_memory_operands(store: &mut LineStore, infos: &mut [LineInfo]
                 continue;
             }
 
-            if let LineKind::Other { dest_reg: _ } = infos[j].kind {
+            let is_foldable_target = matches!(infos[j].kind,
+                LineKind::Other { .. } | LineKind::Cmp);
+            if is_foldable_target {
                 let trimmed_j = infos[j].trimmed(store.get(j));
                 if let Some((op_suffix, dst_str, src_fam, dst_fam)) = parse_alu_reg_reg(trimmed_j) {
                     if src_fam == load_reg && dst_fam != load_reg {
