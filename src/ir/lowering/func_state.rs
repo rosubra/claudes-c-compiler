@@ -9,7 +9,7 @@
 //! cloning entire HashMaps at scope boundaries. On scope exit, only the changes
 //! made within that scope are undone, giving O(changes) cost instead of O(total).
 
-use crate::common::fx_hash::FxHashMap;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::source::Span;
 use crate::ir::ir::{
     BasicBlock,
@@ -109,6 +109,10 @@ pub(super) struct FunctionBuildState {
     pub switch_stack: Vec<SwitchFrame>,
     /// User-defined goto labels -> unique IR labels
     pub user_labels: FxHashMap<String, BlockId>,
+    /// Set of user-defined goto labels that have been defined (label statement lowered).
+    /// Used to distinguish forward gotos (label not yet defined) from backward gotos
+    /// (label already defined) for VLA stack restore decisions.
+    pub defined_user_labels: FxHashSet<String>,
     /// User-defined goto labels -> scope depth at label definition site.
     /// Populated by a prescan of the function body before lowering, so that
     /// `goto` cleanup emission can determine which scopes are actually exited.
@@ -175,6 +179,7 @@ impl FunctionBuildState {
             continue_labels: Vec::new(),
             switch_stack: Vec::new(),
             user_labels: FxHashMap::default(),
+            defined_user_labels: FxHashSet::default(),
             user_label_depths: FxHashMap::default(),
             scope_stack: Vec::new(),
             static_local_names: FxHashMap::default(),

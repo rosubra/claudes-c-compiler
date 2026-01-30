@@ -288,13 +288,20 @@ impl X86Codegen {
                 let reg = Self::load_dest_reg(alloca_ty);
                 let dest_slot = self.state.get_slot(dest.0);
                 self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, reg));
-                if dest_slot.map_or(true, |ds| ds.0 != slot.0) {
+                // When the param type is smaller than 64 bits (e.g., I32),
+                // emit_store_params stored it with a narrow instruction (movl),
+                // leaving the upper bytes of the 8-byte slot undefined.
+                // The movslq/movzbq load above correctly sign/zero-extends to
+                // the full 64-bit rax, but we must write back the extended value
+                // so that later movq loads from this slot see valid upper bytes.
+                let needs_writeback = matches!(alloca_ty,
+                    IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 |
+                    IrType::I32 | IrType::U32 | IrType::F32);
+                if dest_slot.map_or(true, |ds| ds.0 != slot.0) || needs_writeback {
                     self.store_rax_to(dest);
                 } else {
-                    // Dest shares the same stack slot as the param alloca;
-                    // skip the redundant store-back (value is already there
-                    // from emit_store_params, which always stores a full 8
-                    // bytes via movq). Just update the reg cache.
+                    // Dest shares the same stack slot as the param alloca
+                    // and the type is 64-bit; the value is already correct.
                     self.state.reg_cache.set_acc(dest.0, false);
                 }
                 return;

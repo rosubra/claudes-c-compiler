@@ -229,6 +229,7 @@ impl Lowerer {
         let cleanup_depth = target_depth.min(current_depth);
         let cleanups = self.collect_scope_cleanup_vars_above_depth(cleanup_depth);
         self.emit_cleanup_calls(&cleanups);
+
         // Restore the stack pointer for VLA deallocation when needed.
         //
         // There are two cases where VLA stack space must be reclaimed:
@@ -276,6 +277,12 @@ impl Lowerer {
 
     pub(super) fn lower_label_stmt(&mut self, name: &str, stmt: &Stmt) {
         let label = self.get_or_create_user_label(name);
+        // Mark this label as defined (the label: statement has been lowered).
+        // This distinguishes it from labels merely referenced by a forward goto.
+        let resolved_name = self.resolve_local_label(name);
+        let func_name = self.func().name.clone();
+        let key = format!("{}::{}", func_name, resolved_name);
+        self.func_mut().defined_user_labels.insert(key);
         self.terminate(Terminator::Branch(label));
         self.start_block(label);
         self.lower_stmt(stmt);

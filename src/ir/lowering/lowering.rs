@@ -1245,11 +1245,13 @@ impl Lowerer {
 
     /// Check if a user-defined goto label has already been defined (i.e., the
     /// label statement was already lowered). Used to determine backward vs forward gotos.
+    /// This checks `defined_user_labels` (set when `label:` is lowered), NOT `user_labels`
+    /// (which is also populated by forward `goto` statements creating placeholder blocks).
     pub(super) fn user_label_exists(&self, name: &str) -> bool {
         let resolved_name = self.resolve_local_label(name);
         let func_name = &self.func().name;
         let key = format!("{}::{}", func_name, resolved_name);
-        self.func().user_labels.contains_key(&key)
+        self.func().defined_user_labels.contains(&key)
     }
 
     /// Get or create a unique IR label for a user-defined goto label.
@@ -1273,7 +1275,7 @@ impl Lowerer {
     /// Resolve a label name through the local label scope stack.
     /// Returns a scope-qualified name if the label is declared via __label__,
     /// or the original name if not.
-    fn resolve_local_label(&self, name: &str) -> String {
+    pub(super) fn resolve_local_label(&self, name: &str) -> String {
         // Search scopes from innermost to outermost
         for scope in self.local_label_scopes.iter().rev() {
             if let Some(qualified) = scope.get(name) {

@@ -199,10 +199,12 @@ impl Lowerer {
     // Compound literals
     // -----------------------------------------------------------------------
 
-    pub(super) fn lower_compound_literal(&mut self, type_spec: &TypeSpecifier, init: &Initializer) -> Operand {
-        let ty = self.type_spec_to_ir(type_spec);
+    /// Compute the byte size of a compound literal, handling incomplete array types.
+    /// For incomplete arrays (e.g., `(int[]){1,2,3}`), sizeof_type returns 0, so we
+    /// compute the size from element_size * initializer_count instead.
+    fn compound_literal_size(&self, type_spec: &TypeSpecifier, init: &Initializer) -> usize {
         let ctype = self.type_spec_to_ctype(type_spec);
-        let size = match (&ctype, init) {
+        match (&ctype, init) {
             (CType::Array(ref elem_ct, None), Initializer::List(items)) => {
                 let elem_size = elem_ct.size_ctx(&*self.types.borrow_struct_layouts()).max(1);
                 // For char/unsigned char arrays with a single string literal initializer,
@@ -229,7 +231,13 @@ impl Lowerer {
                 }
             }
             _ => self.sizeof_type(type_spec),
-        };
+        }
+    }
+
+    pub(super) fn lower_compound_literal(&mut self, type_spec: &TypeSpecifier, init: &Initializer) -> Operand {
+        let ty = self.type_spec_to_ir(type_spec);
+        let ctype = self.type_spec_to_ctype(type_spec);
+        let size = self.compound_literal_size(type_spec, init);
         let alloca = self.alloc_and_init_compound_literal(type_spec, init, ty, size);
 
         let struct_layout = self.get_struct_layout_for_type(type_spec);
@@ -672,7 +680,7 @@ impl Lowerer {
 
         if let Expr::CompoundLiteral(type_spec, init, _) = inner {
             let ty = self.type_spec_to_ir(type_spec);
-            let size = self.sizeof_type(type_spec);
+            let size = self.compound_literal_size(type_spec, init);
             let alloca = self.alloc_and_init_compound_literal(type_spec, init, ty, size);
             return Operand::Value(alloca);
         }

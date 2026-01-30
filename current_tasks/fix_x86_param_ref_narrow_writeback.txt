@@ -1,23 +1,38 @@
 Task: Fix x86 emit_param_ref_impl skipping writeback for narrow types
-Status: in_progress
+Status: completed
 Started: 2026-01-30
+Completed: 2026-01-30
 
 Problem:
+Three compiler bugs prevented JerryScript from passing its test suite.
+
+Bug 1 - x86 narrow param writeback (prologue.rs):
 When mem2reg promotes a parameter alloca to SSA, emit_param_ref_impl loads
-the param value from its alloca slot using a type-appropriate instruction
-(e.g., movslq for I32). However, when the dest SSA value shares the same
-stack slot as the param alloca, the code skips the store-back as an
-optimization ("value is already there from emit_store_params").
+the param value using a type-appropriate instruction (e.g., movslq for I32).
+When the dest SSA value shares the same stack slot as the param alloca, the
+code skipped the store-back. This is wrong for narrow types because
+emit_store_params writes with a narrow instruction (movl), leaving upper
+bytes undefined. Later movq loads read garbage.
 
-This is wrong for narrow types (I32, I16, I8, etc.) because emit_store_params
-stores the param with a narrow instruction (e.g., movl for I32), leaving only
-4 valid bytes in the 8-byte slot. Later movq loads from this slot read garbage
-in the upper 32 bits, causing crashes (Bus error) in code that uses the value
-as a 64-bit quantity (e.g., VLA size calculations, pointer arithmetic).
+Bug 2 - Compound literal address-of size (expr_access.rs):
+lower_address_of for compound literals with incomplete array types
+(e.g., &((int[]){1,2,3})) used sizeof_type which returns 0 for incomplete
+arrays. This allocated a too-small stack buffer.
 
-Fix:
-Always write back the sign/zero-extended value when the param type is smaller
-than 8 bytes, even when the dest shares the same slot.
+Bug 3 - VLA forward goto misidentification (stmt_control_flow.rs):
+Multiple forward gotos to the same label in a function with VLAs caused
+stack corruption. user_label_exists() checked user_labels which is populated
+by both goto and label: statements. After the first goto created a
+placeholder block, subsequent forward gotos were misidentified as backward
+gotos, incorrectly emitting StackRestore that deallocated the VLA.
 
-Impact:
-Fixes JerryScript VLA Bus errors and likely other projects with similar issues.
+Fixes:
+1. Always write back sign/zero-extended value for sub-64-bit param types
+2. Extract compound_literal_size() helper for correct incomplete array sizing
+3. Track defined labels separately in defined_user_labels set
+
+Testing:
+- All 48 project tests pass on all 4 architectures (x86, i686, arm, riscv)
+- JerryScript passes on all 4 architectures
+- All existing VLA tests pass
+- New regression test: vla-goto-multiple-forward-no-dealloc
