@@ -103,11 +103,14 @@ pub enum WarningKind {
     /// A `#warning` preprocessor directive was encountered.
     /// GCC flag: -Wcpp
     Cpp,
+    /// Control reaches end of non-void function, or non-void function does
+    /// not return a value in all control paths.
+    /// GCC flag: -Wreturn-type
+    ReturnType,
     // Future categories (add as warnings are implemented):
     // UnusedVariable,         // -Wunused-variable
     // UnusedFunction,         // -Wunused-function
     // UnusedParameter,        // -Wunused-parameter
-    // ReturnType,             // -Wreturn-type
     // UninitializedVariable,  // -Wuninitialized
     // ImplicitConversion,     // -Wimplicit-int-conversion
     // SignCompare,            // -Wsign-compare
@@ -122,6 +125,7 @@ impl WarningKind {
             WarningKind::Undeclared => "undeclared",
             WarningKind::ImplicitFunctionDeclaration => "implicit-function-declaration",
             WarningKind::Cpp => "cpp",
+            WarningKind::ReturnType => "return-type",
         }
     }
 
@@ -133,6 +137,7 @@ impl WarningKind {
             "implicit-function-declaration" => Some(WarningKind::ImplicitFunctionDeclaration),
             "implicit" => Some(WarningKind::ImplicitFunctionDeclaration),
             "cpp" => Some(WarningKind::Cpp),
+            "return-type" => Some(WarningKind::ReturnType),
             _ => None,
         }
     }
@@ -142,6 +147,7 @@ impl WarningKind {
         &[
             WarningKind::ImplicitFunctionDeclaration,
             WarningKind::Cpp,
+            WarningKind::ReturnType,
             // WarningKind::Undeclared is now a hard error, not a warning
         ]
     }
@@ -158,6 +164,7 @@ impl WarningKind {
             WarningKind::Undeclared,
             WarningKind::ImplicitFunctionDeclaration,
             WarningKind::Cpp,
+            WarningKind::ReturnType,
         ]
     }
 }

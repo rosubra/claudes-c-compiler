@@ -1374,15 +1374,14 @@ impl Driver {
         }
 
         // Retrieve diagnostic engine (which holds the source manager) for subsequent phases
-        let mut diagnostics = parser.take_diagnostics();
-        // Extract source manager for debug info emission (-g)
-        let source_manager = diagnostics.take_source_manager();
+        let diagnostics = parser.take_diagnostics();
 
         if self.verbose {
             eprintln!("Parsed {} declarations", ast.decls.len());
         }
 
-        // Semantic analysis -- pass diagnostic engine to sema
+        // Semantic analysis -- pass diagnostic engine to sema (still holds
+        // the source manager so sema diagnostics can resolve spans)
         let t3 = std::time::Instant::now();
         let mut sema = SemanticAnalyzer::new();
         sema.set_diagnostics(diagnostics);
@@ -1390,8 +1389,10 @@ impl Driver {
             // Errors already emitted through diagnostic engine with source spans
             return Err(format!("{} error(s) during semantic analysis", error_count));
         }
-        let diagnostics = sema.take_diagnostics();
+        let mut diagnostics = sema.take_diagnostics();
         let sema_result = sema.into_result();
+        // Extract source manager for debug info emission (-g) after sema is done
+        let source_manager = diagnostics.take_source_manager();
         if time_phases { eprintln!("[TIME] sema: {:.3}s", t3.elapsed().as_secs_f64()); }
 
         // Check for warnings promoted to errors by -Werror / -Werror=<name>.

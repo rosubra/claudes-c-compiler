@@ -61,6 +61,8 @@ pub mod func_attr_flag {
     pub const FASTCALL: u16      = 1 << 10;
     /// `__attribute__((naked))` — emit no prologue/epilogue; function body is pure asm.
     pub const NAKED: u16         = 1 << 11;
+    /// `__attribute__((noreturn))` or `_Noreturn` — function never returns.
+    pub const NORETURN: u16      = 1 << 12;
 }
 
 impl FunctionAttributes {
@@ -83,6 +85,7 @@ impl FunctionAttributes {
     #[inline] pub fn is_used(&self) -> bool           { self.flags & func_attr_flag::USED != 0 }
     #[inline] pub fn is_fastcall(&self) -> bool       { self.flags & func_attr_flag::FASTCALL != 0 }
     #[inline] pub fn is_naked(&self) -> bool          { self.flags & func_attr_flag::NAKED != 0 }
+    #[inline] pub fn is_noreturn(&self) -> bool       { self.flags & func_attr_flag::NORETURN != 0 }
 
     // --- flag setters ---
 
@@ -98,6 +101,7 @@ impl FunctionAttributes {
     #[inline] pub fn set_used(&mut self, v: bool)          { self.set_flag(func_attr_flag::USED, v) }
     #[inline] pub fn set_fastcall(&mut self, v: bool)      { self.set_flag(func_attr_flag::FASTCALL, v) }
     #[inline] pub fn set_naked(&mut self, v: bool)        { self.set_flag(func_attr_flag::NAKED, v) }
+    #[inline] pub fn set_noreturn(&mut self, v: bool)     { self.set_flag(func_attr_flag::NORETURN, v) }
 
     #[inline]
     fn set_flag(&mut self, mask: u16, v: bool) {
@@ -120,6 +124,7 @@ impl std::fmt::Debug for FunctionAttributes {
             .field("is_used", &self.is_used())
             .field("is_fastcall", &self.is_fastcall())
             .field("is_naked", &self.is_naked())
+            .field("is_noreturn", &self.is_noreturn())
             .field("section", &self.section)
             .field("visibility", &self.visibility)
             .finish()

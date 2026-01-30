@@ -103,7 +103,8 @@ COMPLETED (2026-01-30):
 REMAINING FOLLOW-UPS:
 1. Add spans to preprocessor errors (#error directives)
 2. Add more WarningKind categories as compiler implements more warnings
-   (UnusedVariable, ReturnType, SignCompare, ImplicitConversion, etc.)
+   (UnusedVariable, SignCompare, ImplicitConversion, etc.)
+   NOTE: ReturnType was implemented (2026-01-30) — -Wreturn-type warning in sema
 3. Add more "note:" follow-ups: "previous declaration was here", "did you mean to include <header>?"
 4. Add more lowering diagnostics: unresolved lvalue in assignments, unresolved typedefs,
    vector type mismatches in compound assignment

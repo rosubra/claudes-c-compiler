@@ -247,6 +247,23 @@ impl SemanticAnalyzer {
         // Analyze function body
         self.analyze_compound_stmt(&func.body);
 
+        // -Wreturn-type: warn if a non-void function can fall through without returning.
+        // Skip the check for:
+        //   - void functions (no return value expected)
+        //   - noreturn functions (never return by contract)
+        //   - main() (C99 5.1.2.2.3: reaching } is equivalent to return 0)
+        if !matches!(return_type, CType::Void)
+            && !func.attrs.is_noreturn()
+            && func.name != "main"
+            && self.compound_can_fall_through(&func.body)
+        {
+            self.diagnostics.borrow_mut().warning_with_kind(
+                "control reaches end of non-void function",
+                func.span,
+                crate::common::error::WarningKind::ReturnType,
+            );
+        }
+
         // Pop function scope
         self.result.type_context.pop_scope();
         self.symbol_table.pop_scope();
@@ -805,6 +822,102 @@ impl SemanticAnalyzer {
                     self.analyze_expr(&inp.expr);
                 }
             }
+        }
+    }
+
+    // === Return-type analysis (-Wreturn-type) ===
+
+    /// Check whether a compound statement (function body) can fall through
+    /// without executing a return statement. Used by `-Wreturn-type` to detect
+    /// non-void functions that may not return a value.
+    ///
+    /// Returns `true` if control can reach the end of the compound statement,
+    /// `false` if all paths through the block are guaranteed to return/diverge.
+    fn compound_can_fall_through(&self, compound: &CompoundStmt) -> bool {
+        // Empty body can fall through
+        if compound.items.is_empty() {
+            return true;
+        }
+        // Check the last item in the block
+        match compound.items.last().unwrap() {
+            BlockItem::Statement(stmt) => self.stmt_can_fall_through(stmt),
+            BlockItem::Declaration(_) => true,
+        }
+    }
+
+    /// Check whether a statement can fall through (i.e., control can reach the
+    /// point immediately after this statement without a return/goto/diverge).
+    fn stmt_can_fall_through(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            // return always diverges
+            Stmt::Return(_, _) => false,
+
+            // goto always diverges (transfers control elsewhere)
+            Stmt::Goto(_, _) | Stmt::GotoIndirect(_, _) => false,
+
+            // break/continue diverge from the current construct
+            // (conservative for our purposes: they exit the current statement)
+            Stmt::Break(_) | Stmt::Continue(_) => false,
+
+            // if/else: falls through only if either branch can fall through
+            // if without else: always can fall through (the else path is implicit fallthrough)
+            Stmt::If(_, then_br, else_br, _) => {
+                match else_br {
+                    Some(else_stmt) => {
+                        // Both branches must not fall through for the if/else to not fall through
+                        self.stmt_can_fall_through(then_br) || self.stmt_can_fall_through(else_stmt)
+                    }
+                    None => true, // no else means we can fall through
+                }
+            }
+
+            // while/do-while/for: conservatively can fall through, unless the
+            // condition is a compile-time constant true (infinite loop)
+            Stmt::While(cond, _body, _) => {
+                !self.is_constant_true_expr(cond)
+            }
+            Stmt::DoWhile(_body, cond, _) => {
+                !self.is_constant_true_expr(cond)
+            }
+            Stmt::For(_init, cond, _inc, _body, _) => {
+                // for(;;) with no condition is an infinite loop
+                match cond {
+                    None => false, // for(;;) is infinite
+                    Some(c) => !self.is_constant_true_expr(c),
+                }
+            }
+
+            // switch: conservatively can fall through
+            // (would need exhaustiveness + break analysis to prove otherwise)
+            Stmt::Switch(_, _, _) => true,
+
+            // compound: delegate to compound analysis
+            Stmt::Compound(compound) => self.compound_can_fall_through(compound),
+
+            // labels: the relevant question is whether the labeled statement falls through
+            Stmt::Label(_, inner, _) => self.stmt_can_fall_through(inner),
+            Stmt::Case(_, inner, _) => self.stmt_can_fall_through(inner),
+            Stmt::CaseRange(_, _, inner, _) => self.stmt_can_fall_through(inner),
+            Stmt::Default(inner, _) => self.stmt_can_fall_through(inner),
+
+            // expression statements, declarations, inline asm: always fall through
+            Stmt::Expr(_) => true,
+            Stmt::Declaration(_) => true,
+            Stmt::InlineAsm { .. } => true,
+        }
+    }
+
+    /// Check if an expression is a compile-time constant that evaluates to true (non-zero).
+    /// Used to detect infinite loops like `while(1)` and `for(;1;)`.
+    fn is_constant_true_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLiteral(val, _) => *val != 0,
+            Expr::UIntLiteral(val, _) => *val != 0,
+            Expr::LongLiteral(val, _) => *val != 0,
+            Expr::ULongLiteral(val, _) => *val != 0,
+            Expr::LongLongLiteral(val, _) => *val != 0,
+            Expr::ULongLongLiteral(val, _) => *val != 0,
+            _ => false,
         }
     }
 

@@ -273,6 +273,7 @@ impl Parser {
                 attrs.set_used(decl_attrs.is_used());
                 attrs.set_fastcall(decl_attrs.is_fastcall());
                 attrs.set_naked(decl_attrs.is_naked());
+                attrs.set_noreturn(decl_attrs.is_noreturn());
                 attrs.section = decl_attrs.section;
                 attrs.visibility = decl_attrs.visibility;
                 attrs
