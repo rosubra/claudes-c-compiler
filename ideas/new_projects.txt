@@ -47,3 +47,4 @@ hping - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: FIXED 
 less - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: was listed as failing but now passes on all architectures
 darkhttpd - ARM: pass, x86: untested, riscv: untested, i686: untested. Notes: was listed as failing ARM but now passes
 dash - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: was listed as failing but now passes (x86 tested)
+Wren - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - build script issue, not compiler bug. Python test runner (util/test.py) has hardcoded 5-second per-test timeout; 3 GC-heavy tests (deeply_nested_gc, many_reallocations, sample_count_multiple) take 5-30s even with GCC. Fix: sed timeout from 5 to 60 seconds in check_x86.sh before running tests. Cross-compilation tests (arm/riscv/i686) use custom wren_cross_test.c and pass without changes.
