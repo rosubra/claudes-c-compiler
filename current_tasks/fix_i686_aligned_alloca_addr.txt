@@ -1,0 +1,19 @@
+Fix i686 over-aligned alloca address computation
+
+Status: in_progress
+
+Changes:
+1. src/backend/i686/codegen/memory.rs - Fixed emit_alloca_aligned_addr_impl and
+   emit_alloca_aligned_addr_to_acc_impl to use alloca_over_align(val_id) instead of
+   (-slot.0) for alignment derivation. The bug produced wrong AND masks for ALIGN64
+   variables (e.g., 0xFFFFFF74 instead of 0xFFFFFFC0), corrupting stack memory.
+
+2. src/ir/lowering/stmt.rs - Propagate type natural alignment to alloca instructions,
+   taking max(explicit_align, type_align).
+
+3. src/backend/i686/codegen/prologue.rs - Fixed bias calculation for omit-frame-pointer
+   mode: use 12 instead of 8 when frame pointer is omitted.
+
+Testing:
+- wolfssl i686 AES-GCM test now passes (was segfaulting)
+- Full regression suite: no regressions (libsodium x86/arm/riscv failures are pre-existing)

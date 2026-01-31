@@ -114,7 +114,7 @@ nethack - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - Preproce
 oniguruma - ARM: pass, x86: pass (with 4 known failures), riscv: pass, i686: pass. Notes: BUILD SCRIPT ISSUE - testcu has 4 known test failures (also fail with GCC) but exits 255, causing set -e to abort the check script. Not a compiler bug.
 brotli - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: passes on all architectures without changes.
 libressl - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
-wolfssl - ARM: pass, x86: pass, riscv: pass, i686: fail (pre-existing aligned alloca crash). Notes: Fixed over-aligned alloca address computation across all backends. AES-GCM test now passes on ARM/RISC-V/x86.
+wolfssl - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: Fixed over-aligned alloca address computation across all backends. AES-GCM test now passes on ARM/RISC-V/x86. i686 fix: emit_alloca_aligned_addr_impl was deriving alignment from (-slot.0) (stack offset) instead of alloca_over_align(val_id) (actual alignment), producing wrong AND mask for ALIGN64 variables (0xFFFFFF74 instead of 0xFFFFFFC0), corrupting stack. Also fixed alloca alignment propagation (stmt.rs) and omit-fp bias (prologue.rs).
 socat - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 libssh2 - ARM: untested, x86: pass, riscv: untested, i686: untested. Notes: x86 passes.
 libevent - ARM: pass, x86: pass, riscv: pass, i686: untested. Notes: x86/arm/riscv pass without changes.

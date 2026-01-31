@@ -453,24 +453,22 @@ impl I686Codegen {
 
     // ---- Alloca aligned addr ----
 
-    pub(super) fn emit_alloca_aligned_addr_impl(&mut self, slot: StackSlot, _val_id: u32) {
+    pub(super) fn emit_alloca_aligned_addr_impl(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id)
+            .expect("alloca must have over-alignment for aligned addr emission");
         let sr = self.slot_ref(slot);
         emit!(self.state, "    leal {}, %ecx", sr);
-        let align = (-slot.0) as usize;
-        if align > 1 {
-            emit!(self.state, "    addl ${}, %ecx", align - 1);
-            emit!(self.state, "    andl ${}, %ecx", -(align as i32));
-        }
+        emit!(self.state, "    addl ${}, %ecx", align - 1);
+        emit!(self.state, "    andl ${}, %ecx", -(align as i32));
     }
 
-    pub(super) fn emit_alloca_aligned_addr_to_acc_impl(&mut self, slot: StackSlot, _val_id: u32) {
+    pub(super) fn emit_alloca_aligned_addr_to_acc_impl(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id)
+            .expect("alloca must have over-alignment for aligned addr emission");
         let sr = self.slot_ref(slot);
         emit!(self.state, "    leal {}, %eax", sr);
-        let align = (-slot.0) as usize;
-        if align > 1 {
-            emit!(self.state, "    addl ${}, %eax", align - 1);
-            emit!(self.state, "    andl ${}, %eax", -(align as i32));
-        }
+        emit!(self.state, "    addl ${}, %eax", align - 1);
+        emit!(self.state, "    andl ${}, %eax", -(align as i32));
         self.state.reg_cache.invalidate_acc();
     }
 
