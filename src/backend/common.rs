@@ -33,6 +33,12 @@ pub struct LinkerConfig {
     pub command: &'static str,
     /// Extra flags (e.g., ["-static"] for cross-compiled targets, ["-no-pie"] for x86)
     pub extra_args: &'static [&'static str],
+    /// Expected ELF e_machine value for this target (e.g., EM_X86_64=62, EM_RISCV=243).
+    /// Used to validate input .o files before linking and produce clear error messages
+    /// when stale/wrong-arch objects are accidentally passed to the linker.
+    pub expected_elf_machine: u16,
+    /// Human-readable architecture name for error messages (e.g., "RISC-V", "x86-64").
+    pub arch_name: &'static str,
 }
 
 /// Assemble text to an object file, with additional dynamic arguments.
@@ -83,6 +89,74 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
     Ok(())
 }
 
+/// Map an ELF e_machine value to a human-readable architecture name.
+fn elf_machine_name(em: u16) -> &'static str {
+    match em {
+        3 => "i386",
+        40 => "ARM",
+        62 => "x86-64",
+        183 => "aarch64",
+        243 => "RISC-V",
+        _ => "unknown",
+    }
+}
+
+/// Validate that all .o files in a list match the expected ELF e_machine.
+/// Returns Ok(()) if all files match or are not ELF objects (archives, shared libs, etc.).
+/// Returns Err with a diagnostic listing the mismatched files.
+fn validate_object_architectures(
+    files: impl Iterator<Item: AsRef<str>>,
+    expected_machine: u16,
+    arch_name: &str,
+) -> Result<(), String> {
+    use std::io::Read;
+    let mut mismatched = Vec::new();
+
+    for path_ref in files {
+        let path = path_ref.as_ref();
+        // Only check .o files (not .a, .so, -l flags, -Wl, flags, etc.)
+        if !path.ends_with(".o") {
+            continue;
+        }
+        // Read the ELF header: first 20 bytes contain e_ident (16) + e_type (2) + e_machine (2)
+        let mut buf = [0u8; 20];
+        let Ok(mut f) = std::fs::File::open(path) else { continue };
+        let Ok(n) = f.read(&mut buf) else { continue };
+        if n < 20 {
+            continue;
+        }
+        // Verify ELF magic
+        if &buf[0..4] != b"\x7fELF" {
+            continue;
+        }
+        // e_machine is at offset 18, always 2 bytes.
+        // Determine endianness from EI_DATA (byte 5): 1=LE, 2=BE
+        let is_le = buf[5] == 1;
+        let em = if is_le {
+            u16::from_le_bytes([buf[18], buf[19]])
+        } else {
+            u16::from_be_bytes([buf[18], buf[19]])
+        };
+        if em != expected_machine {
+            mismatched.push((path.to_string(), em));
+        }
+    }
+
+    if mismatched.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "Object file architecture mismatch: target is {} (ELF e_machine={}) but these files are for a different architecture:\n",
+        arch_name, expected_machine
+    );
+    for (path, em) in &mismatched {
+        msg.push_str(&format!("  {} ({}; e_machine={})\n", path, elf_machine_name(*em), em));
+    }
+    msg.push_str("Hint: these look like stale objects from a previous build. Try running 'make clean' before rebuilding.");
+    Err(msg)
+}
+
 /// Link object files into an executable using an external toolchain.
 pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> Result<(), String> {
     link_with_args(config, object_files, output_path, &[])
@@ -90,6 +164,17 @@ pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> 
 
 /// Link object files into an executable (or shared library), with additional user-provided linker args.
 pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
+    // Validate that all input .o files match the target architecture before invoking
+    // the external linker. This catches stale objects from a previous build (e.g.,
+    // x86-64 .o files left in the build directory when cross-compiling for RISC-V)
+    // and gives a clear, actionable error message instead of the cryptic linker error
+    // "Relocations in generic ELF (EM: XX)".
+    validate_object_architectures(
+        object_files.iter().map(|s| *s).chain(user_args.iter().map(|s| s.as_str())),
+        config.expected_elf_machine,
+        config.arch_name,
+    )?;
+
     let is_shared = user_args.iter().any(|a| a == "-shared");
     let is_nostdlib = user_args.iter().any(|a| a == "-nostdlib");
 

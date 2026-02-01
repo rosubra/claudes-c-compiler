@@ -159,14 +159,20 @@ impl Target {
 
     /// Get the linker config for this target.
     pub(crate) fn linker_config(&self) -> common::LinkerConfig {
+        // ELF e_machine constants (from elf.h):
+        // EM_386 = 3, EM_AARCH64 = 183, EM_X86_64 = 62, EM_RISCV = 243
         match self {
             Target::X86_64 => common::LinkerConfig {
                 command: "gcc",
                 extra_args: &["-no-pie"],
+                expected_elf_machine: 62,  // EM_X86_64
+                arch_name: "x86-64",
             },
             Target::I686 => common::LinkerConfig {
                 command: "i686-linux-gnu-gcc",
                 extra_args: &["-m32", "-no-pie"],
+                expected_elf_machine: 3,   // EM_386
+                arch_name: "i686",
             },
             Target::Aarch64 => common::LinkerConfig {
                 command: "aarch64-linux-gnu-gcc",
@@ -175,10 +181,14 @@ impl Target {
                 // at runtime, breaking postgres extension loading.  The unit
                 // test harness passes -static explicitly for QEMU user-mode.
                 extra_args: &["-no-pie"],
+                expected_elf_machine: 183, // EM_AARCH64
+                arch_name: "aarch64",
             },
             Target::Riscv64 => common::LinkerConfig {
                 command: "riscv64-linux-gnu-gcc",
                 extra_args: &["-no-pie"],
+                expected_elf_machine: 243, // EM_RISCV
+                arch_name: "riscv64",
             },
         }
     }
