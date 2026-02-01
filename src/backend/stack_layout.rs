@@ -563,6 +563,7 @@ pub fn calculate_stack_space_common(
     assign_slot: impl Fn(i64, i64, i64) -> (i64, i64),
     reg_assigned: &FxHashSet<u32>,
     cached_liveness: Option<super::liveness::LivenessResult>,
+    lhs_first_binop: bool,
 ) -> i64 {
     let num_blocks = func.blocks.len();
 
@@ -574,7 +575,7 @@ pub fn calculate_stack_space_common(
 
     // Phase 1: Build analysis context (use-blocks, def-blocks, used values,
     //          dead param allocas, alloca coalescability, copy aliases).
-    let ctx = build_layout_context(func, coalesce, reg_assigned);
+    let ctx = build_layout_context(func, coalesce, reg_assigned, lhs_first_binop);
 
     // Tell CodegenState which values are register-assigned so that
     // resolve_slot_addr can return a dummy Indirect slot for them.
@@ -630,6 +631,7 @@ fn build_layout_context(
     func: &IrFunction,
     coalesce: bool,
     reg_assigned: &FxHashSet<u32>,
+    lhs_first_binop: bool,
 ) -> StackLayoutContext {
     // Build use-block map
     let mut use_blocks_map = if coalesce {
@@ -675,7 +677,7 @@ fn build_layout_context(
     );
 
     // Immediately-consumed value analysis: identify values that can skip stack slots.
-    let immediately_consumed = compute_immediately_consumed(func);
+    let immediately_consumed = compute_immediately_consumed(func, lhs_first_binop);
 
     // Propagate copy-alias uses into use_blocks_map so that root values account
     // for their aliases' use sites when deciding block-local vs. multi-block.
@@ -882,7 +884,7 @@ fn build_copy_alias_map(
 ///
 /// The codegen accumulator cache ensures correctness: store_rax_to sets the
 /// cache, and the next instruction's operand_to_rax finds V there.
-fn compute_immediately_consumed(func: &IrFunction) -> FxHashSet<u32> {
+fn compute_immediately_consumed(func: &IrFunction, lhs_first_binop: bool) -> FxHashSet<u32> {
     let mut result = FxHashSet::default();
 
     // First pass: count uses per value (both Operand and Value-ref uses).
@@ -947,7 +949,7 @@ fn compute_immediately_consumed(func: &IrFunction) -> FxHashSet<u32> {
             if i + 1 < insts.len() {
                 // Use must be in instruction i+1, as the first Operand.
                 let next = &insts[i + 1];
-                if is_safe_sole_consumer(next, dest.0) {
+                if is_safe_sole_consumer(next, dest.0, lhs_first_binop) {
                     result.insert(dest.0);
                 }
             } else {
@@ -1005,12 +1007,16 @@ fn involves_i128_or_f128(inst: &Instruction) -> bool {
 /// Check if value_id is the sole Operand loaded by the given instruction,
 /// with guaranteed loading order (no other operand loaded before it).
 ///
-/// Only single-operand consumers are safe: Store (val loaded first), Cast,
-/// UnaryOp, Copy. Two-operand instructions (BinOp, Cmp) are excluded because
-/// codegen may load the OTHER operand first (e.g. BinOp's rhs_conflicts path,
-/// float Cmp's Lt/Le operand swap). GEP excluded because OverAligned base
-/// computation clobbers %rax before offset is loaded.
-fn is_safe_sole_consumer(inst: &Instruction, value_id: u32) -> bool {
+/// Only single-operand consumers are safe by default: Store (val loaded first),
+/// Cast, UnaryOp, Copy. Two-operand instructions (BinOp, Cmp) are excluded on
+/// x86/ARM because codegen may load the OTHER operand first (e.g. BinOp's
+/// rhs_conflicts path, float Cmp's Lt/Le operand swap). GEP excluded because
+/// OverAligned base computation clobbers %rax before offset is loaded.
+///
+/// When `lhs_first_binop` is true (RISC-V), BinOp and Cmp are also safe when
+/// value_id is the lhs operand, because the RISC-V backend unconditionally
+/// loads lhs before rhs with no register-direct conflict paths.
+fn is_safe_sole_consumer(inst: &Instruction, value_id: u32, lhs_first_binop: bool) -> bool {
     match inst {
         // Store: val is always loaded first via emit_load_operand (operand_to_rax)
         Instruction::Store { val: Operand::Value(v), .. } => v.0 == value_id,
@@ -1018,7 +1024,11 @@ fn is_safe_sole_consumer(inst: &Instruction, value_id: u32) -> bool {
         Instruction::Cast { src: Operand::Value(v), .. } => v.0 == value_id,
         Instruction::UnaryOp { src: Operand::Value(v), .. } => v.0 == value_id,
         Instruction::Copy { src: Operand::Value(v), .. } => v.0 == value_id,
-        // All other instructions: not safe (BinOp, Cmp, GEP, Call, Select, etc.)
+        // BinOp: safe on architectures that always load lhs first (RISC-V)
+        Instruction::BinOp { lhs: Operand::Value(v), .. } if lhs_first_binop => v.0 == value_id,
+        // Cmp: safe on architectures that always load lhs first (RISC-V)
+        Instruction::Cmp { lhs: Operand::Value(v), .. } if lhs_first_binop => v.0 == value_id,
+        // All other instructions: not safe (GEP, Call, Select, etc.)
         _ => false,
     }
 }

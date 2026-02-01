@@ -107,7 +107,7 @@ impl I686Codegen {
                 ((required + effective_align - 1) / effective_align) * effective_align
             };
             (-new_space, new_space)
-        }, &reg_assigned, cached_liveness)
+        }, &reg_assigned, cached_liveness, false)
     }
 
     // ---- aligned_frame_size ----
