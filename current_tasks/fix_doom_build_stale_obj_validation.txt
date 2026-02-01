@@ -1,0 +1,10 @@
+Fix Doom build failure caused by stale object files with wrong architecture.
+
+Problem: /deps/linux-doom/doomgeneric/doomgeneric/build-ansi/ contains stale x86-64 .o
+files that get copied by `cp -r` and confuse `make` into skipping recompilation.
+The linker then fails with "Relocations in generic ELF (EM: 62)" because it receives
+x86-64 objects when targeting RISC-V.
+
+Fix: Add ELF e_machine validation in the compiler's linker driver. When .o files with
+the wrong architecture are detected before linking, emit a clear error message that
+identifies which files are wrong and suggests running `make clean`.
