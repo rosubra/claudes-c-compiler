@@ -1,18 +1,24 @@
-Fix RISC-V kernel stack overflow by replacing s-register call argument staging
-with stack-based staging.
+Fix RISC-V call staging to use only caller-saved temporaries (t3/t4/t5).
 
-Currently, emit_call_reg_args uses s2-s6 as staging temporaries for calls with
->3 GP register arguments. These s-registers are callee-saved, meaning they must
-be saved/restored in the prologue/epilogue, adding 8 bytes per register to the
-frame. They also can't be used for register allocation when reserved for calls.
+Previously, emit_call_reg_args staged arguments into t3/t4/t5 plus s2-s6
+for calls with >3 GP register arguments. The s-registers are callee-saved,
+forcing them to be saved/restored in prologue/epilogue and preventing their
+use for register allocation. This contributed to 2.27x stack frame bloat
+vs GCC in the RISC-V kernel.
 
-Fix: Replace s2-s6 staging with stack-based staging. After staging the first 3
-GP args in t3/t4/t5, stage remaining args into temporary stack slots. Then move
-all staged values to their target arg registers (a0-a7) before the call. This:
-1. Eliminates the need to reserve s2-s6 for call staging
-2. Makes all of s2-s6 available for register allocation
-3. Reduces callee-saved register saves in prologue/epilogue
-4. Reduces stack frame sizes across the kernel (average 128.9 -> ~100 bytes)
+Now uses a 3-phase approach: stage first 3 GP args into t3/t4/t5, move
+them to target a-registers, then load remaining GP args directly into
+their target a-registers. This frees s2-s6 for the register allocator,
+reducing callee-saved register pressure and stack frame sizes.
 
-The RISC-V kernel currently crashes with stack overflow during networking
-operations due to 2.27x average stack frame bloat vs GCC.
+Results:
+- Average RISC-V kernel stack frame: 128.9 -> 125.7 bytes (~2.5% reduction)
+- Unit tests: x86 100.0%, ARM 99.8%, RISC-V 99.9%, i686 99.9%
+- Projects: 47/48 passed (mbedtls ARM failure is pre-existing)
+- Kernel defconfig: x86 PASS, RISC-V PASS
+- ARM kernel defconfig: FAIL (pre-existing, confirmed by testing at b784ad5f)
+
+Note: RISC-V kernel still overflows during networking (IPv6 DAD, interrupt handlers).
+Further stack reduction requires add_riscv_caller_saved_regalloc (locked by another
+agent) which would make t3/t4/t5 available for general register allocation and have
+a much larger impact on frame sizes.
