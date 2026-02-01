@@ -1,26 +1,30 @@
 QEMU Build Support Status
 =========================
 
-Summary: QEMU 10.2.50 can be compiled (1700+ C files) and linked using ccc-x86.
---version and -cpu help work correctly. System emulation (kernel boot) still has
-a runtime issue in JSON/QMP event serialization.
+Summary: QEMU 10.2.50 can be compiled (1700+ C files) and linked using ccc-x86
+without any gcc wrapper workarounds. --version and -cpu help work correctly.
+System emulation (kernel boot) still has a runtime issue in JSON/QMP event
+serialization.
 
 Build Status:
 - Configure: PASS
-- Compilation: PASS (with one file workaround - qapi-introspect.c routes to gcc)
-- Linking: PASS (after response file support was added)
+- Compilation: PASS (all files including qapi-introspect.c compile natively)
+- Linking: PASS
 - Runtime: PARTIAL - "--version" and "-cpu help" work, but kernel boot crashes
   with JSON parse error in QMP event building
 
 Build Steps:
-  1. Copy QEMU source to writable location (cp -a /deps/qemu/. /tmp/qemu_src/)
-  2. Copy subprojects from nix-template (keycodemapdb, berkeley-softfloat-3, etc.)
-  3. Use wrapper script that routes qapi-introspect.c to gcc
-  4. Configure out-of-tree: CC=wrapper CXX=g++ /tmp/qemu_src/configure
-     --target-list=x86_64-softmmu --disable-docs --disable-gtk --disable-sdl
-     --disable-opengl --disable-virglrenderer --disable-spice --disable-vte
-     --disable-curses
-  5. Build: ninja -j$(nproc) qemu-system-x86_64
+  1. Copy QEMU source to writable location (cp -r /deps/qemu /tmp/qemu_build)
+  2. Configure out-of-tree:
+     cd /tmp/qemu_build && mkdir build && cd build
+     ../configure --cc=/path/to/ccc-x86
+       --target-list=x86_64-softmmu --disable-docs --disable-gtk --disable-sdl
+       --disable-opengl --disable-virglrenderer --disable-spice --disable-vte
+       --disable-curses
+  3. Build: ninja -j$(nproc) qemu-system-x86_64
+  Note: `make -j128` builds all targets including test libraries. One test file
+  (virtio-9p-client.c) fails due to __attribute__((common, weak)) interaction
+  with the assembler. Use `ninja qemu-system-x86_64` to build just the emulator.
 
 Known Issues Fixed:
   1. __has_attribute macro aliasing (cleanup attribute) - FIXED
@@ -28,13 +32,15 @@ Known Issues Fixed:
   3. Response file (@file) support - FIXED
   4. Compound literal array init (CPU double-registration) - FIXED
   5. Bool pointer array init (migration crash) - FIXED
-     Array of bool* was incorrectly normalizing pointer values to 0/1
-     instead of storing actual addresses. Fixed in lower_1d_array_init
-     by guarding is_bool_elem_array against is_array_of_pointers.
+  6. Preprocessor MAX_PENDING_NEWLINES too low for qapi-introspect.c - FIXED
+     The preprocessor's line accumulation limit for multi-line macro invocations
+     was 2000 lines, but QEMU's QLIT_QLIST() macro spans ~32000 lines.
+     Increased to 100,000.
 
 Remaining Issues:
-  1. qapi-introspect.c parse failure via ninja (works fine manually, possibly
-     a state/concurrency issue in the preprocessor) - WORKAROUND: gcc wrapper
+  1. Test library virtio-9p-client.c: __attribute__((common, weak)) on
+     global_qtest causes assembler error "symbol can not be both weak and common".
+     Not blocking - only affects test targets, not the main emulator binary.
   2. JSON parse error during kernel boot:
      "Unexpected error in json_message_process_token()" / "JSON parse error, stray '{'"
      Crashes in qobject_from_jsonv() -> qdict_from_jsonf_nofail() when building
@@ -47,5 +53,5 @@ Remaining Issues:
      formatting bug affecting how JSON template strings are passed through
      the va_list/printf-style argument chain.
 
-Priority: Medium - QEMU can be built from gcc for testing while kernel compilation
-is the primary focus.
+Priority: Medium - QEMU can be built natively using ccc-x86 and runs basic
+commands. Kernel boot runtime issue is the remaining blocker.

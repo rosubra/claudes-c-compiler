@@ -30,9 +30,9 @@ fn dedup_macro_names(names: Vec<String>) -> Vec<String> {
 /// Maximum number of newlines to accumulate while joining lines for unbalanced
 /// parentheses in macro arguments. Prevents runaway accumulation when a source
 /// file has a genuinely unbalanced parenthesis. Must be large enough to handle
-/// real-world macro calls that span many lines (e.g., picotls decode_extensions
-/// calls span 230+ lines with deeply nested macro arguments).
-const MAX_PENDING_NEWLINES: usize = 2000;
+/// real-world macro calls that span many lines (e.g., QEMU's qapi-introspect.c
+/// has a single QLIT_QLIST() macro invocation spanning ~32000 lines).
+const MAX_PENDING_NEWLINES: usize = 100_000;
 
 /// A preprocessor diagnostic with source location information.
 ///
