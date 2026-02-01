@@ -1771,6 +1771,15 @@ fn pack_values_into_slots(
 /// Assign final offsets for deferred block-local values. All deferred values
 /// share a pool starting at `non_local_space`; each value's final slot is
 /// computed by adding its block-local offset to the global base.
+///
+/// When coalescable allocas with alignment > 8 are mixed with non-aligned
+/// block-local values, `assign_slot(nls + block_offset, size, align)` can
+/// produce overlapping slot offsets because alignment rounding in assign_slot
+/// may cause differently-sized/aligned values to collapse to the same final
+/// offset. To prevent this, we align `non_local_space` up to the maximum
+/// alignment required by any deferred slot before computing final offsets.
+/// This ensures that `nls + block_offset` preserves the alignment invariants
+/// that were established during the block-space accumulation phase.
 fn finalize_deferred_slots(
     state: &mut super::state::CodegenState,
     deferred_slots: &[DeferredSlot],
@@ -1779,11 +1788,23 @@ fn finalize_deferred_slots(
     assign_slot: &impl Fn(i64, i64, i64) -> (i64, i64),
 ) -> i64 {
     if !deferred_slots.is_empty() && max_block_local_space > 0 {
+        // Find the maximum alignment required by any deferred slot and align
+        // non_local_space to it. This prevents alignment rounding in assign_slot
+        // from causing adjacent slots to overlap when nls is not aligned.
+        let max_align = deferred_slots.iter()
+            .map(|ds| if ds.align > 0 { ds.align } else { 8 })
+            .max()
+            .unwrap_or(8);
+        let aligned_nls = if max_align > 8 {
+            ((non_local_space + max_align - 1) / max_align) * max_align
+        } else {
+            non_local_space
+        };
         for ds in deferred_slots {
-            let (slot, _) = assign_slot(non_local_space + ds.block_offset, ds.size, ds.align);
+            let (slot, _) = assign_slot(aligned_nls + ds.block_offset, ds.size, ds.align);
             state.value_locations.insert(ds.dest_id, StackSlot(slot));
         }
-        non_local_space + max_block_local_space
+        aligned_nls + max_block_local_space
     } else {
         non_local_space
     }
