@@ -5,7 +5,7 @@ use crate::common::types::IrType;
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
 use crate::backend::call_emit::{ParamClass, classify_params};
 use super::codegen::{
-    RiscvCodegen, callee_saved_name, max_gp_reg_args_in_calls,
+    RiscvCodegen, callee_saved_name,
     collect_inline_asm_callee_saved_riscv, RISCV_CALLEE_SAVED, CALL_TEMP_CALLEE_SAVED,
     RISCV_ARG_REGS,
 };
@@ -43,23 +43,12 @@ impl RiscvCodegen {
         let mut asm_clobbered_regs: Vec<crate::backend::regalloc::PhysReg> = Vec::new();
         collect_inline_asm_callee_saved_riscv(func, &mut asm_clobbered_regs);
 
-        // Determine which s2-s6 registers are needed as call staging temporaries.
-        // emit_call_reg_args uses s2-s6 when a call has >= 4 GP register arguments.
-        // Any s2-s6 registers NOT needed for call staging can be used by the
-        // register allocator, giving us up to 11 callee-saved registers instead of 6.
-        let max_gp = max_gp_reg_args_in_calls(func, &self.call_abi_config_impl());
-        let num_s_regs_for_calls = if max_gp > 3 {
-            (max_gp - 3).min(CALL_TEMP_CALLEE_SAVED.len())
-        } else {
-            0
-        };
-
-        // Build the full set of available callee-saved registers:
-        // Always available: s1, s7-s11 (RISCV_CALLEE_SAVED)
-        // Conditionally available: s2-s6 that are NOT reserved for call staging
+        // Build the full set of available callee-saved registers.
+        // All of s1-s11 are available for register allocation since call argument
+        // staging now uses only caller-saved t3/t4/t5 (no s-register staging).
         let mut all_available: Vec<crate::backend::regalloc::PhysReg> = RISCV_CALLEE_SAVED.to_vec();
-        for i in num_s_regs_for_calls..CALL_TEMP_CALLEE_SAVED.len() {
-            all_available.push(CALL_TEMP_CALLEE_SAVED[i]);
+        for &reg in CALL_TEMP_CALLEE_SAVED.iter() {
+            all_available.push(reg);
         }
 
         let available_regs = crate::backend::generation::filter_available_regs(&all_available, &asm_clobbered_regs);
@@ -68,15 +57,6 @@ impl RiscvCodegen {
             &mut self.reg_assignments, &mut self.used_callee_saved,
             true, // RISC-V asm emitter checks reg_assignments for inline asm operands
         );
-
-        // Add the s2-s6 registers that ARE needed for call staging to used_callee_saved,
-        // so they are saved/restored in the prologue/epilogue.
-        for i in 0..num_s_regs_for_calls {
-            let reg = CALL_TEMP_CALLEE_SAVED[i];
-            if !self.used_callee_saved.contains(&reg) {
-                self.used_callee_saved.push(reg);
-            }
-        }
 
         let space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size, align| {
             // RISC-V uses negative offsets from s0 (frame pointer)

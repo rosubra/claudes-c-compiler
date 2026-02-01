@@ -3,7 +3,6 @@ use crate::ir::ir::{
     AtomicOrdering,
     AtomicRmwOp,
     BlockId,
-    Instruction,
     IntrinsicOp,
     IrBinOp,
     IrCmpOp,
@@ -47,29 +46,6 @@ pub(super) fn callee_saved_name(reg: PhysReg) -> &'static str {
         6 => "s6", 7 => "s7", 8 => "s8", 9 => "s9", 10 => "s10", 11 => "s11",
         _ => unreachable!("invalid RISC-V callee-saved register index"),
     }
-}
-
-/// Scan all call/call_indirect instructions in a function and return the maximum
-/// number of GP register arguments across all calls.
-pub(super) fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize {
-    use crate::backend::call_abi::classify_call_args;
-    use crate::backend::call_abi::CallArgClass;
-
-    let mut max_gp = 0usize;
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            let info = match inst {
-                Instruction::Call { info, .. } | Instruction::CallIndirect { info, .. } => info,
-                _ => continue,
-            };
-            let classes = classify_call_args(&info.args, &info.arg_types, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_variadic, config);
-            let gp_count = classes.iter().filter(|c| matches!(c, CallArgClass::IntReg { .. })).count();
-            if gp_count > max_gp {
-                max_gp = gp_count;
-            }
-        }
-    }
-    max_gp
 }
 
 /// Scan inline asm instructions in a function and collect any callee-saved

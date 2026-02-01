@@ -185,18 +185,33 @@ impl RiscvCodegen {
                           struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
 
-        // GP args go to temps first, then FP args, then move GP from temp to aX.
-        let temp_regs = ["t3", "t4", "t5", "s2", "s3", "s4", "s5", "s6"];
-        let mut gp_temps: Vec<(usize, &str)> = Vec::new();
+        // GP arg staging strategy: use only caller-saved temp registers (t3, t4, t5)
+        // for staging, avoiding callee-saved s2-s6. This allows s2-s6 to be used
+        // by the register allocator, significantly reducing stack frame sizes.
+        //
+        // Phase 1: Stage the first 3 GP args into t3/t4/t5, handle float args.
+        // Phase 2: Move staged values to target a-registers.
+        // Phase 3: Load remaining GP args (4th+) directly into target a-registers.
+        //
+        // Phase 3 is safe because operand_to_t0 only reads from stack slots or
+        // callee-saved registers (never from a-registers), so writing to a-registers
+        // in Phase 2 doesn't conflict with loading sources in Phase 3.
+        let temp_regs = ["t3", "t4", "t5"];
+        let mut staged_gp: Vec<(usize, &str)> = Vec::new(); // (target_reg_idx, temp_reg)
+        let mut deferred_gp: Vec<(usize, usize)> = Vec::new(); // (target_reg_idx, arg_index)
         let mut temp_i = 0usize;
         for (i, arg) in args.iter().enumerate() {
             match arg_classes[i] {
                 CallArgClass::IntReg { reg_idx } => {
-                    self.operand_to_t0(arg);
                     if temp_i < temp_regs.len() {
+                        // Stage into t3/t4/t5
+                        self.operand_to_t0(arg);
                         self.state.emit_fmt(format_args!("    mv {}, t0", temp_regs[temp_i]));
-                        gp_temps.push((reg_idx, temp_regs[temp_i]));
+                        staged_gp.push((reg_idx, temp_regs[temp_i]));
                         temp_i += 1;
+                    } else {
+                        // Defer: will load directly into target a-register after Phase 2
+                        deferred_gp.push((reg_idx, i));
                     }
                 }
                 CallArgClass::FloatReg { reg_idx } => {
@@ -212,9 +227,22 @@ impl RiscvCodegen {
             }
         }
 
-        // Move GP args from temps to actual arg registers
-        for (target_idx, temp_reg) in &gp_temps {
+        // Phase 2: Move staged values from t3/t4/t5 to target a-registers
+        for (target_idx, temp_reg) in &staged_gp {
             self.state.emit_fmt(format_args!("    mv {}, {}", RISCV_ARG_REGS[*target_idx], temp_reg));
+        }
+
+        // Phase 3: Load deferred GP args directly into target a-registers.
+        // This is safe because operand_to_t0 reads from s0-relative stack slots
+        // or callee-saved s-registers, never from a-registers. Invalidate the
+        // accumulator cache first since Phase 2 emissions may have left stale
+        // cache entries.
+        if !deferred_gp.is_empty() {
+            self.state.reg_cache.invalidate_acc();
+        }
+        for &(target_idx, arg_idx) in &deferred_gp {
+            self.operand_to_t0(&args[arg_idx]);
+            self.state.emit_fmt(format_args!("    mv {}, t0", RISCV_ARG_REGS[target_idx]));
         }
 
         // Load F128 register pair args
