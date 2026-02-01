@@ -1,4 +1,4 @@
 # Task: fix_asm_goto_liveness
-Status: in_progress
+Status: completed
 Branch: master
-Description: Fix liveness analysis to include asm goto label targets as CFG successor edges, so that variables are properly live across asm goto boundaries.
+Description: Fix asm goto (InlineAsm with goto_labels) handling across the compiler: CFG analysis, mem2reg SSA construction, phi elimination, and backend liveness analysis all now correctly include asm goto label targets as control flow edges.

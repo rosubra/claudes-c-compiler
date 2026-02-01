@@ -402,7 +402,7 @@ fn assign_program_points(
     }
 }
 
-/// Phase 2: Build successor lists from block terminators.
+/// Phase 2: Build successor lists from block terminators and asm goto labels.
 fn build_successor_lists(
     func: &IrFunction,
     num_blocks: usize,
@@ -413,6 +413,18 @@ fn build_successor_lists(
         for target_id in terminator_targets(&block.terminator) {
             if let Some(&target_idx) = block_id_to_idx.get(&target_id) {
                 successors[idx].push(target_idx);
+            }
+        }
+        // InlineAsm goto_labels are implicit control flow edges.
+        for inst in &block.instructions {
+            if let Instruction::InlineAsm { goto_labels, .. } = inst {
+                for (_, label) in goto_labels {
+                    if let Some(&target_idx) = block_id_to_idx.get(&label.0) {
+                        if !successors[idx].contains(&target_idx) {
+                            successors[idx].push(target_idx);
+                        }
+                    }
+                }
             }
         }
     }

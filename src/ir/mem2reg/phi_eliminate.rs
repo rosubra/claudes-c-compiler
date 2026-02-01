@@ -68,66 +68,91 @@ pub fn eliminate_phis(module: &mut IrModule) {
     }
 }
 
-/// Returns the number of distinct successor block IDs for a terminator.
-fn successor_count(term: &Terminator) -> usize {
-    match term {
-        Terminator::Return(_) | Terminator::Unreachable => 0,
-        Terminator::Branch(_) => 1,
+/// Returns the number of distinct successor block IDs for a block.
+/// Accounts for both terminator targets and InlineAsm goto_labels.
+fn successor_count(block: &BasicBlock) -> usize {
+    let mut seen: Vec<BlockId> = Vec::new();
+    match &block.terminator {
+        Terminator::Return(_) | Terminator::Unreachable => {}
+        Terminator::Branch(label) => { seen.push(*label); }
         Terminator::CondBranch { true_label, false_label, .. } => {
-            if true_label == false_label { 1 } else { 2 }
+            seen.push(*true_label);
+            if true_label != false_label { seen.push(*false_label); }
         }
-        Terminator::IndirectBranch { possible_targets, .. } => possible_targets.len(),
+        Terminator::IndirectBranch { possible_targets, .. } => {
+            seen.extend_from_slice(possible_targets);
+        }
         Terminator::Switch { cases, default, .. } => {
-            let mut count = 1; // default
-            let mut seen = vec![*default];
+            seen.push(*default);
             for &(_, label) in cases {
-                if !seen.contains(&label) {
-                    seen.push(label);
-                    count += 1;
-                }
+                if !seen.contains(&label) { seen.push(label); }
             }
-            count
         }
     }
+    // InlineAsm goto_labels are implicit control flow edges.
+    for inst in &block.instructions {
+        if let Instruction::InlineAsm { goto_labels, .. } = inst {
+            for (_, label) in goto_labels {
+                if !seen.contains(label) { seen.push(*label); }
+            }
+        }
+    }
+    seen.len()
 }
 
-/// Replace one occurrence of `old_target` with `new_target` in a terminator.
-fn retarget_terminator_once(term: &mut Terminator, old_target: BlockId, new_target: BlockId) {
-    match term {
+/// Replace one occurrence of `old_target` with `new_target` in a block's
+/// terminator or InlineAsm goto_labels.
+fn retarget_block_edge_once(block: &mut BasicBlock, old_target: BlockId, new_target: BlockId) {
+    match &mut block.terminator {
         Terminator::Branch(t) => {
             if *t == old_target {
                 *t = new_target;
+                return;
             }
         }
         Terminator::CondBranch { true_label, false_label, .. } => {
             // Only retarget one edge to avoid changing both sides of a diamond
             if *true_label == old_target {
                 *true_label = new_target;
+                return;
             } else if *false_label == old_target {
                 *false_label = new_target;
+                return;
             }
         }
         Terminator::IndirectBranch { possible_targets, .. } => {
             for t in possible_targets.iter_mut() {
                 if *t == old_target {
                     *t = new_target;
-                    break;
+                    return;
                 }
             }
         }
         Terminator::Switch { cases, default, .. } => {
             if *default == old_target {
                 *default = new_target;
+                return;
             } else {
                 for (_, t) in cases.iter_mut() {
                     if *t == old_target {
                         *t = new_target;
-                        break;
+                        return;
                     }
                 }
             }
         }
         _ => {}
+    }
+    // Check InlineAsm goto_labels for implicit control flow edges.
+    for inst in &mut block.instructions {
+        if let Instruction::InlineAsm { goto_labels, .. } = inst {
+            for (_, label) in goto_labels.iter_mut() {
+                if *label == old_target {
+                    *label = new_target;
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -231,7 +256,7 @@ struct PhiElimCtx<'a> {
 fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
     let mut ctx = PhiElimCtx {
         label_to_idx: func.blocks.iter().enumerate().map(|(i, b)| (b.label, i)).collect(),
-        multi_succ: func.blocks.iter().map(|b| successor_count(&b.terminator) > 1).collect(),
+        multi_succ: func.blocks.iter().map(|b| successor_count(b) > 1).collect(),
         is_indirect_branch: func.blocks.iter()
             .map(|b| matches!(&b.terminator, Terminator::IndirectBranch { .. })).collect(),
         pred_copies: FxHashMap::default(),
@@ -472,8 +497,8 @@ fn apply_phi_transformations(func: &mut IrFunction, ctx: &mut PhiElimCtx) {
 
     // Retarget predecessors that need trampolines
     for trampoline in &ctx.trampolines {
-        retarget_terminator_once(
-            &mut func.blocks[trampoline.pred_idx].terminator,
+        retarget_block_edge_once(
+            &mut func.blocks[trampoline.pred_idx],
             trampoline.old_target,
             trampoline.label,
         );

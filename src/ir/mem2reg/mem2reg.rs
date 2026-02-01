@@ -588,7 +588,17 @@ fn rename_block(
     // (this shouldn't normally happen, but let's be safe)
 
     // Fill in phi incoming values in successor blocks
-    let succ_labels = get_successor_labels(&func.blocks[block_idx].terminator);
+    let mut succ_labels = get_successor_labels(&func.blocks[block_idx].terminator);
+    // InlineAsm goto_labels are implicit control flow edges.
+    for inst in &func.blocks[block_idx].instructions {
+        if let Instruction::InlineAsm { goto_labels, .. } = inst {
+            for (_, label) in goto_labels {
+                if !succ_labels.contains(label) {
+                    succ_labels.push(*label);
+                }
+            }
+        }
+    }
     let current_block_label = func.blocks[block_idx].label;
 
     for succ_label in &succ_labels {

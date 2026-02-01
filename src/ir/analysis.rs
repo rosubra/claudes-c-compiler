@@ -12,7 +12,7 @@
 //! if_convert, and mem2reg.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::ir::ir::{BlockId, IrFunction, Terminator};
+use crate::ir::ir::{BlockId, Instruction, IrFunction, Terminator};
 
 // ── Flat adjacency list (CSR format) ──────────────────────────────────────────
 
@@ -166,6 +166,20 @@ pub fn build_cfg(
                 }
             }
             Terminator::Return(_) | Terminator::Unreachable => {}
+        }
+        // InlineAsm goto_labels are implicit control flow edges.
+        for inst in &block.instructions {
+            if let Instruction::InlineAsm { goto_labels, .. } = inst {
+                for (_, label) in goto_labels {
+                    if let Some(&t) = label_to_idx.get(label) {
+                        let t32 = t as u32;
+                        if !succs[i].contains(&t32) {
+                            succs[i].push(t32);
+                        }
+                        preds[t].push(i32);
+                    }
+                }
+            }
         }
     }
 
