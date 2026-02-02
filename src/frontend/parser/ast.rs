@@ -474,7 +474,6 @@ pub enum Designator {
 
 /// Type specifiers.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum TypeSpecifier {
     Void,
     Char,
@@ -485,7 +484,9 @@ pub enum TypeSpecifier {
     Float,
     Double,
     LongDouble,
+    #[allow(dead_code)] // Matched in type resolution but not currently emitted by parser
     Signed,
+    #[allow(dead_code)] // Matched in type resolution but not currently emitted by parser
     Unsigned,
     UnsignedChar,
     UnsignedShort,
@@ -547,7 +548,6 @@ pub struct EnumVariant {
 
 /// A compound statement (block).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CompoundStmt {
     pub items: Vec<BlockItem>,
     /// GNU __label__ declarations: local label names scoped to this block.

@@ -349,7 +349,6 @@ pub fn build_dom_tree_children(num_blocks: usize, idom: &[usize]) -> Vec<Vec<usi
 /// these results remain valid across all three passes. Computing them once
 /// and sharing avoids redundant `build_cfg` + `compute_dominators` +
 /// `find_natural_loops` calls per function per iteration.
-#[allow(dead_code)]
 pub struct CfgAnalysis {
     pub preds: FlatAdj,
     pub succs: FlatAdj,

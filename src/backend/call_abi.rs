@@ -97,7 +97,6 @@ impl CallArgClass {
 /// kind of store logic is needed, without the backend reimplementing the ABI
 /// classification algorithm.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum ParamClass {
     /// Integer/pointer in GP register at `reg_idx`.
     IntReg { reg_idx: usize },
@@ -110,8 +109,12 @@ pub enum ParamClass {
     /// Small struct where all eightbytes are SSE class -> 1-2 XMM registers.
     StructSseReg { lo_fp_idx: usize, hi_fp_idx: Option<usize>, size: usize },
     /// Small struct: first eightbyte INTEGER, second SSE.
+    /// (`size` is carried for ABI symmetry but not yet consumed by any backend.)
+    #[allow(dead_code)]
     StructMixedIntSseReg { int_reg_idx: usize, fp_reg_idx: usize, size: usize },
     /// Small struct: first eightbyte SSE, second INTEGER.
+    /// (`size` is carried for ABI symmetry but not yet consumed by any backend.)
+    #[allow(dead_code)]
     StructMixedSseIntReg { fp_reg_idx: usize, int_reg_idx: usize, size: usize },
     /// F128 (long double) in FP register (ARM: Q-reg).
     F128FpReg { reg_idx: usize },
@@ -247,7 +250,6 @@ pub struct CallAbiConfig {
 /// Result of SysV per-eightbyte struct classification.
 /// Describes how a small struct (<=16 bytes) should be passed in registers.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum SysvStructRegClass {
     /// All eightbytes are INTEGER class -> GP registers only.
     AllInt,
@@ -312,7 +314,6 @@ pub fn classify_sysv_struct(
 /// Both the caller (`classify_call_args`) and callee (`classify_params_full`) paths
 /// construct one `ArgInfo` per argument/parameter, then pass the slice to the shared
 /// `classify_args_core` function.
-#[allow(dead_code)]
 pub(crate) struct ArgInfo<'a> {
     pub(crate) is_float: bool,
     pub(crate) is_i128: bool,

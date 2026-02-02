@@ -71,7 +71,6 @@ pub type ExprTypeMap = FxHashMap<ExprId, CType>;
 
 /// Information about a function collected during semantic analysis.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FunctionInfo {
     pub return_type: CType,
     pub params: Vec<(CType, Option<String>)>,

@@ -448,7 +448,6 @@ pub struct BuiltinInfo {
 
 /// The kind of builtin behavior.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum BuiltinKind {
     /// Map directly to a libc function call.
     LibcAlias(String),

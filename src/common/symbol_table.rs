@@ -3,7 +3,6 @@ use crate::common::fx_hash::FxHashMap;
 
 /// Information about a declared symbol.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Symbol {
     pub name: String,
     pub ty: CType,
