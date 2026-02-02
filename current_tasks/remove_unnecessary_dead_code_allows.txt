@@ -1,0 +1,20 @@
+Remove unnecessary #[allow(dead_code)] annotations from actively-used items.
+
+10 of the 17 #[allow(dead_code)] annotations in the codebase suppress warnings on
+items (structs, enums, functions) that are actually fully used. These annotations
+are cargo-cult leftovers that obscure genuine dead code.
+
+Removals:
+- src/ir/analysis.rs: CfgAnalysis (all fields used)
+- src/common/symbol_table.rs: Symbol (all fields used)
+- src/frontend/parser/ast.rs: TypeSpecifier, CompoundStmt (all variants/fields used)
+- src/frontend/preprocessor/macro_defs.rs: MacroDef (all fields used)
+- src/frontend/sema/sema.rs: FunctionInfo (all fields used)
+- src/frontend/sema/builtins.rs: BuiltinKind (all variants used)
+- src/backend/liveness.rs: LivenessResult (all fields used)
+- src/backend/call_abi.rs: ParamClass, SysvStructRegClass, ArgInfo (all used)
+
+Also clean up format!() allocations used just for HashMap lookups where
+a cheaper approach exists.
+
+No functional changes.
