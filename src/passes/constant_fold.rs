@@ -1049,7 +1049,7 @@ mod tests {
     fn test_fold_float_cast_float_to_int() {
         let inst = Instruction::Cast {
             dest: Value(0),
-            src: Operand::Const(IrConst::F64(3.14)),
+            src: Operand::Const(IrConst::F64(3.125)),
             from_ty: IrType::F64,
             to_ty: IrType::I32,
         };

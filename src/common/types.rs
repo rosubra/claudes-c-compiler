@@ -1772,14 +1772,14 @@ impl IrType {
     }
 
     /// Get the unsigned counterpart of this type.
-    pub fn to_unsigned(&self) -> Self {
+    pub fn to_unsigned(self) -> Self {
         match self {
             IrType::I8 => IrType::U8,
             IrType::I16 => IrType::U16,
             IrType::I32 => IrType::U32,
             IrType::I64 => IrType::U64,
             IrType::I128 => IrType::U128,
-            other => *other,
+            other => other,
         }
     }
 

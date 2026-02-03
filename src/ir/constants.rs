@@ -242,31 +242,31 @@ impl IrConst {
     }
 
     /// Convert to a hashable key representation (using bit patterns for floats).
-    pub fn to_hash_key(&self) -> ConstHashKey {
+    pub fn to_hash_key(self) -> ConstHashKey {
         match self {
-            IrConst::I8(v) => ConstHashKey::I8(*v),
-            IrConst::I16(v) => ConstHashKey::I16(*v),
-            IrConst::I32(v) => ConstHashKey::I32(*v),
-            IrConst::I64(v) => ConstHashKey::I64(*v),
-            IrConst::I128(v) => ConstHashKey::I128(*v),
+            IrConst::I8(v) => ConstHashKey::I8(v),
+            IrConst::I16(v) => ConstHashKey::I16(v),
+            IrConst::I32(v) => ConstHashKey::I32(v),
+            IrConst::I64(v) => ConstHashKey::I64(v),
+            IrConst::I128(v) => ConstHashKey::I128(v),
             IrConst::F32(v) => ConstHashKey::F32(v.to_bits()),
             IrConst::F64(v) => ConstHashKey::F64(v.to_bits()),
-            IrConst::LongDouble(_, bytes) => ConstHashKey::LongDouble(*bytes),
+            IrConst::LongDouble(_, bytes) => ConstHashKey::LongDouble(bytes),
             IrConst::Zero => ConstHashKey::Zero,
         }
     }
 
     /// Extract as f64 (works for all numeric types).
-    pub fn to_f64(&self) -> Option<f64> {
+    pub fn to_f64(self) -> Option<f64> {
         match self {
-            IrConst::I8(v) => Some(*v as f64),
-            IrConst::I16(v) => Some(*v as f64),
-            IrConst::I32(v) => Some(*v as f64),
-            IrConst::I64(v) => Some(*v as f64),
-            IrConst::I128(v) => Some(*v as f64),
-            IrConst::F32(v) => Some(*v as f64),
-            IrConst::F64(v) => Some(*v),
-            IrConst::LongDouble(v, _) => Some(*v),
+            IrConst::I8(v) => Some(v as f64),
+            IrConst::I16(v) => Some(v as f64),
+            IrConst::I32(v) => Some(v as f64),
+            IrConst::I64(v) => Some(v as f64),
+            IrConst::I128(v) => Some(v as f64),
+            IrConst::F32(v) => Some(v as f64),
+            IrConst::F64(v) => Some(v),
+            IrConst::LongDouble(v, _) => Some(v),
             IrConst::Zero => Some(0.0),
         }
     }
@@ -319,13 +319,13 @@ impl IrConst {
     }
 
     /// Extract as i64 (integer constants only; floats return None).
-    pub fn to_i64(&self) -> Option<i64> {
+    pub fn to_i64(self) -> Option<i64> {
         match self {
-            IrConst::I8(v) => Some(*v as i64),
-            IrConst::I16(v) => Some(*v as i64),
-            IrConst::I32(v) => Some(*v as i64),
-            IrConst::I64(v) => Some(*v),
-            IrConst::I128(v) => Some(*v as i64),
+            IrConst::I8(v) => Some(v as i64),
+            IrConst::I16(v) => Some(v as i64),
+            IrConst::I32(v) => Some(v as i64),
+            IrConst::I64(v) => Some(v),
+            IrConst::I128(v) => Some(v as i64),
             IrConst::Zero => Some(0),
             IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..) => None,
         }
@@ -333,38 +333,38 @@ impl IrConst {
 
     /// Extract as i128 (integer constants only; floats return None).
     /// Unlike to_i64(), this preserves the full 128-bit value.
-    pub fn to_i128(&self) -> Option<i128> {
+    pub fn to_i128(self) -> Option<i128> {
         match self {
-            IrConst::I8(v) => Some(*v as i128),
-            IrConst::I16(v) => Some(*v as i128),
-            IrConst::I32(v) => Some(*v as i128),
-            IrConst::I64(v) => Some(*v as i128),
-            IrConst::I128(v) => Some(*v),
+            IrConst::I8(v) => Some(v as i128),
+            IrConst::I16(v) => Some(v as i128),
+            IrConst::I32(v) => Some(v as i128),
+            IrConst::I64(v) => Some(v as i128),
+            IrConst::I128(v) => Some(v),
             IrConst::Zero => Some(0),
             IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..) => None,
         }
     }
 
     /// Extract as u64 (integer constants only; floats return None).
-    pub fn to_u64(&self) -> Option<u64> {
+    pub fn to_u64(self) -> Option<u64> {
         match self {
-            IrConst::I8(v) => Some(*v as u64),
-            IrConst::I16(v) => Some(*v as u64),
-            IrConst::I32(v) => Some(*v as u64),
-            IrConst::I64(v) => Some(*v as u64),
-            IrConst::I128(v) => Some(*v as u64),
+            IrConst::I8(v) => Some(v as u64),
+            IrConst::I16(v) => Some(v as u64),
+            IrConst::I32(v) => Some(v as u64),
+            IrConst::I64(v) => Some(v as u64),
+            IrConst::I128(v) => Some(v as u64),
             IrConst::Zero => Some(0),
             IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..) => None,
         }
     }
 
     /// Extract as usize (integer constants only).
-    pub fn to_usize(&self) -> Option<usize> {
+    pub fn to_usize(self) -> Option<usize> {
         self.to_i64().map(|v| v as usize)
     }
 
     /// Extract as u32 (integer constants only).
-    pub fn to_u32(&self) -> Option<u32> {
+    pub fn to_u32(self) -> Option<u32> {
         self.to_i64().map(|v| v as u32)
     }
 
@@ -606,9 +606,9 @@ impl IrConst {
 
     /// Serialize this constant to little-endian bytes.
     /// Returns a Vec containing the value in little-endian byte order.
-    pub fn to_le_bytes(&self) -> Vec<u8> {
+    pub fn to_le_bytes(self) -> Vec<u8> {
         match self {
-            IrConst::I8(v) => vec![*v as u8],
+            IrConst::I8(v) => vec![v as u8],
             IrConst::I16(v) => v.to_le_bytes().to_vec(),
             IrConst::I32(v) => v.to_le_bytes().to_vec(),
             IrConst::I64(v) => v.to_le_bytes().to_vec(),

@@ -14,9 +14,6 @@
 // variable is used as both an index and for bounds arithmetic. Converting to iterators
 // would obscure the sliding-window logic.
 #![allow(clippy::needless_range_loop)]
-// Methods like to_ir_type() on Copy types take &self for consistency with non-Copy
-// siblings and trait method signatures.
-#![allow(clippy::wrong_self_convention)]
 
 pub(crate) mod common;
 pub(crate) mod frontend;

@@ -129,21 +129,6 @@ pub fn peephole_optimize(asm: String) -> String {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-fn is_self_move(s: &str) -> bool {
-    if let Some(rest) = s.strip_prefix("movq ") {
-        let rest = rest.trim();
-        if let Some((src, dst)) = rest.split_once(',') {
-            let src = src.trim();
-            let dst = dst.trim();
-            if src == dst && src.starts_with('%') {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
