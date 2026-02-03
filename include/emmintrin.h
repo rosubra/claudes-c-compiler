@@ -216,6 +216,12 @@ _mm_subs_epu8(__m128i __a, __m128i __b)
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
+_mm_subs_epi8(__m128i __a, __m128i __b)
+{
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_psubsb128(__a, __b));
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
 _mm_avg_epu8(__m128i __a, __m128i __b)
 {
     /* Unsigned byte average with rounding: (a + b + 1) >> 1 for each byte. */

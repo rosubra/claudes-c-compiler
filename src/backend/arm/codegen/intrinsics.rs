@@ -148,6 +148,11 @@ impl ArmCodegen {
                     self.emit_neon_binary_128(dptr, args, "uqsub");
                 }
             }
+            IntrinsicOp::Psubsb128 => {
+                if let Some(dptr) = dest_ptr {
+                    self.emit_neon_binary_128(dptr, args, "sqsub");
+                }
+            }
             IntrinsicOp::Por128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_neon_binary_128(dptr, args, "orr");

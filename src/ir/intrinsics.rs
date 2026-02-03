@@ -38,6 +38,8 @@ pub enum IntrinsicOp {
     Pcmpeqd128,
     /// Subtract packed unsigned saturated bytes
     Psubusb128,
+    /// Subtract packed signed saturated bytes
+    Psubsb128,
     /// Bitwise OR/AND/XOR on 128-bit
     Por128,
     Pand128,
@@ -198,6 +200,7 @@ impl IntrinsicOp {
             IntrinsicOp::Psllqi128 | IntrinsicOp::Psrlqi128 |
             IntrinsicOp::Pshufd128 |
             // SSE2 packed operations are all pure
+            IntrinsicOp::Psubsb128 |
             IntrinsicOp::Paddw128 | IntrinsicOp::Psubw128 |
             IntrinsicOp::Pmulhw128 | IntrinsicOp::Pmaddwd128 |
             IntrinsicOp::Pcmpgtw128 | IntrinsicOp::Pcmpgtb128 |

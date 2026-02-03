@@ -373,6 +373,7 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Movntdq | BuiltinIntrinsic::X86Movntpd
             | BuiltinIntrinsic::X86Loaddqu | BuiltinIntrinsic::X86Pcmpeqb128
             | BuiltinIntrinsic::X86Pcmpeqd128 | BuiltinIntrinsic::X86Psubusb128
+            | BuiltinIntrinsic::X86Psubsb128
             | BuiltinIntrinsic::X86Por128 | BuiltinIntrinsic::X86Pand128
             | BuiltinIntrinsic::X86Pxor128 | BuiltinIntrinsic::X86Set1Epi8
             | BuiltinIntrinsic::X86Set1Epi32 | BuiltinIntrinsic::X86Aesenc128
@@ -786,6 +787,7 @@ fn x86_intrinsic_op(intrinsic: &BuiltinIntrinsic) -> IntrinsicOp {
         BuiltinIntrinsic::X86Pcmpeqb128 => IntrinsicOp::Pcmpeqb128,
         BuiltinIntrinsic::X86Pcmpeqd128 => IntrinsicOp::Pcmpeqd128,
         BuiltinIntrinsic::X86Psubusb128 => IntrinsicOp::Psubusb128,
+        BuiltinIntrinsic::X86Psubsb128 => IntrinsicOp::Psubsb128,
         BuiltinIntrinsic::X86Por128 => IntrinsicOp::Por128,
         BuiltinIntrinsic::X86Pand128 => IntrinsicOp::Pand128,
         BuiltinIntrinsic::X86Pxor128 => IntrinsicOp::Pxor128,

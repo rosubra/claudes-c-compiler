@@ -46,84 +46,109 @@ impl Lowerer {
         let lhs_raw = self.lower_expr(&args[0]);
         let rhs_raw = self.lower_expr(&args[1]);
 
-        // For generic variants, operands may have narrower/different types than the
-        // result. Cast each operand respecting its own signedness (sign-extend for
-        // signed, zero-extend for unsigned) so that e.g. (int)-16 is correctly
-        // represented in u128.
+        // For generic variants, operands may have different types than the result.
+        // We need to perform the computation in a type wide enough to hold all
+        // possible values from both operand types, then check if the result fits
+        // in the target result type.
         let lhs_src_ctype = self.expr_ctype(&args[0]);
         let rhs_src_ctype = self.expr_ctype(&args[1]);
-        let (lhs_val, rhs_val) = if is_generic {
-            let lhs_src_ir = IrType::from_ctype(&lhs_src_ctype);
-            let rhs_src_ir = IrType::from_ctype(&rhs_src_ctype);
-            let lhs = if lhs_src_ir != result_ir_ty {
-                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, result_ir_ty))
-            } else {
-                lhs_raw
-            };
-            let rhs = if rhs_src_ir != result_ir_ty {
-                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, result_ir_ty))
-            } else {
-                rhs_raw
-            };
-            (lhs, rhs)
-        } else {
-            (lhs_raw, rhs_raw)
-        };
 
         // Get the result pointer
         let result_ptr_val = self.lower_expr(&args[2]);
         let result_ptr = self.operand_to_value(result_ptr_val);
 
-        // Perform the operation in the result type (operands are now properly widened)
-        let result = self.emit_binop_val(op, lhs_val, rhs_val, result_ir_ty);
-
-        // Compute the overflow flag BEFORE storing the result, because the
-        // output pointer may alias an input (e.g. __builtin_add_overflow(a, b, &a)).
-        // If we store first, the overflow check would compare against the
-        // clobbered value instead of the original input.
-        let any_source_signed = is_generic
-            && (lhs_src_ctype.is_signed() || rhs_src_ctype.is_signed());
-        let overflow = if is_signed {
-            self.compute_signed_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
-        } else if any_source_signed {
-            // Generic variant with signed source(s) and unsigned result.
-            // When all source types are narrower than the result type, both
-            // operands fit in the signed variant of the result type, so the
-            // operation in the unsigned result type is exact (no unsigned wrapping
-            // can occur). Overflow only happens if the mathematical result is
-            // negative (detected via sign bit).
-            // When a source is as wide as the result type, unsigned wrapping CAN
-            // occur, so we must also check for standard unsigned overflow.
+        if is_generic {
             let lhs_src_ir = IrType::from_ctype(&lhs_src_ctype);
             let rhs_src_ir = IrType::from_ctype(&rhs_src_ctype);
-            let sources_narrower = lhs_src_ir.size() < result_ir_ty.size()
-                && rhs_src_ir.size() < result_ir_ty.size();
-            if sources_narrower {
-                // All sources narrower: only negative result can overflow unsigned
-                self.check_result_sign_bit(result, result_ir_ty)
+
+            // Determine a computation type wide enough to hold the exact mathematical
+            // result. We need a signed type that can represent all values of both
+            // operands without loss.
+            let max_src_size = lhs_src_ir.size().max(rhs_src_ir.size()).max(result_ir_ty.size());
+            // If any source is unsigned and as wide as max_src_size, we need one
+            // extra width level to avoid losing the unsigned range.
+            let needs_wider = (!lhs_src_ctype.is_signed() && lhs_src_ir.size() >= max_src_size)
+                || (!rhs_src_ctype.is_signed() && rhs_src_ir.size() >= max_src_size);
+            let compute_size = if needs_wider { max_src_size * 2 } else { max_src_size };
+            let compute_size = compute_size.max(result_ir_ty.size());
+            // Use a signed compute type so we can detect negative results
+            let compute_ty = match compute_size {
+                1 => IrType::I16, // widen 8-bit to at least 16
+                2 => IrType::I32,
+                4 => IrType::I64,
+                8 => IrType::I64,
+                _ => IrType::I128,
+            };
+
+            // Cast operands to the compute type respecting their signedness
+            let lhs_compute = if lhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
             } else {
-                // At least one source is as wide as result: check both conditions
-                let sign_ov = self.check_result_sign_bit(result, result_ir_ty);
-                let unsigned_ov = self.compute_unsigned_overflow(
-                    op, lhs_val, rhs_val, result, result_ir_ty,
+                lhs_raw
+            };
+            let rhs_compute = if rhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
+            } else {
+                rhs_raw
+            };
+
+            if compute_ty != result_ir_ty {
+                // We were able to widen: compute exactly, truncate, and check
+                // if the truncated result round-trips back to the wide value.
+                let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
+
+                let truncated = self.emit_cast_val(Operand::Value(wide_result), compute_ty, result_ir_ty);
+
+                let extended_back = self.emit_cast_val(Operand::Value(truncated), result_ir_ty, compute_ty);
+                let overflow = self.emit_cmp_val(
+                    IrCmpOp::Ne,
+                    Operand::Value(wide_result),
+                    Operand::Value(extended_back),
+                    compute_ty,
                 );
-                self.emit_binop_val(
-                    IrBinOp::Or,
-                    Operand::Value(sign_ov),
-                    Operand::Value(unsigned_ov),
-                    result_ir_ty,
-                )
+
+                // Store the truncated result
+                self.emit(Instruction::Store { val: Operand::Value(truncated), ptr: result_ptr, ty: result_ir_ty,
+                 seg_override: AddressSpace::Default });
+
+                Some(Operand::Value(overflow))
+            } else {
+                // Could not widen (e.g. both operands and result are int64).
+                // Fall back to same-type overflow detection.
+                let result = self.emit_binop_val(op, lhs_compute, rhs_compute, result_ir_ty);
+
+                let overflow = if is_signed {
+                    self.compute_signed_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+                } else {
+                    self.compute_unsigned_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+                };
+
+                self.emit(Instruction::Store { val: Operand::Value(result), ptr: result_ptr, ty: result_ir_ty,
+                 seg_override: AddressSpace::Default });
+
+                Some(Operand::Value(overflow))
             }
         } else {
-            self.compute_unsigned_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
-        };
+            // Type-specific variants: operands already match the result type
+            let (lhs_val, rhs_val) = (lhs_raw, rhs_raw);
 
-        // Store the (possibly truncated/wrapped) result AFTER computing the
-        // overflow flag to avoid clobbering aliased inputs.
-        self.emit(Instruction::Store { val: Operand::Value(result), ptr: result_ptr, ty: result_ir_ty,
-         seg_override: AddressSpace::Default });
+            // Perform the operation in the result type
+            let result = self.emit_binop_val(op, lhs_val, rhs_val, result_ir_ty);
 
-        Some(Operand::Value(overflow))
+            // Compute the overflow flag BEFORE storing the result, because the
+            // output pointer may alias an input.
+            let overflow = if is_signed {
+                self.compute_signed_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+            } else {
+                self.compute_unsigned_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+            };
+
+            // Store the result
+            self.emit(Instruction::Store { val: Operand::Value(result), ptr: result_ptr, ty: result_ir_ty,
+             seg_override: AddressSpace::Default });
+
+            Some(Operand::Value(overflow))
+        }
     }
 
     /// Lower __builtin_{add,sub,mul}_overflow_p(a, b, (T)0) predicate-only variants.
@@ -137,7 +162,6 @@ impl Lowerer {
 
         // The third argument determines the result type (only its type matters, not its value).
         let result_ctype = self.expr_ctype(&args[2]);
-        let is_signed = result_ctype.is_signed();
         let result_ir_ty = IrType::from_ctype(&result_ctype);
 
         // Lower the two operands
@@ -148,51 +172,68 @@ impl Lowerer {
         // in practice it's always a cast of 0)
         let _ = self.lower_expr(&args[2]);
 
-        // Cast operands to the result type, respecting their original signedness
+        // Use the same wider-type computation as the non-_p generic variant:
+        // compute in a type wide enough to hold the exact result, then check
+        // if truncating to the result type loses information.
         let lhs_src_ctype = self.expr_ctype(&args[0]);
         let rhs_src_ctype = self.expr_ctype(&args[1]);
         let lhs_src_ir = IrType::from_ctype(&lhs_src_ctype);
         let rhs_src_ir = IrType::from_ctype(&rhs_src_ctype);
-        let lhs_val = if lhs_src_ir != result_ir_ty {
-            Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, result_ir_ty))
+
+        let max_src_size = lhs_src_ir.size().max(rhs_src_ir.size()).max(result_ir_ty.size());
+        let needs_wider = (!lhs_src_ctype.is_signed() && lhs_src_ir.size() >= max_src_size)
+            || (!rhs_src_ctype.is_signed() && rhs_src_ir.size() >= max_src_size);
+        let compute_size = if needs_wider { max_src_size * 2 } else { max_src_size };
+        let compute_size = compute_size.max(result_ir_ty.size());
+        let compute_ty = match compute_size {
+            1 => IrType::I16,
+            2 => IrType::I32,
+            4 => IrType::I64,
+            8 => IrType::I64,
+            _ => IrType::I128,
+        };
+
+        let lhs_compute = if lhs_src_ir != compute_ty {
+            Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
         } else {
             lhs_raw
         };
-        let rhs_val = if rhs_src_ir != result_ir_ty {
-            Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, result_ir_ty))
+        let rhs_compute = if rhs_src_ir != compute_ty {
+            Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
         } else {
             rhs_raw
         };
 
-        // Perform the operation in the result type
-        let result = self.emit_binop_val(op, lhs_val, rhs_val, result_ir_ty);
+        if compute_ty != result_ir_ty {
+            // We were able to widen: compute exactly, truncate, and check
+            // if the truncated result round-trips back to the wide value.
+            let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
 
-        // Compute the overflow flag (same logic as the non-_p variant)
-        let any_source_signed = lhs_src_ctype.is_signed() || rhs_src_ctype.is_signed();
-        let overflow = if is_signed {
-            self.compute_signed_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
-        } else if any_source_signed {
-            let sources_narrower = lhs_src_ir.size() < result_ir_ty.size()
-                && rhs_src_ir.size() < result_ir_ty.size();
-            if sources_narrower {
-                self.check_result_sign_bit(result, result_ir_ty)
-            } else {
-                let sign_ov = self.check_result_sign_bit(result, result_ir_ty);
-                let unsigned_ov = self.compute_unsigned_overflow(
-                    op, lhs_val, rhs_val, result, result_ir_ty,
-                );
-                self.emit_binop_val(
-                    IrBinOp::Or,
-                    Operand::Value(sign_ov),
-                    Operand::Value(unsigned_ov),
-                    result_ir_ty,
-                )
-            }
+            let truncated = self.emit_cast_val(Operand::Value(wide_result), compute_ty, result_ir_ty);
+
+            let extended_back = self.emit_cast_val(Operand::Value(truncated), result_ir_ty, compute_ty);
+            let overflow = self.emit_cmp_val(
+                IrCmpOp::Ne,
+                Operand::Value(wide_result),
+                Operand::Value(extended_back),
+                compute_ty,
+            );
+
+            Some(Operand::Value(overflow))
         } else {
-            self.compute_unsigned_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
-        };
+            // Could not widen (e.g. both operands and result are int64).
+            // Fall back to same-type overflow detection.
+            let is_signed = result_ctype.is_signed();
+            let result = self.emit_binop_val(op, lhs_compute, rhs_compute, result_ir_ty);
 
-        Some(Operand::Value(overflow))
+            let overflow = if is_signed {
+                self.compute_signed_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+            } else {
+                self.compute_unsigned_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+            };
+
+            Some(Operand::Value(overflow))
+        }
     }
 
     /// Determine the result IrType and signedness for an overflow builtin.
@@ -335,28 +376,6 @@ impl Lowerer {
             }
             _ => unreachable!("overflow only for add/sub/mul"),
         }
-    }
-
-    /// Check if the sign bit of `result` is set when interpreted in `ty`.
-    /// Returns a value that is non-zero (1) if the sign bit is set, 0 otherwise.
-    /// Used to detect overflow when a signed source produces a negative result
-    /// that is being stored into an unsigned result type.
-    fn check_result_sign_bit(&mut self, result: Value, ty: IrType) -> Value {
-        let bits = (ty.size() * 8) as i64;
-        // Arithmetic shift right by (bits-1): all-ones if negative, all-zeros if positive
-        let shifted = self.emit_binop_val(
-            IrBinOp::AShr,
-            Operand::Value(result),
-            Operand::Const(IrConst::I64(bits - 1)),
-            ty,
-        );
-        // AND with 1 to get 0 or 1
-        self.emit_binop_val(
-            IrBinOp::And,
-            Operand::Value(shifted),
-            Operand::Const(IrConst::I64(1)),
-            ty,
-        )
     }
 
     /// Get the double-width integer type for overflow multiply detection.

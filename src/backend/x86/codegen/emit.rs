@@ -367,7 +367,14 @@ impl X86Codegen {
                     // If same register, nothing to do
                 } else if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
-                        self.state.out.emit_instr_rbp_reg("    leaq", slot.0, target_name);
+                        if let Some(align) = self.state.alloca_over_align(v.0) {
+                            // Over-aligned alloca: compute aligned address
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, target_name);
+                            self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, target_name);
+                            self.state.out.emit_instr_imm_reg("    andq", -(align as i64), target_name);
+                        } else {
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, target_name);
+                        }
                     } else {
                         self.state.out.emit_instr_rbp_reg("    movq", slot.0, target_name);
                     }
@@ -654,7 +661,14 @@ impl X86Codegen {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
                         // Alloca: load the address (not a 128-bit value itself)
-                        self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rax");
+                        if let Some(align) = self.state.alloca_over_align(v.0) {
+                            // Over-aligned alloca: compute aligned address
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rax");
+                            self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, "rax");
+                            self.state.out.emit_instr_imm_reg("    andq", -(align as i64), "rax");
+                        } else {
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rax");
+                        }
                         self.state.emit("    xorl %edx, %edx");
                     } else if self.state.is_i128_value(v.0) {
                         // 128-bit value in 16-byte stack slot

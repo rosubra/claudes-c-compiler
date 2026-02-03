@@ -92,6 +92,12 @@ impl RiscvCodegen {
                     self.emit_rv_binary_128_bytewise(dptr, args);
                 }
             }
+            IntrinsicOp::Psubsb128 => {
+                // Signed saturating byte subtract
+                if let Some(dptr) = dest_ptr {
+                    self.emit_rv_psubsb_128(dptr, args);
+                }
+            }
             IntrinsicOp::Por128 => {
                 if let Some(dptr) = dest_ptr {
                     self.emit_rv_binary_128(dptr, args, "or");
@@ -486,6 +492,76 @@ impl RiscvCodegen {
             }
             self.state.emit_fmt(format_args!("    or {dst}, {dst}, t5", dst=dst_reg));
             self.state.emit_fmt(format_args!("{skip}:", skip=skip_label));
+        }
+    }
+
+    /// Emit signed saturating byte subtract for 128 bits (16 bytes).
+    /// Equivalent to x86 PSUBSB / _mm_subs_epi8.
+    pub(super) fn emit_rv_psubsb_128(&mut self, dest_ptr: &Value, args: &[Operand]) {
+        // Load args[0] pointer (a)
+        self.operand_to_t0(&args[0]);
+        self.state.emit("    mv a6, t0");
+        // Load args[1] pointer (b)
+        self.operand_to_t0(&args[1]);
+        self.state.emit("    mv a7, t0");
+        // Get dest address
+        self.load_ptr_to_reg_rv(dest_ptr, "a5");
+        // Process low 8 bytes
+        self.state.emit("    ld t1, 0(a6)");  // a_lo
+        self.state.emit("    ld t2, 0(a7)");  // b_lo
+        self.emit_rv_psubsb_8bytes("t1", "t2", "t3"); // t3 = signed_saturate(a_lo - b_lo)
+        // Process high 8 bytes
+        self.state.emit("    ld t1, 8(a6)");  // a_hi
+        self.state.emit("    ld t2, 8(a7)");  // b_hi
+        self.emit_rv_psubsb_8bytes("t1", "t2", "t4"); // t4 = signed_saturate(a_hi - b_hi)
+        // Store results
+        self.state.emit("    sd t3, 0(a5)");
+        self.state.emit("    sd t4, 8(a5)");
+    }
+
+    /// Emit signed saturating byte subtract for 8 bytes packed in registers.
+    /// dst = clamp(a - b, -128, 127) for each byte lane.
+    /// Processes each byte individually.
+    pub(super) fn emit_rv_psubsb_8bytes(&mut self, a_reg: &str, b_reg: &str, dst_reg: &str) {
+        self.state.emit_fmt(format_args!("    li {dst}, 0", dst=dst_reg));
+        for i in 0..8 {
+            let shift = i * 8;
+            // Extract byte i from a into t5 (as signed: sign-extend from 8 bits)
+            if shift == 0 {
+                self.state.emit_fmt(format_args!("    slli t5, {a}, 56", a=a_reg));
+            } else {
+                self.state.emit_fmt(format_args!("    slli t5, {a}, {s}", a=a_reg, s=56 - shift));
+            }
+            self.state.emit("    srai t5, t5, 56"); // sign-extend byte to 64-bit
+            // Extract byte i from b into t6 (as signed)
+            if shift == 0 {
+                self.state.emit_fmt(format_args!("    slli t6, {b}, 56", b=b_reg));
+            } else {
+                self.state.emit_fmt(format_args!("    slli t6, {b}, {s}", b=b_reg, s=56 - shift));
+            }
+            self.state.emit("    srai t6, t6, 56"); // sign-extend byte to 64-bit
+            // Compute difference in t5
+            self.state.emit("    sub t5, t5, t6");
+            // Clamp to [-128, 127]
+            let no_clamp_hi = self.state.fresh_label("psubsb_noclamp_hi");
+            let done = self.state.fresh_label("psubsb_done");
+            self.state.emit_fmt(format_args!("    li t6, 127"));
+            self.state.emit_fmt(format_args!("    ble t5, t6, {}", no_clamp_hi));
+            self.state.emit_fmt(format_args!("    li t5, 127"));
+            self.state.emit_fmt(format_args!("    j {}", done));
+            self.state.emit_fmt(format_args!("{}:", no_clamp_hi));
+            self.state.emit_fmt(format_args!("    li t6, -128"));
+            let no_clamp_lo = self.state.fresh_label("psubsb_noclamp_lo");
+            self.state.emit_fmt(format_args!("    bge t5, t6, {}", no_clamp_lo));
+            self.state.emit_fmt(format_args!("    li t5, -128"));
+            self.state.emit_fmt(format_args!("{}:", no_clamp_lo));
+            self.state.emit_fmt(format_args!("{}:", done));
+            // Mask to 8 bits and place in correct position
+            self.state.emit("    andi t5, t5, 0xff");
+            if shift > 0 {
+                self.state.emit_fmt(format_args!("    slli t5, t5, {shift}"));
+            }
+            self.state.emit_fmt(format_args!("    or {dst}, {dst}, t5", dst=dst_reg));
         }
     }
 

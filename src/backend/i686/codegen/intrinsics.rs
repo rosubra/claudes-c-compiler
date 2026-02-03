@@ -57,13 +57,15 @@ impl I686Codegen {
 
             // SSE 128-bit binary operations
             IntrinsicOp::Pcmpeqb128 | IntrinsicOp::Pcmpeqd128
-            | IntrinsicOp::Psubusb128 | IntrinsicOp::Por128
+            | IntrinsicOp::Psubusb128 | IntrinsicOp::Psubsb128
+            | IntrinsicOp::Por128
             | IntrinsicOp::Pand128 | IntrinsicOp::Pxor128 => {
                 if let Some(dptr) = dest_ptr {
                     let inst = match op {
                         IntrinsicOp::Pcmpeqb128 => "pcmpeqb",
                         IntrinsicOp::Pcmpeqd128 => "pcmpeqd",
                         IntrinsicOp::Psubusb128 => "psubusb",
+                        IntrinsicOp::Psubsb128 => "psubsb",
                         IntrinsicOp::Por128 => "por",
                         IntrinsicOp::Pand128 => "pand",
                         IntrinsicOp::Pxor128 => "pxor",

@@ -286,6 +286,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_ia32_pcmpeqb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqb128));
     m.insert("__builtin_ia32_pcmpeqd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqd128));
     m.insert("__builtin_ia32_psubusb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubusb128));
+    m.insert("__builtin_ia32_psubsb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubsb128));
     m.insert("__builtin_ia32_por128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Por128));
     m.insert("__builtin_ia32_pand128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pand128));
     m.insert("__builtin_ia32_pxor128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pxor128));
@@ -326,6 +327,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_cmpeq_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqb128));
     m.insert("_mm_cmpeq_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pcmpeqd128));
     m.insert("_mm_subs_epu8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubusb128));
+    m.insert("_mm_subs_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubsb128));
     m.insert("_mm_or_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Por128));
     m.insert("_mm_and_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pand128));
     m.insert("_mm_xor_si128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pxor128));
@@ -545,6 +547,7 @@ pub enum BuiltinIntrinsic {
     X86Pcmpeqb128,
     X86Pcmpeqd128,
     X86Psubusb128,
+    X86Psubsb128,
     X86Por128,
     X86Pand128,
     X86Pxor128,
