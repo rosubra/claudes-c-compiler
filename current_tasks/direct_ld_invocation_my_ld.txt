@@ -1,0 +1,9 @@
+When MY_LD is set, call ld directly instead of going through GCC.
+This means we need to:
+- Find and add CRT objects (crt1.o, crti.o, crtn.o, crtbegin.o, crtend.o)
+- Add proper library search paths (-L)
+- Convert -Wl, flags to direct ld flags
+- Add -m elf_x86_64 emulation
+- Add dynamic linker path
+- Handle -nostdlib, -shared, -r, -static cases
+Starting with x86 backend only.
