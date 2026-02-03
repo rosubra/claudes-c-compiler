@@ -1,0 +1,1 @@
+Fixing clay project compilation issues across all architectures (x86, arm, riscv, i686).
