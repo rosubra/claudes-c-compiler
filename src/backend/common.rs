@@ -176,8 +176,8 @@ pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> 
 /// linker command instead of `config.command`. When MY_LD is set, we invoke
 /// the linker directly (ld-style) rather than through GCC, which means we
 /// must provide CRT objects, library paths, and convert -Wl, flags ourselves.
-/// Currently the direct-ld path is implemented for x86-64 only; other targets
-/// fall back to using MY_LD as a GCC-style driver.
+/// Currently the direct-ld path is implemented for x86-64 and RISC-V 64-bit;
+/// other targets fall back to using MY_LD as a GCC-style driver.
 pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
     // Validate that all input .o files match the target architecture before invoking
     // the external linker. This catches stale objects from a previous build (e.g.,
@@ -210,7 +210,14 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                 is_shared, is_nostdlib, is_relocatable, is_static,
             );
         }
-        // TODO: Implement direct ld for ARM, RISC-V, i686 backends
+        if config.expected_elf_machine == 243 {
+            // EM_RISCV: use direct ld invocation
+            return link_direct_ld_riscv64(
+                ld_path, config, object_files, output_path, user_args,
+                is_shared, is_nostdlib, is_relocatable, is_static,
+            );
+        }
+        // TODO: Implement direct ld for ARM, i686 backends
     }
 
     // Default path: invoke GCC as the linker driver (or MY_LD for non-x86-64 targets)
@@ -498,6 +505,257 @@ fn link_direct_ld(
         }
         if let Some(ref crt) = crt_dir {
             cmd.arg(format!("{}/crtn.o", crt));
+        }
+    }
+
+    let result = cmd.output()
+        .map_err(|e| format!("Failed to run linker ({}): {}", ld_command, e))?;
+
+    // Forward linker stdout to our stdout.
+    if !result.stdout.is_empty() {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&result.stdout);
+    }
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("Linking failed ({}): {}", ld_command, stderr));
+    }
+
+    Ok(())
+}
+
+/// Discover GCC's library directory for RISC-V 64-bit by probing well-known paths.
+/// Returns the path containing crtbegin.o (e.g., "/usr/lib/gcc-cross/riscv64-linux-gnu/13").
+///
+/// RISC-V cross-compilation uses `gcc-cross` paths on Debian/Ubuntu, unlike native x86-64
+/// which uses `gcc`. We also probe native paths for systems with native RISC-V GCC.
+fn find_gcc_lib_dir_riscv64() -> Option<String> {
+    let gcc_versions = ["14", "13", "12", "11", "10", "9", "8", "7"];
+    let base_paths = [
+        // Cross-compilation paths (Debian/Ubuntu)
+        "/usr/lib/gcc-cross/riscv64-linux-gnu",
+        // Native RISC-V paths (when running on RISC-V hardware)
+        "/usr/lib/gcc/riscv64-linux-gnu",
+        "/usr/lib/gcc/riscv64-redhat-linux",
+        "/usr/lib64/gcc/riscv64-linux-gnu",
+    ];
+
+    for base in &base_paths {
+        for ver in &gcc_versions {
+            let dir = format!("{}/{}", base, ver);
+            let crtbegin = format!("{}/crtbegin.o", dir);
+            if std::path::Path::new(&crtbegin).exists() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+/// Discover the RISC-V 64-bit system CRT directory containing crt1.o.
+/// Returns the path (e.g., "/usr/riscv64-linux-gnu/lib").
+///
+/// On cross-compilation systems, crt1.o is typically in the cross-toolchain's
+/// sysroot under /usr/riscv64-linux-gnu/lib, not in the host's /usr/lib.
+fn find_crt_dir_riscv64() -> Option<String> {
+    let candidates = [
+        "/usr/riscv64-linux-gnu/lib",
+        "/usr/lib/riscv64-linux-gnu",
+        "/lib/riscv64-linux-gnu",
+    ];
+    for dir in &candidates {
+        let crt1 = format!("{}/crt1.o", dir);
+        if std::path::Path::new(&crt1).exists() {
+            return Some(dir.to_string());
+        }
+    }
+    None
+}
+
+/// Link using ld directly (not through GCC) for RISC-V 64-bit.
+///
+/// This replicates what `riscv64-linux-gnu-gcc` does when it invokes collect2/ld:
+/// - Adds CRT startup objects (crt1.o from sysroot, crti.o/crtbegin.o from GCC dir)
+/// - Adds CRT finalization objects (crtend.o/crtn.o from GCC dir)
+/// - Adds library search paths for GCC and system libraries
+/// - Adds default libraries (-lgcc, -lgcc_s, -lc) unless -nostdlib
+/// - Sets the dynamic linker, emulation mode (elf64lriscv), and security flags
+/// - Converts -Wl, prefixed flags to direct ld flags
+#[allow(clippy::too_many_arguments)]
+fn link_direct_ld_riscv64(
+    ld_command: &str,
+    _config: &LinkerConfig,
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    is_shared: bool,
+    is_nostdlib: bool,
+    is_relocatable: bool,
+    is_static: bool,
+) -> Result<(), String> {
+    let gcc_lib_dir = find_gcc_lib_dir_riscv64();
+    let crt_dir = find_crt_dir_riscv64();
+
+    // Early check: if we need CRT objects but can't find them, give a clear error
+    if !is_nostdlib && !is_relocatable {
+        if crt_dir.is_none() {
+            return Err("MY_LD: could not find RISC-V system CRT objects (crt1.o). \
+                Is the riscv64-linux-gnu libc development package installed? \
+                (e.g., libc6-dev-riscv64-cross)".to_string());
+        }
+        if gcc_lib_dir.is_none() {
+            return Err("MY_LD: could not find RISC-V GCC CRT objects (crtbegin.o, crtend.o). \
+                Is the riscv64-linux-gnu GCC cross-compiler installed? \
+                (e.g., gcc-riscv64-linux-gnu)".to_string());
+        }
+    }
+
+    let mut cmd = Command::new(ld_command);
+
+    // Basic ld flags that GCC always passes
+    cmd.arg("--build-id");
+    // --eh-frame-hdr is needed for exception handling / stack unwinding at runtime.
+    // GCC skips it for -static links; we skip it for -r (relocatable) too.
+    if !is_relocatable && !is_static {
+        cmd.arg("--eh-frame-hdr");
+    }
+    cmd.arg("-m").arg("elf64lriscv");
+    cmd.arg("--hash-style=gnu");
+    cmd.arg("--as-needed");
+
+    // Static linking flag
+    if is_static {
+        cmd.arg("-static");
+    }
+
+    // Dynamic linker (skip for -shared, -r, and -static)
+    if !is_shared && !is_relocatable && !is_static {
+        cmd.arg("-dynamic-linker").arg("/lib/ld-linux-riscv64-lp64d.so.1");
+    }
+
+    // Security hardening
+    if !is_relocatable {
+        cmd.arg("-z").arg("relro");
+        cmd.arg("-z").arg("noexecstack");
+    }
+
+    // Output file
+    cmd.arg("-o").arg(output_path);
+
+    // -shared and -r flags (passed directly to ld)
+    if is_shared {
+        cmd.arg("-shared");
+    }
+    if is_relocatable {
+        cmd.arg("-r");
+    }
+
+    // CRT startup objects (skip for -nostdlib and -r)
+    // For RISC-V cross-compilation, crt1.o comes from the sysroot (crt_dir),
+    // while crti.o, crtbegin*.o come from the GCC lib directory.
+    if !is_nostdlib && !is_relocatable {
+        if !is_shared {
+            // crt1.o contains _start; not needed for shared libraries
+            if let Some(ref crt) = crt_dir {
+                cmd.arg(format!("{}/crt1.o", crt));
+            }
+        }
+        if let Some(ref gcc) = gcc_lib_dir {
+            cmd.arg(format!("{}/crti.o", gcc));
+            if is_shared {
+                cmd.arg(format!("{}/crtbeginS.o", gcc));
+            } else if is_static {
+                // Static linking uses crtbeginT.o (no PIC relocations)
+                cmd.arg(format!("{}/crtbeginT.o", gcc));
+            } else {
+                cmd.arg(format!("{}/crtbegin.o", gcc));
+            }
+        }
+    }
+
+    // Library search paths
+    if let Some(ref gcc) = gcc_lib_dir {
+        cmd.arg(format!("-L{}", gcc));
+    }
+    if let Some(ref crt) = crt_dir {
+        cmd.arg(format!("-L{}", crt));
+    }
+    // Standard system library directories for RISC-V
+    for dir in &["/lib/riscv64-linux-gnu", "/usr/lib/riscv64-linux-gnu"] {
+        if std::path::Path::new(dir).exists() {
+            cmd.arg(format!("-L{}", dir));
+        }
+    }
+
+    // User object files
+    for obj in object_files {
+        cmd.arg(obj);
+    }
+
+    // User-provided linker args, with -Wl, prefix stripping and GCC flag conversion.
+    // Note: the CLI parser already splits -Wl,a,b,c into individual -Wl,a / -Wl,b / -Wl,c
+    // items, but we handle multi-valued -Wl, defensively in case they arrive unsplit.
+    for arg in user_args {
+        if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            // Convert -Wl,foo,bar to direct ld flags: foo bar
+            for part in wl_arg.split(',') {
+                if !part.is_empty() {
+                    cmd.arg(part);
+                }
+            }
+        } else if arg == "-nostdlib" || arg == "-no-pie" || arg == "-shared"
+               || arg == "-static" || arg == "-r" {
+            // These flags are already handled above; skip duplicates
+            continue;
+        } else if arg == "-rdynamic" {
+            // GCC's -rdynamic maps to ld's --export-dynamic
+            cmd.arg("--export-dynamic");
+        } else {
+            // -l, -L, etc. are the same for both gcc and ld
+            cmd.arg(arg);
+        }
+    }
+
+    // Default libraries (skip for -nostdlib, -shared, and -r)
+    if !is_nostdlib && !is_shared && !is_relocatable {
+        if is_static {
+            // Static linking: use --start-group/-lgcc/-lgcc_eh/-lc/--end-group
+            // (no -lgcc_s since that's the shared version of the GCC support library;
+            // -lgcc_eh is the static equivalent for exception handling).
+            cmd.arg("--start-group");
+            cmd.arg("-lgcc");
+            cmd.arg("-lgcc_eh");
+            cmd.arg("-lc");
+            cmd.arg("-lm");
+            cmd.arg("--end-group");
+        } else {
+            // Dynamic linking: -lgcc with --as-needed -lgcc_s fallback
+            cmd.arg("-lgcc");
+            cmd.arg("--push-state");
+            cmd.arg("--as-needed");
+            cmd.arg("-lgcc_s");
+            cmd.arg("--pop-state");
+            cmd.arg("-lc");
+            cmd.arg("-lm");
+            cmd.arg("-lgcc");
+            cmd.arg("--push-state");
+            cmd.arg("--as-needed");
+            cmd.arg("-lgcc_s");
+            cmd.arg("--pop-state");
+        }
+    }
+
+    // CRT finalization objects (skip for -nostdlib and -r)
+    // For RISC-V, both crtend*.o and crtn.o come from the GCC lib directory.
+    if !is_nostdlib && !is_relocatable {
+        if let Some(ref gcc) = gcc_lib_dir {
+            if is_shared {
+                cmd.arg(format!("{}/crtendS.o", gcc));
+            } else {
+                cmd.arg(format!("{}/crtend.o", gcc));
+            }
+            cmd.arg(format!("{}/crtn.o", gcc));
         }
     }
 

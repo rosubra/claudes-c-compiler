@@ -1,3 +1,0 @@
-Implementing direct LD invocation for RISC-V backend when MY_LD is set.
-Replicating the x86-64 link_direct_ld pattern with RISC-V-specific paths,
-emulation mode, dynamic linker, and CRT object discovery.
