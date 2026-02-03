@@ -1,7 +1,7 @@
-# CCC - The Claude C Compiler
+# CCC — The Claude C Compiler
 
 A C compiler written from scratch in Rust, targeting x86-64, i686, AArch64, and RISC-V 64.
-No compiler-specific dependencies -- the frontend, IR, optimizer, code generator, peephole
+No compiler-specific dependencies — the frontend, SSA IR, optimizer, code generator, peephole
 optimizers, and DWARF debug info generation are all implemented from scratch. Assembly and
 linking currently delegate to the GNU toolchain; a native assembler/linker is planned.
 
@@ -53,31 +53,10 @@ replacement in build systems.
 
 ## Status
 
-The compiler can build and run real-world C projects including the Linux kernel
-and PostgreSQL across all four target architectures.
+The compiler can build and run real-world C projects across all four target architectures,
+including the Linux kernel (boots on x86-64, AArch64, and RISC-V) and PostgreSQL.
 
-### Projects successfully compiled
-
-| Project | Notes |
-|---------|-------|
-| Linux kernel | Builds and boots on x86-64, AArch64, and RISC-V |
-| PostgreSQL | Full regression suite on x86, ARM, RISC-V |
-| Redis | SET/GET roundtrip |
-| SQLite | sqllogictest suite |
-| tcc | Full test suite including tests2 |
-| zlib | Build + self-test + minigzip roundtrip |
-| Lua | All interpreter tests |
-| libsodium | Crypto tests on all architectures |
-| QuickJS | Closure, language, loop, builtin, bytecode tests |
-| libpng | pngtest |
-| libjpeg-turbo | cjpeg/djpeg roundtrip, jpegtran |
-| libuv | Loop, timer, idle, async, tcp, fs tests |
-| libffi | Call + closure tests |
-| musl libc | hello, malloc, string, math, io, environ |
-| mbedTLS | AES, RSA, ECP, SHA, ARIA self-tests |
-| jq | All tests on all architectures (x86, ARM, RISC-V, i686) |
-
-### Known limitations
+### Known Limitations
 
 - **External toolchain required**: The compiler produces textual assembly. Assembly
   and linking delegate to `gcc` (or the appropriate cross-compiler). A native
@@ -94,18 +73,87 @@ and PostgreSQL across all four target architectures.
 - **Atomics**: `_Atomic` is parsed but treated as the underlying type (the qualifier
   is not tracked).
 
-## Architecture
+---
+
+## Architecture Overview
+
+```
+                        ┌─────────────────────────────────────┐
+                        │           C Source Files             │
+                        └──────────────┬──────────────────────┘
+                                       │
+                        ┌──────────────▼──────────────────────┐
+                        │          Preprocessor                │
+                        │  (macro expansion, #include, #ifdef) │
+                        └──────────────┬──────────────────────┘
+                                       │  expanded text
+                        ┌──────────────▼──────────────────────┐
+                        │            Lexer                     │
+                        │  (tokens with source locations)      │
+                        └──────────────┬──────────────────────┘
+                                       │  token stream
+                        ┌──────────────▼──────────────────────┐
+                        │            Parser                    │
+                        │  (recursive descent → spanned AST)   │
+                        └──────────────┬──────────────────────┘
+                                       │  AST
+                        ┌──────────────▼──────────────────────┐
+                        │       Semantic Analysis              │
+                        │  (type check, const eval, symbols)   │
+                        └──────────────┬──────────────────────┘
+                                       │  typed AST + TypeContext
+                        ┌──────────────▼──────────────────────┐
+                        │        IR Lowering                   │
+                        │  (AST → alloca-based IR)             │
+                        └──────────────┬──────────────────────┘
+                                       │  alloca IR
+                        ┌──────────────▼──────────────────────┐
+                        │          mem2reg                     │
+                        │  (SSA promotion via dom frontiers)   │
+                        └──────────────┬──────────────────────┘
+                                       │  SSA IR
+                        ┌──────────────▼──────────────────────┐
+                        │     Optimization Passes              │
+                        │  (constant fold, DCE, GVN, LICM,    │
+                        │   inline, IPCP, narrowing, ...)      │
+                        └──────────────┬──────────────────────┘
+                                       │  optimized SSA IR
+                        ┌──────────────▼──────────────────────┐
+                        │       Phi Elimination                │
+                        │  (SSA → register copies)             │
+                        └──────────────┬──────────────────────┘
+                                       │  non-SSA IR
+                ┌──────────────────────▼──────────────────────────────┐
+                │              Code Generation + Peephole             │
+                │                                                     │
+                │  ┌────────┐  ┌────────┐  ┌────────┐  ┌──────────┐  │
+                │  │ x86-64 │  │  i686  │  │ AArch64│  │ RISC-V 64│  │
+                │  └────┬───┘  └───┬────┘  └───┬────┘  └────┬─────┘  │
+                └───────┼──────────┼───────────┼────────────┼─────────┘
+                        │          │           │            │
+                        ▼          ▼           ▼            ▼
+                    AT&T asm    AT&T asm    ARM asm      RV asm
+                        │          │           │            │
+                    [gcc -c]   [gcc -c]    [gcc -c]     [gcc -c]
+                        │          │           │            │
+                    [gcc link] [gcc link]  [gcc link]   [gcc link]
+                        │          │           │            │
+                        ▼          ▼           ▼            ▼
+                      ELF        ELF         ELF          ELF
+```
+
+### Source Tree
 
 ```
 src/
-  frontend/                  C source -> typed AST
+  frontend/                  C source → typed AST
     preprocessor/            Macro expansion, #include, #ifdef, #pragma once
     lexer/                   Tokenization with source locations
     parser/                  Recursive descent, produces spanned AST
     sema/                    Type checking, symbol table, const evaluation
 
   ir/                        Target-independent SSA IR
-    lowering/                AST -> alloca-based IR
+    lowering/                AST → alloca-based IR
     mem2reg/                 SSA promotion (dominator tree, phi insertion)
 
   passes/                    SSA optimization passes
@@ -126,7 +174,7 @@ src/
     dead_statics             Dead static function/global elimination
     resolve_asm              Post-inline asm symbol resolution
 
-  backend/                   IR -> textual assembly
+  backend/                   IR → textual assembly
     traits.rs                ArchCodegen trait with shared default implementations
     generation.rs            IR instruction dispatch to trait methods
     liveness.rs              Live interval computation for register allocation
@@ -148,26 +196,26 @@ src/
   driver/                    CLI parsing, pipeline orchestration
 ```
 
-Each subdirectory has its own `README.md` with design details.
+Each subdirectory has its own `README.md` with detailed design documentation.
 
-### Compilation pipeline
+### Compilation Pipeline
 
 ```
 C source
-  -> Preprocessor (macro expansion, includes, conditionals)
-  -> Lexer (tokens with source locations)
-  -> Parser (recursive descent -> AST)
-  -> Sema (type checking, symbol resolution, const evaluation)
-  -> IR lowering (AST -> alloca-based IR)
-  -> mem2reg (SSA promotion via iterated dominance frontier)
-  -> Optimization passes (up to 3 iterations with dirty tracking)
-  -> Phi elimination (SSA -> register copies)
-  -> Code generation (IR -> textual assembly)
-  -> [external gcc -c] -> object file
-  -> [external gcc] -> linked executable
+  → Preprocessor (macro expansion, includes, conditionals)
+  → Lexer (tokens with source locations)
+  → Parser (recursive descent → AST)
+  → Sema (type checking, symbol resolution, const evaluation)
+  → IR lowering (AST → alloca-based IR)
+  → mem2reg (SSA promotion via iterated dominance frontier)
+  → Optimization passes (up to 3 iterations with dirty tracking)
+  → Phi elimination (SSA → register copies)
+  → Code generation (IR → textual assembly)
+  → [external gcc -c] → object file
+  → [external gcc] → linked executable
 ```
 
-### Key design decisions
+### Key Design Decisions
 
 - **SSA IR**: The IR uses SSA form with phi nodes, constructed via mem2reg over
   alloca-based lowering. This is the same approach as LLVM.
@@ -185,30 +233,14 @@ C source
   from the stack-based code generator. The x86 peephole is the most mature with 8+
   pass types.
 
-## Testing
+---
 
-```bash
-# Run the full verification suite (unit tests + project builds, all architectures)
-python3 /verify/run_all_verify.py --compiler-path target/release/
+## Project Organization
 
-# Run unit tests only (10% sample for quick iteration)
-python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86 --ratio 10
-
-# Full unit test suite for a specific architecture
-python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86
-
-# Linux kernel build verification
-python3 /verify/verify_kernel_defconfig.py --compiler target/release/ccc-x86
-python3 /verify/verify_kernel_defconfig_multiarch.py --compiler target/release/ccc-arm
-python3 /verify/verify_kernel_defconfig_multiarch.py --compiler target/release/ccc-riscv
-```
-
-## Project organization
-
-- `src/` -- Compiler source code (Rust)
-- `include/` -- Bundled C headers (SSE/AVX/NEON intrinsic stubs)
-- `tests/` -- Test suite (~900 test directories)
-- `ideas/` -- Design docs and future work proposals
-- `current_tasks/` -- Active work items (lock files for multi-agent coordination)
-- `completed_tasks/` -- Finished work items (for reference)
-- `scripts/` -- Helper scripts (i686 cross-compilation setup)
+- `src/` — Compiler source code (Rust)
+- `include/` — Bundled C headers (SSE/AVX/NEON intrinsic stubs)
+- `tests/` — Unit test suite
+- `ideas/` — Design docs and future work proposals
+- `current_tasks/` — Active work items (lock files for multi-agent coordination)
+- `completed_tasks/` — Finished work items (for reference)
+- `scripts/` — Helper scripts (i686 cross-compilation setup)
