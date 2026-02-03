@@ -956,25 +956,51 @@ file next to the output for debugging.
 ### Custom Assembler / Linker Override
 
 The `MY_ASM` and `MY_LD` environment variables allow overriding the
-assembler and linker commands respectively. When set, their values are
-used as the command to invoke instead of the target's default GCC
-toolchain command. This is intended for substituting the project's own
-assembler and linker implementations as they are developed.
+assembler and linker commands respectively.
 
-Each backend directory contains placeholder stub scripts:
+**`MY_ASM`**: When set, its value is used as the assembler command instead
+of the target's default GCC toolchain command.
+
+**`MY_LD`** (x86-64): When set, the linker is invoked directly (ld-style)
+instead of going through GCC. The compiler automatically:
+- Discovers and adds CRT startup/finalization objects (crt1.o, crti.o,
+  crtbegin.o, crtend.o, crtn.o) from standard system paths
+- Adds library search paths for GCC and system libraries
+- Converts `-Wl,` prefixed flags to direct ld flags
+- Adds the dynamic linker, emulation mode (`-m elf_x86_64`), and
+  security hardening flags (`-z relro`, `-z noexecstack`)
+- Handles `-nostdlib`, `-shared`, `-static`, and `-r` (relocatable) modes
+- Uses appropriate CRT variants (crtbeginT.o for -static, crtbeginS.o
+  for -shared)
+
+For other targets (i686, ARM, RISC-V), `MY_LD` falls back to using the
+specified command as a GCC-style driver (same flags as the default path).
+
+Usage examples:
+
+```bash
+# Use system ld directly for x86-64
+MY_LD=ld ccc-x86 file.c -o file
+
+# Use ld with static linking
+MY_LD=ld ccc-x86 -static file.c -o file
+
+# Use ld with shared library
+MY_LD=ld ccc-x86 -fPIC -shared file.c -o file.so
+
+# Use ld with kernel-style -nostdlib
+MY_LD=ld ccc-x86 -nostdlib file.o -o file -lgcc
+
+# Custom assembler
+MY_ASM=src/backend/x86/asm_stub.sh ccc-x86 -c file.c -o file.o
+```
+
+Each backend directory also contains placeholder stub scripts for testing:
 
 - `x86/asm_stub.sh` / `x86/ld_stub.sh`
 - `i686/asm_stub.sh` / `i686/ld_stub.sh`
 - `arm/asm_stub.sh` / `arm/ld_stub.sh`
 - `riscv/asm_stub.sh` / `riscv/ld_stub.sh`
-
-These stubs print an error message and exit with status 1. To test the
-integration:
-
-```bash
-MY_ASM=src/backend/x86/asm_stub.sh ccc-x86 -c file.c -o file.o
-MY_LD=src/backend/x86/ld_stub.sh ccc-x86 file.o -o file
-```
 
 ### Linker Flags
 
