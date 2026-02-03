@@ -11,10 +11,10 @@ converting to/from x87 80-bit format only for memory load/store. This means:
 2. Constants like LDBL_MIN (3.36e-4932) underflow to 0.0 in f64
 3. x87 intermediate precision in binops helps but can't recover already-lost data
 
-Remaining test failures caused by this:
-- compiler_suite_0017_0028: islessgreater with LDBL_MIN (underflows to 0 in f64)
-- compiler_suite_0132_0237: long long -= long double (i64 precision loss)
-- Other long double precision-sensitive tests
+Known failure cases:
+- islessgreater with LDBL_MIN (underflows to 0 in f64)
+- long long -= long double (i64 precision loss)
+- Other long double precision-sensitive operations
 
 Solution approaches (from easiest to hardest):
 
@@ -40,4 +40,4 @@ C) Hybrid approach:
    cast+store and load+binop patterns to avoid the f64 intermediate when
    the full chain is F128.
 
-Tests to verify: compiler_suite_0017_0028, compiler_suite_0132_0237
+To verify: test islessgreater with LDBL_MIN and long long -= long double.

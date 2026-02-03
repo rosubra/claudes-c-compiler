@@ -47,7 +47,7 @@ The optimizer executes in four sequential phases:
    +-------------------------------------------------------+
    |  1.  cfg_simplify                                     |
    |  2.  copy_prop                                        |
-   |  2a. div_by_const         (iteration 0 only, disabled on i686) |
+   |  2a. div_by_const         (iteration 0 only, disabled on 32-bit) |
    |  2b. narrow                                           |
    |  3.  simplify                                         |
    |  4.  constant_fold                                    |
@@ -272,9 +272,9 @@ Supported transformations:
 - **Modulo** (`x % C`): rewritten as `x - (x / C) * C` using the optimized
   division from above.
 
-Only 32-bit divisions are currently optimized. The pass is disabled on i686
-targets because the generated 64-bit multiply sequences cannot be executed
-correctly by the 32-bit backend. It runs only during the first iteration of the
+Only 32-bit divisions are currently optimized. The pass is disabled on
+32-bit targets because the generated 64-bit multiply sequences cannot be
+executed correctly by the 32-bit backend. It runs only during the first iteration of the
 main loop; subsequent iterations clean up the expanded instruction sequences.
 
 ### narrow -- Integer Narrowing
@@ -517,22 +517,25 @@ which other passes. An arrow from A to B means "changes made by A may enable
 further changes in B."
 
 ```
-cfg_simplify ---------> copy_prop, gvn, licm, dce, if_convert
+cfg_simplify ---------> copy_prop, gvn, licm, if_convert
 copy_prop ------------> simplify, constant_fold, gvn, licm, narrow
 narrow ---------------> simplify, constant_fold
 simplify -------------> constant_fold, copy_prop, gvn
-constant_fold --------> cfg_simplify, copy_prop, dce, if_convert
+constant_fold --------> cfg_simplify, copy_prop, if_convert
 gvn ------------------> copy_prop, licm, dce
 licm -----------------> copy_prop, dce
 if_convert -----------> copy_prop, constant_fold, cfg_simplify, dce
 dce ------------------> cfg_simplify
-ipcp -----------------> constant_fold, dce, cfg_simplify
 ```
 
 Note: The edges above reflect the actual `should_run!` macro dependencies in
 `mod.rs`. An arrow from A to B means "B's `should_run!` check includes A as
 an upstream dependency." For example, `licm` depends on `cfg_simplify`,
 `copy_prop`, and `gvn` -- if none of those made changes, LICM is skipped.
+
+IPCP is not part of the `should_run!` system. When IPCP makes changes, it
+marks all functions dirty, which forces all passes to re-run in the next
+iteration via the dirty tracking mechanism.
 
 This dependency graph is encoded in the `should_run!` macro invocations in
 `mod.rs` and drives the per-pass skip logic described above.

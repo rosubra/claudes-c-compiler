@@ -302,7 +302,7 @@ representation. The concrete Rust types flowing between phases are:
   mem2reg pass then promotes these to SSA independently. This is the same
   strategy LLVM uses and cleanly separates the two concerns.
 
-- **Trait-based backend abstraction.** The `ArchCodegen` trait (~140 methods)
+- **Trait-based backend abstraction.** The `ArchCodegen` trait (~185 methods)
   captures the interface between the shared code generation framework and
   architecture-specific instruction emission. Default implementations express
   algorithms once (e.g., the 8-phase call sequence), while backends supply
@@ -319,6 +319,6 @@ representation. The concrete Rust types flowing between phases are:
 
 - `src/` — Compiler source code (Rust)
 - `include/` — Bundled C headers (SSE/AVX/NEON intrinsic stubs)
-- `tests/` — Unit test suite (each test is a directory with `main.c` and expected output)
-- `ideas/` — Design docs and future work proposals
+- `tests/` — Compiler tests (each test is a directory with `main.c` and expected output)
+- `ideas/` — Future work proposals and improvement notes
 - `scripts/` — Helper scripts (i686 cross-compilation setup)

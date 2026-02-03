@@ -1,6 +1,6 @@
 /// IR instruction definitions: the core SSA instruction set.
 ///
-/// This module defines the SSA IR instruction enum with ~30 variants covering
+/// This module defines the SSA IR instruction enum with 38 variants covering
 /// memory operations, arithmetic, control flow, atomics, SIMD intrinsics,
 /// inline assembly, and ABI support (va_arg, sret, complex returns).
 ///

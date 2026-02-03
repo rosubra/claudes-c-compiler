@@ -90,7 +90,7 @@ architecture-specific subdirectories:
 ```
 src/backend/
   mod.rs              Target enum, CodegenOptions, top-level dispatch
-  traits.rs           ArchCodegen trait (~140 methods, ~53 default impls)
+  traits.rs           ArchCodegen trait (~185 methods, ~50 default impls)
   generation.rs       Module/function/instruction dispatch (arch-independent)
   state.rs            CodegenState, StackSlot, SlotAddr, RegCache
   stack_layout.rs     Three-tier stack slot allocation
@@ -110,7 +110,10 @@ src/backend/
 ```
 
 Each architecture subdirectory contains approximately 18-19 codegen files
-(including `mod.rs`) that implement the `ArchCodegen` trait methods:
+(including `mod.rs`) that implement the `ArchCodegen` trait methods. The
+x86 backend's peephole optimizer is a subdirectory (`peephole/`) rather
+than a single file, containing its own module structure for the multi-stage
+pass pipeline:
 
 | File | Responsibility |
 |------|---------------|
@@ -127,7 +130,7 @@ Each architecture subdirectory contains approximately 18-19 codegen files
 | `inline_asm.rs` | Architecture-specific inline assembly emission |
 | `intrinsics.rs` | Compiler builtins (popcount, bswap, clz, etc.) |
 | `memory.rs` | Load, store, memcpy, GEP |
-| `peephole.rs` | Post-generation assembly optimization |
+| `peephole.rs` or `peephole/` | Post-generation assembly optimization (x86 uses a subdirectory) |
 | `prologue.rs` | Function prologue and epilogue |
 | `returns.rs` | Return value emission |
 | `variadic.rs` | Variadic function support (va_start, va_arg, va_copy) |
@@ -146,7 +149,7 @@ For architecture-specific details, see:
 
 The `ArchCodegen` trait (defined in `traits.rs`) is the central abstraction
 that decouples the shared code generation framework from architecture-specific
-instruction emission. It defines approximately 140 methods organized into
+instruction emission. It defines approximately 185 methods organized into
 several categories:
 
 - **State access**: `state()` and `state_ref()` provide mutable and immutable
@@ -179,7 +182,7 @@ several categories:
 
 ### Default Implementations and Primitive Composition
 
-Approximately 53 methods have default implementations that capture shared
+Approximately 50 methods have default implementations that capture shared
 codegen patterns. These defaults are built from small "primitive" methods that
 each backend overrides with 1--4 line architecture-specific implementations.
 The design lets the shared framework express an algorithm once while backends
