@@ -1,0 +1,10 @@
+Add section headers to x86 shared library output (.so files).
+The current emit_shared_library() sets e_shoff=0 and e_shnum=0,
+which causes our own linker to fail when trying to consume these
+.so files (parse_shared_library_symbols requires section headers
+to find .dynsym/.dynstr). This breaks PostgreSQL which links
+shared libraries against each other.
+
+Fix: Add section header table to emit_shared_library() with
+entries for .gnu.hash, .dynsym, .dynstr, .rela.dyn, .dynamic,
+.got, merged sections, and .shstrtab.
