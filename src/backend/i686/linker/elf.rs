@@ -1128,7 +1128,14 @@ pub fn link_builtin(
 
             let out_sec = &mut output_sections[out_idx];
             // Align within the output section
-            let align = sec.align.max(1);
+            // .init and .fini sections must be concatenated without padding:
+            // crti.o provides the prologue, crtn.o provides the epilogue,
+            // and any padding between fragments would execute as garbage.
+            let align = if out_sec.name == ".init" || out_sec.name == ".fini" {
+                1
+            } else {
+                sec.align.max(1)
+            };
             if align > out_sec.align {
                 out_sec.align = align;
             }
@@ -2255,7 +2262,7 @@ pub fn link_builtin(
     let linker_addrs = LinkerSymbolAddresses {
         base_addr: BASE_ADDR as u64,
         got_addr: got_base as u64,
-        dynamic_addr: dynamic_vaddr as u64,
+        dynamic_addr: if is_static { 0 } else { dynamic_vaddr as u64 },
         bss_addr: bss_vaddr as u64,
         bss_size: (data_seg_vaddr_end - bss_vaddr) as u64,
         text_end: text_seg_vaddr_end as u64,

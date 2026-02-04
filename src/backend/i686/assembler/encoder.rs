@@ -17,6 +17,8 @@ pub struct Relocation {
     pub reloc_type: u32,
     /// Addend for the relocation (used in RELA; for REL format, embedded in instruction).
     pub addend: i64,
+    /// For symbol difference expressions (A - B): the subtracted symbol.
+    pub diff_symbol: Option<String>,
 }
 
 // ELF i386 relocation types
@@ -50,6 +52,19 @@ fn reg_num(name: &str) -> Option<u8> {
         "ch" | "bp" | "ebp" | "xmm5" | "mm5" | "st(5)" | "ymm5" => Some(5),
         "dh" | "si" | "esi" | "xmm6" | "mm6" | "st(6)" | "ymm6" => Some(6),
         "bh" | "di" | "edi" | "xmm7" | "mm7" | "st(7)" | "ymm7" => Some(7),
+        _ => None,
+    }
+}
+
+/// Get segment register number (es=0, cs=1, ss=2, ds=3, fs=4, gs=5).
+fn seg_reg_num(name: &str) -> Option<u8> {
+    match name {
+        "es" => Some(0),
+        "cs" => Some(1),
+        "ss" => Some(2),
+        "ds" => Some(3),
+        "fs" => Some(4),
+        "gs" => Some(5),
         _ => None,
     }
 }
@@ -90,6 +105,7 @@ fn reg_size(name: &str) -> u8 {
     match name {
         "al" | "ah" | "bl" | "bh" | "cl" | "ch" | "dl" | "dh" => 1,
         "ax" | "bx" | "cx" | "dx" | "sp" | "bp" | "si" | "di" => 2,
+        "es" | "cs" | "ss" | "ds" | "fs" | "gs" => 2,
         _ => 4, // eax, ebx, etc. default to 32-bit on i686
     }
 }
@@ -274,6 +290,20 @@ impl InstructionEncoder {
             | "jb" | "jbe" | "ja" | "jae" | "js" | "jns" | "jo" | "jno" | "jp" | "jnp"
             | "jc" | "jnc" => {
                 self.encode_jcc(ops, mnemonic)
+            }
+            // jecxz/jcxz - short jump only (no long form)
+            "jecxz" | "jcxz" => {
+                if ops.len() != 1 {
+                    return Err("jecxz requires 1 operand".to_string());
+                }
+                match &ops[0] {
+                    Operand::Label(_) => {
+                        // E3 cb - Jump short if ECX register is 0
+                        self.bytes.extend_from_slice(&[0xE3, 0x00]);
+                        Ok(())
+                    }
+                    _ => Err("jecxz requires label operand".to_string()),
+                }
             }
 
             // Call/return
@@ -575,6 +605,8 @@ impl InstructionEncoder {
             "fcomip" => self.encode_fcomip(ops),
             "fucomip" => self.encode_fucomip(ops),
             "fucomi" => self.encode_fucomi(ops),
+            "fucomp" => self.encode_fucomp(ops),
+            "fucom" => self.encode_fucom(ops),
             "fld" => self.encode_fld_st(ops),
             "fstp" => self.encode_fstp_st(ops),
             "fxch" => self.encode_fxch(ops),
@@ -777,6 +809,21 @@ impl InstructionEncoder {
     /// For i686 REL relocations, the relocation offset must point to the
     /// displacement field (where the addend is embedded), not to the ModR/M
     /// byte. So we defer add_relocation() until after emitting ModR/M and SIB.
+    /// Emit segment override prefix if the memory operand has a segment.
+    fn emit_segment_prefix(&mut self, mem: &MemoryOperand) {
+        if let Some(ref seg) = mem.segment {
+            match seg.as_str() {
+                "fs" => self.bytes.push(0x64),
+                "gs" => self.bytes.push(0x65),
+                "es" => self.bytes.push(0x26),
+                "cs" => self.bytes.push(0x2E),
+                "ss" => self.bytes.push(0x36),
+                "ds" => self.bytes.push(0x3E),
+                _ => {}
+            }
+        }
+    }
+
     fn encode_modrm_mem(&mut self, reg_field: u8, mem: &MemoryOperand) -> Result<(), String> {
         let base = mem.base.as_ref();
         let index = mem.index.as_ref();
@@ -880,10 +927,21 @@ impl InstructionEncoder {
     /// Add a relocation relative to current position.
     fn add_relocation(&mut self, symbol: &str, reloc_type: u32, addend: i64) {
         self.relocations.push(Relocation {
-            offset: self.offset + self.bytes.len() as u64 - self.offset,
+            offset: self.bytes.len() as u64,
             symbol: symbol.to_string(),
             reloc_type,
             addend,
+            diff_symbol: None,
+        });
+    }
+
+    fn add_relocation_with_diff(&mut self, symbol: &str, reloc_type: u32, addend: i64, diff_sym: &str) {
+        self.relocations.push(Relocation {
+            offset: self.bytes.len() as u64,
+            symbol: symbol.to_string(),
+            reloc_type,
+            addend,
+            diff_symbol: Some(diff_sym.to_string()),
         });
     }
 
@@ -1032,7 +1090,7 @@ impl InstructionEncoder {
                     return Err("symbol immediate only supported for 32-bit mov".to_string());
                 }
             }
-            ImmediateValue::SymbolMod(_, _) => {
+            ImmediateValue::SymbolMod(_, _) | ImmediateValue::SymbolDiff(_, _) => {
                 return Err("unsupported immediate type for mov".to_string());
             }
         }
@@ -1040,6 +1098,22 @@ impl InstructionEncoder {
     }
 
     fn encode_mov_rr(&mut self, src: &Register, dst: &Register, size: u8) -> Result<(), String> {
+        // Handle segment register moves
+        if let Some(seg_num) = seg_reg_num(&dst.name) {
+            // mov %r16, %sreg (8E /r)
+            let src_num = reg_num(&src.name).ok_or_else(|| format!("bad register: {}", src.name))?;
+            self.bytes.push(0x8E);
+            self.bytes.push(self.modrm(3, seg_num, src_num));
+            return Ok(());
+        }
+        if let Some(seg_num) = seg_reg_num(&src.name) {
+            // mov %sreg, %r16 (8C /r)
+            let dst_num = reg_num(&dst.name).ok_or_else(|| format!("bad register: {}", dst.name))?;
+            self.bytes.push(0x8C);
+            self.bytes.push(self.modrm(3, seg_num, dst_num));
+            return Ok(());
+        }
+
         let src_num = reg_num(&src.name).ok_or_else(|| format!("bad register: {}", src.name))?;
         let dst_num = reg_num(&dst.name).ok_or_else(|| format!("bad register: {}", dst.name))?;
 
@@ -1287,6 +1361,11 @@ impl InstructionEncoder {
                 self.bytes.push(0x8F);
                 self.encode_modrm_mem(0, mem)
             }
+            Operand::Memory(mem) => {
+                // popl mem32 → 8F /0
+                self.bytes.push(0x8F);
+                self.encode_modrm_mem(0, mem)
+            }
             _ => Err("unsupported pop operand".to_string()),
         }
     }
@@ -1428,6 +1507,29 @@ impl InstructionEncoder {
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
+            // Symbol difference immediate: e.g. addl $_DYNAMIC-1b, (%esp)
+            // Uses R_386_PC32 with diff_symbol so the ELF writer resolves A - B
+            (Operand::Immediate(ImmediateValue::SymbolDiff(sym_a, sym_b)), Operand::Memory(mem)) => {
+                if size == 2 { self.bytes.push(0x66); }
+                self.bytes.push(0x81);
+                self.encode_modrm_mem(alu_op, mem)?;
+                self.add_relocation_with_diff(sym_a, R_386_PC32, 0, sym_b);
+                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                Ok(())
+            }
+            (Operand::Immediate(ImmediateValue::SymbolDiff(sym_a, sym_b)), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                if size == 2 { self.bytes.push(0x66); }
+                if dst_num == 0 {
+                    self.bytes.push(0x05 + alu_op * 8);
+                } else {
+                    self.bytes.push(0x81);
+                    self.bytes.push(self.modrm(3, alu_op, dst_num));
+                }
+                self.add_relocation_with_diff(sym_a, R_386_PC32, 0, sym_b);
+                self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                Ok(())
+            }
             // Label as memory reference: addl %reg, symbol
             (Operand::Register(src), Operand::Label(label)) => {
                 let src_num = reg_num(&src.name).ok_or("bad src register")?;
@@ -1566,6 +1668,20 @@ impl InstructionEncoder {
                         let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                         self.bytes.extend_from_slice(&[0x0F, 0xAF]);
                         self.encode_modrm_mem(dst_num, mem)
+                    }
+                    // imul $imm, %reg  =>  imul $imm, %reg, %reg (dst = src * imm)
+                    (Operand::Immediate(ImmediateValue::Integer(val)), Operand::Register(dst)) => {
+                        let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                        if *val >= -128 && *val <= 127 {
+                            self.bytes.push(0x6B);
+                            self.bytes.push(self.modrm(3, dst_num, dst_num));
+                            self.bytes.push(*val as u8);
+                        } else {
+                            self.bytes.push(0x69);
+                            self.bytes.push(self.modrm(3, dst_num, dst_num));
+                            self.bytes.extend_from_slice(&(*val as i32).to_le_bytes());
+                        }
+                        Ok(())
                     }
                     _ => Err("unsupported imul operands".to_string()),
                 }
@@ -1964,6 +2080,7 @@ impl InstructionEncoder {
                         Ok(())
                     }
                     Operand::Memory(mem) => {
+                        self.emit_segment_prefix(mem);
                         self.bytes.push(0xFF);
                         self.encode_modrm_mem(4, mem)
                     }
@@ -2019,6 +2136,7 @@ impl InstructionEncoder {
                         Ok(())
                     }
                     Operand::Memory(mem) => {
+                        self.emit_segment_prefix(mem);
                         self.bytes.push(0xFF);
                         self.encode_modrm_mem(2, mem)
                     }
@@ -2383,16 +2501,24 @@ impl InstructionEncoder {
     }
 
     fn encode_fxch(&mut self, ops: &[Operand]) -> Result<(), String> {
-        if ops.len() != 1 {
-            return Err("fxch requires 1 operand".to_string());
+        if ops.is_empty() {
+            // fxch with no operand defaults to st(1)
+            self.bytes.extend_from_slice(&[0xD9, 0xC9]);
+            return Ok(());
         }
-        match &ops[0] {
-            Operand::Register(reg) => {
-                let n = parse_st_num(&reg.name)?;
-                self.bytes.extend_from_slice(&[0xD9, 0xC8 + n]);
-                Ok(())
+        if ops.len() == 1 || ops.len() == 2 {
+            // With 1 operand: fxch %st(i)
+            // With 2 operands: fxch %st(i), %st (AT&T syntax)
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xD9, 0xC8 + n]);
+                    Ok(())
+                }
+                _ => Err("fxch requires st register".to_string()),
             }
-            _ => Err("fxch requires st register".to_string()),
+        } else {
+            Err("fxch requires 0, 1 or 2 operands".to_string())
         }
     }
 
@@ -2400,8 +2526,13 @@ impl InstructionEncoder {
 
     /// Encode fnstsw (store FPU status word).
     fn encode_fnstsw(&mut self, ops: &[Operand]) -> Result<(), String> {
+        if ops.is_empty() {
+            // fnstsw with no operand defaults to %ax
+            self.bytes.extend_from_slice(&[0xDF, 0xE0]);
+            return Ok(());
+        }
         if ops.len() != 1 {
-            return Err("fnstsw requires 1 operand".to_string());
+            return Err("fnstsw requires 0 or 1 operand".to_string());
         }
         match &ops[0] {
             Operand::Register(reg) if reg.name == "ax" => {
@@ -2432,6 +2563,66 @@ impl InstructionEncoder {
             Ok(())
         } else {
             Err("fucomi requires 0 or 2 operands".to_string())
+        }
+    }
+
+    /// Encode fucomp (unordered compare and pop, sets FPU status word).
+    fn encode_fucomp(&mut self, ops: &[Operand]) -> Result<(), String> {
+        if ops.len() == 1 {
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDD, 0xE8 + n]);
+                    Ok(())
+                }
+                _ => Err("fucomp requires st register".to_string()),
+            }
+        } else if ops.len() == 2 {
+            // AT&T syntax: fucomp %st(1), %st  — first operand is the source
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDD, 0xE8 + n]);
+                    Ok(())
+                }
+                _ => Err("fucomp requires st register".to_string()),
+            }
+        } else if ops.is_empty() {
+            // Default: fucomp %st(1)
+            self.bytes.extend_from_slice(&[0xDD, 0xE9]);
+            Ok(())
+        } else {
+            Err("fucomp requires 0, 1 or 2 operands".to_string())
+        }
+    }
+
+    /// Encode fucom (unordered compare, sets FPU status word, no pop).
+    fn encode_fucom(&mut self, ops: &[Operand]) -> Result<(), String> {
+        if ops.len() == 1 {
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDD, 0xE0 + n]);
+                    Ok(())
+                }
+                _ => Err("fucom requires st register".to_string()),
+            }
+        } else if ops.len() == 2 {
+            // AT&T syntax: fucom %st(1), %st — first operand is the source
+            match &ops[0] {
+                Operand::Register(reg) => {
+                    let n = parse_st_num(&reg.name)?;
+                    self.bytes.extend_from_slice(&[0xDD, 0xE0 + n]);
+                    Ok(())
+                }
+                _ => Err("fucom requires st register".to_string()),
+            }
+        } else if ops.is_empty() {
+            // Default: fucom %st(1)
+            self.bytes.extend_from_slice(&[0xDD, 0xE1]);
+            Ok(())
+        } else {
+            Err("fucom requires 0, 1 or 2 operands".to_string())
         }
     }
 

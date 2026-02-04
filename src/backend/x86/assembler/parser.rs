@@ -188,6 +188,8 @@ pub enum ImmediateValue {
     /// Symbol with @modifier, e.g., symbol@GOTPCREL
     #[allow(dead_code)]
     SymbolMod(String, String),
+    /// Symbol difference: sym_a - sym_b (e.g., $_DYNAMIC-1b)
+    SymbolDiff(String, String),
 }
 
 /// Memory operand: optional_segment:disp(%base, %index, scale)
@@ -948,8 +950,33 @@ fn parse_immediate_operand(s: &str) -> Result<Operand, String> {
         return Ok(Operand::Immediate(ImmediateValue::SymbolMod(sym, modifier)));
     }
 
+    // Check for symbol difference: SYM-LABEL (e.g., $_DYNAMIC-1b, $4f-1b)
+    // Scan for '-' after position 0 where both sides look like labels.
+    if let Some(diff) = parse_immediate_label_diff(s) {
+        return Ok(Operand::Immediate(diff));
+    }
+
     // Plain symbol
     Ok(Operand::Immediate(ImmediateValue::Symbol(s.to_string())))
+}
+
+/// Try to parse a symbol difference expression in an immediate value.
+/// E.g., "_DYNAMIC-1b" -> SymbolDiff("_DYNAMIC", "1b"), "4f-1b" -> SymbolDiff("4f", "1b")
+fn parse_immediate_label_diff(s: &str) -> Option<ImmediateValue> {
+    // Scan for '-' after position 0. We skip position 0 since a leading '-'
+    // is a negation, not a difference.
+    for (i, c) in s.char_indices().skip(1) {
+        if c == '-' {
+            let lhs = &s[..i];
+            let rhs = &s[i + 1..];
+            if !lhs.is_empty() && !rhs.is_empty()
+                && is_label_like(lhs) && is_label_like(rhs)
+            {
+                return Some(ImmediateValue::SymbolDiff(lhs.to_string(), rhs.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Parse a memory operand like `offset(%base, %index, scale)` or `symbol(%rip)`.

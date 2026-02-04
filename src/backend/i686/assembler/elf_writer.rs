@@ -568,16 +568,29 @@ impl ElfWriter {
 
         // Detect jump instructions for relaxation
         if let Some(ref label) = self.get_jump_target_label(instr) {
+            let is_short_only = matches!(instr.mnemonic.as_str(), "jecxz" | "jcxz");
             let is_conditional = instr.mnemonic != "jmp";
-            let expected_len = if is_conditional { 6 } else { 5 };
-            if instr_len == expected_len {
+            if is_short_only && instr_len == 2 {
+                // Short-only jumps (jecxz/jcxz) have no long form.
+                // Register as already-relaxed so their displacement gets patched.
                 self.sections[sec_idx].jumps.push(JumpInfo {
                     offset: base_offset as usize,
-                    len: expected_len,
+                    len: 2,
                     target: label.clone(),
-                    is_conditional,
-                    relaxed: false,
+                    is_conditional: true,
+                    relaxed: true,
                 });
+            } else {
+                let expected_len = if is_conditional { 6 } else { 5 };
+                if instr_len == expected_len {
+                    self.sections[sec_idx].jumps.push(JumpInfo {
+                        offset: base_offset as usize,
+                        len: expected_len,
+                        target: label.clone(),
+                        is_conditional,
+                        relaxed: false,
+                    });
+                }
             }
         }
 
@@ -588,7 +601,7 @@ impl ElfWriter {
                 symbol: reloc.symbol,
                 reloc_type: reloc.reloc_type,
                 addend: reloc.addend as i32,
-                diff_symbol: None,
+                diff_symbol: reloc.diff_symbol,
             });
         }
 

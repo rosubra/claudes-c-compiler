@@ -1933,7 +1933,7 @@ impl InstructionEncoder {
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 }
             }
-            ImmediateValue::SymbolMod(_, _) => {
+            ImmediateValue::SymbolMod(_, _) | ImmediateValue::SymbolDiff(_, _) => {
                 Err("unsupported immediate type for mov".to_string())?
             }
         }

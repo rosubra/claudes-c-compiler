@@ -1324,7 +1324,7 @@ fn find_symbol_index_shared(
 // (ARM has no numeric labels; RISC-V has its own pre-pass).
 
 use crate::backend::x86::assembler::parser::{
-    AsmItem, Instruction, Operand, MemoryOperand, Displacement, DataValue,
+    AsmItem, Instruction, Operand, MemoryOperand, Displacement, DataValue, ImmediateValue,
 };
 
 /// Check if a string is a numeric local label (just digits, e.g., "1", "42").
@@ -1545,6 +1545,18 @@ fn resolve_numeric_operand(
                     index: mem.index.clone(),
                     scale: mem.scale,
                 })
+            } else {
+                op.clone()
+            }
+        }
+        Operand::Immediate(ImmediateValue::SymbolDiff(lhs, rhs)) => {
+            let new_lhs = resolve_numeric_name(lhs, current_idx, defs).unwrap_or_else(|| lhs.clone());
+            let new_rhs = resolve_numeric_name(rhs, current_idx, defs).unwrap_or_else(|| rhs.clone());
+            Operand::Immediate(ImmediateValue::SymbolDiff(new_lhs, new_rhs))
+        }
+        Operand::Immediate(ImmediateValue::Symbol(name)) => {
+            if let Some(resolved) = resolve_numeric_name(name, current_idx, defs) {
+                Operand::Immediate(ImmediateValue::Symbol(resolved))
             } else {
                 op.clone()
             }
