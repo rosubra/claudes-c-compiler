@@ -1,0 +1,3 @@
+Fixing scc project build: typeof keyword should not be recognized in -std=c99 mode.
+In strict C standard mode, bare `typeof` should be an identifier, not a keyword.
+Only __typeof__ and __typeof should always be keywords.
