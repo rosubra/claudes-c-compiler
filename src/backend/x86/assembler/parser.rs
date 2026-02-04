@@ -207,15 +207,53 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmItem>, String> {
             continue;
         }
 
-        match parse_line(trimmed) {
-            Ok(item) => items.push(item),
-            Err(e) => {
-                return Err(format!("line {}: {}: '{}'", line_num, e, trimmed));
+        // Handle ';' as instruction separator (GAS syntax)
+        // Split the line on ';' and parse each part independently.
+        let parts: Vec<&str> = split_on_semicolons(trimmed);
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match parse_line(part) {
+                Ok(item) => items.push(item),
+                Err(e) => {
+                    return Err(format!("line {}: {}: '{}'", line_num, e, part));
+                }
             }
         }
     }
 
     Ok(items)
+}
+
+/// Split a line on ';' characters, respecting strings.
+/// In GAS syntax, ';' separates multiple instructions on the same line.
+fn split_on_semicolons(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+    for (i, c) in line.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if c == ';' && !in_string {
+            parts.push(&line[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&line[start..]);
+    parts
 }
 
 /// Strip trailing comment from a line.
