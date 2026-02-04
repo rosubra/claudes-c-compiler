@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
-use super::parser::{AsmStatement, Operand, Directive, DataValue, SymbolType, Visibility, SizeExpr, SectionInfo};
+use super::parser::{AsmStatement, Operand, Directive, DataValue, SymbolType, Visibility, SizeExpr};
 use super::encoder::{encode_instruction, EncodeResult, RelocType};
 use super::compress;
 use crate::backend::elf::{self, StringTable,
@@ -347,7 +347,7 @@ impl ElfWriter {
                     section.data.push(0);
                 }
             } else {
-                section.data.extend(std::iter::repeat(0u8).take(padding));
+                section.data.extend(std::iter::repeat_n(0u8, padding));
             }
             if align > section.sh_addralign {
                 section.sh_addralign = align;
@@ -744,9 +744,9 @@ impl ElfWriter {
                         let is_pcrel_lo12_i = elf_type == 24; // R_RISCV_PCREL_LO12_I
                         let is_pcrel_lo12_s = elf_type == 25; // R_RISCV_PCREL_LO12_S
 
-                        if (is_pcrel_lo12_i || is_pcrel_lo12_s) && pcrel_hi_label.is_some() {
+                        if let Some(hi_label) = pcrel_hi_label.as_ref().filter(|_| is_pcrel_lo12_i || is_pcrel_lo12_s) {
                             // Emit pcrel_lo referencing the synthetic label
-                            let hi_label = pcrel_hi_label.as_ref().unwrap().clone();
+                            let hi_label = hi_label.clone();
                             self.add_reloc(elf_type, hi_label, 0);
                             self.emit_u32_le(*word);
                             continue;
@@ -775,7 +775,7 @@ impl ElfWriter {
             }
             Ok(EncodeResult::Skip) => Ok(()),
             Err(e) => {
-                return Err(e);
+                Err(e)
             }
         }
     }
@@ -1451,7 +1451,7 @@ impl ElfWriter {
             .map(|s| (s.name.clone(), true))
             .collect();
 
-        for (name, _) in &referenced {
+        for name in referenced.keys() {
             if !defined.contains_key(name) {
                 let binding = if self.weak_symbols.contains_key(name) {
                     STB_WEAK

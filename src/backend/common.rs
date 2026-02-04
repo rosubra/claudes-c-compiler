@@ -201,6 +201,7 @@ fn validate_object_architectures(
 }
 
 /// Link object files into an executable using an external toolchain.
+#[allow(dead_code)]
 pub fn link(config: &LinkerConfig, object_files: &[&str], output_path: &str) -> Result<(), String> {
     link_with_args(config, object_files, output_path, &[])
 }
@@ -666,8 +667,8 @@ fn resolve_builtin_link_setup(
             } else {
                 user_lib_paths.push(path.to_string());
             }
-        } else if arg.starts_with("-Wl,") {
-            for part in arg[4..].split(',') {
+        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            for part in wl_arg.split(',') {
                 if let Some(lpath) = part.strip_prefix("-L") {
                     user_lib_paths.push(lpath.to_string());
                 }
@@ -1005,9 +1006,8 @@ fn link_direct_ld(
                 }
             }
         } else if arg == "-nostdlib" || arg == "-no-pie" || arg == "-shared"
-               || arg == "-static" || arg == "-r" {
-            continue;
-        } else if arch.extra_skip_flags.contains(&arg.as_str()) {
+               || arg == "-static" || arg == "-r"
+               || arch.extra_skip_flags.contains(&arg.as_str()) {
             continue;
         } else if arg == "-rdynamic" {
             cmd.arg("--export-dynamic");

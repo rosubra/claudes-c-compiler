@@ -247,9 +247,9 @@ impl ElfWriter {
                     section.data.extend_from_slice(&nop);
                 }
                 // Fill any remaining bytes (shouldn't happen if alignment is >= 4)
-                section.data.extend(std::iter::repeat(0u8).take(remainder));
+                section.data.extend(std::iter::repeat_n(0u8, remainder));
             } else {
-                section.data.extend(std::iter::repeat(0u8).take(padding));
+                section.data.extend(std::iter::repeat_n(0u8, padding));
             }
             if align > section.sh_addralign {
                 section.sh_addralign = align;
@@ -573,7 +573,7 @@ impl ElfWriter {
             }
             Ok(EncodeResult::Skip) => Ok(()),
             Err(e) => {
-                return Err(e);
+                Err(e)
             }
         }
     }
@@ -1067,7 +1067,7 @@ impl ElfWriter {
             .map(|s| (s.name.clone(), true))
             .collect();
 
-        for (name, _) in &referenced {
+        for name in referenced.keys() {
             // Skip section names - they already have section symbols in the symtab
             if self.sections.contains_key(name) {
                 continue;

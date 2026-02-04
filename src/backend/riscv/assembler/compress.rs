@@ -14,6 +14,8 @@
 /// Returns `Some(halfword)` if the instruction can be compressed, `None` otherwise.
 /// This only handles instructions without relocations; instructions with pending
 /// relocations are not candidates for compression.
+// Binary literals use groupings matching RISC-V compressed instruction format fields.
+#[allow(clippy::unusual_byte_groupings)]
 pub fn try_compress_rv64(word: u32) -> Option<u16> {
     let opcode = word & 0x7F;
     let rd = (word >> 7) & 0x1F;
@@ -38,7 +40,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
             // C.LUI stores bits [17:12] = nzimm[5:0], sign-extended from bit 17
             // So nzimm must fit in signed 6-bit range: -32..31 (but not 0)
             if nzimm == 0 { return None; }
-            if nzimm < -32 || nzimm > 31 { return None; }
+            if !(-32..=31).contains(&nzimm) { return None; }
             let nzimm = nzimm as u32;
             let bit17 = (nzimm >> 5) & 1;
             let bits16_12 = nzimm & 0x1F;
@@ -47,12 +49,12 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── ADDI (opcode 0010011, funct3=000) ──
         0b0010011 if funct3 == 0b000 => {
-            let imm = ((word as i32) >> 20) as i32; // sign-extended imm[11:0]
+            let imm = (word as i32) >> 20; // sign-extended imm[11:0]
 
             if rd == 0 && rs1 == 0 && imm == 0 {
                 // C.NOP
                 Some(0b000_0_00000_00000_01)
-            } else if rd == rs1 && rd != 0 && imm != 0 && imm >= -32 && imm <= 31 {
+            } else if rd == rs1 && rd != 0 && imm != 0 && (-32..=31).contains(&imm) {
                 // C.ADDI: addi rd, rd, nzimm (including sp)
                 // GCC prefers C.ADDI over C.ADDI16SP when both apply
                 let nzimm = imm as u32;
@@ -63,7 +65,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
                     | (rd << 7)
                     | (bits4_0 << 2)) as u16)
             } else if rd == 2 && rs1 == 2 && imm != 0 && (imm % 16) == 0
-                && imm >= -512 && imm <= 496 {
+                && (-512..=496).contains(&imm) {
                 // C.ADDI16SP: addi x2, x2, imm (for larger imm not fitting C.ADDI)
                 let uimm = imm as u32;
                 let bit9 = (uimm >> 9) & 1;
@@ -86,15 +88,14 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
                 let bits9_6 = (uimm >> 6) & 0xF;
                 let bit2 = (uimm >> 2) & 1;
                 let bit3 = (uimm >> 3) & 1;
-                Some((0b000_00000000_000_00
-                    | (bits5_4 << 11)
+                Some(((bits5_4 << 11)
                     | (bits9_6 << 7)
                     | (bit2 << 6)
                     | (bit3 << 5)
                     | (rd_prime << 2)) as u16)
             } else if rs1 == 0 && rd != 0 {
                 // C.LI: addi rd, x0, imm  (li rd, imm)
-                if imm < -32 || imm > 31 { return None; }
+                if !(-32..=31).contains(&imm) { return None; }
                 let imm_u = imm as u32;
                 let bit5 = (imm_u >> 5) & 1;
                 let bits4_0 = imm_u & 0x1F;
@@ -109,10 +110,10 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── ADDIW (opcode 0011011, funct3=000) ──
         0b0011011 if funct3 == 0b000 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if rd == rs1 && rd != 0 {
                 // C.ADDIW: addiw rd, rd, imm  (imm can be 0 for sext.w)
-                if imm < -32 || imm > 31 { return None; }
+                if !(-32..=31).contains(&imm) { return None; }
                 let imm_u = imm as u32;
                 let bit5 = (imm_u >> 5) & 1;
                 let bits4_0 = imm_u & 0x1F;
@@ -133,7 +134,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
         // ── SLLI (opcode 0010011, funct3=001) ──
         0b0010011 if funct3 == 0b001 => {
             // slli rd, rs1, shamt  (funct7 encodes high bit of shamt for RV64)
-            let shamt = ((word >> 20) & 0x3F) as u32; // 6-bit shift for RV64
+            let shamt = (word >> 20) & 0x3F; // 6-bit shift for RV64
             if rd == rs1 && rd != 0 && shamt != 0 {
                 // C.SLLI: slli rd, rd, shamt
                 let bit5 = (shamt >> 5) & 1;
@@ -149,7 +150,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── SRLI/SRAI (opcode 0010011, funct3=101) ──
         0b0010011 if funct3 == 0b101 => {
-            let shamt = ((word >> 20) & 0x3F) as u32;
+            let shamt = (word >> 20) & 0x3F;
             let is_srai = (funct7 & 0x20) != 0;
             if rd == rs1 && is_creg(rd) && shamt != 0 {
                 let rd_prime = creg_num(rd);
@@ -175,9 +176,9 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── ANDI (opcode 0010011, funct3=111) ──
         0b0010011 if funct3 == 0b111 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if rd == rs1 && is_creg(rd) {
-                if imm < -32 || imm > 31 { return None; }
+                if !(-32..=31).contains(&imm) { return None; }
                 let rd_prime = creg_num(rd);
                 let imm_u = imm as u32;
                 let bit5 = (imm_u >> 5) & 1;
@@ -302,11 +303,11 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── LD (opcode 0000011, funct3=011) ──
         0b0000011 if funct3 == 0b011 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if rs1 == 2 && rd != 0 {
                 // C.LDSP: ld rd, offset(sp) - offset must be multiple of 8, 0..504
                 let offset = imm;
-                if offset >= 0 && offset <= 504 && (offset % 8) == 0 {
+                if (0..=504).contains(&offset) && (offset % 8) == 0 {
                     let uoff = offset as u32;
                     // Encoding: 011 | uimm[5] | rd | uimm[4:3|8:6] | 10
                     let bit5 = (uoff >> 5) & 1;
@@ -323,7 +324,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
             } else if is_creg(rs1) && is_creg(rd) {
                 // C.LD: ld rd', offset(rs1') - offset must be multiple of 8, 0..248
                 let offset = imm;
-                if offset >= 0 && offset <= 248 && (offset % 8) == 0 {
+                if (0..=248).contains(&offset) && (offset % 8) == 0 {
                     let uoff = offset as u32;
                     let rs1_prime = creg_num(rs1);
                     let rd_prime = creg_num(rd);
@@ -345,11 +346,11 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── LW (opcode 0000011, funct3=010) ──
         0b0000011 if funct3 == 0b010 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if rs1 == 2 && rd != 0 {
                 // C.LWSP: lw rd, offset(sp) - offset must be multiple of 4, 0..252
                 let offset = imm;
-                if offset >= 0 && offset <= 252 && (offset % 4) == 0 {
+                if (0..=252).contains(&offset) && (offset % 4) == 0 {
                     let uoff = offset as u32;
                     // Encoding: 010 | uimm[5] | rd | uimm[4:2|7:6] | 10
                     let bit5 = (uoff >> 5) & 1;
@@ -366,7 +367,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
             } else if is_creg(rs1) && is_creg(rd) {
                 // C.LW: lw rd', offset(rs1') - offset must be multiple of 4, 0..124
                 let offset = imm;
-                if offset >= 0 && offset <= 124 && (offset % 4) == 0 {
+                if (0..=124).contains(&offset) && (offset % 4) == 0 {
                     let uoff = offset as u32;
                     let rs1_prime = creg_num(rs1);
                     let rd_prime = creg_num(rd);
@@ -398,7 +399,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
             if rs1 == 2 {
                 // C.SDSP: sd rs2, offset(sp) - offset must be multiple of 8, 0..504
-                if imm >= 0 && imm <= 504 && (imm % 8) == 0 {
+                if (0..=504).contains(&imm) && (imm % 8) == 0 {
                     let uoff = imm as u32;
                     // Encoding: 111 | uimm[5:3|8:6] | rs2 | 10
                     let bits5_3 = (uoff >> 3) & 0x7;
@@ -412,7 +413,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
                 }
             } else if is_creg(rs1) && is_creg(rs2) {
                 // C.SD: sd rs2', offset(rs1') - offset must be multiple of 8, 0..248
-                if imm >= 0 && imm <= 248 && (imm % 8) == 0 {
+                if (0..=248).contains(&imm) && (imm % 8) == 0 {
                     let uoff = imm as u32;
                     let rs1_prime = creg_num(rs1);
                     let rs2_prime = creg_num(rs2);
@@ -441,7 +442,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
             if rs1 == 2 {
                 // C.SWSP: sw rs2, offset(sp) - offset must be multiple of 4, 0..252
-                if imm >= 0 && imm <= 252 && (imm % 4) == 0 {
+                if (0..=252).contains(&imm) && (imm % 4) == 0 {
                     let uoff = imm as u32;
                     // Encoding: 110 | uimm[5:2|7:6] | rs2 | 10
                     let bits5_2 = (uoff >> 2) & 0xF;
@@ -455,7 +456,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
                 }
             } else if is_creg(rs1) && is_creg(rs2) {
                 // C.SW: sw rs2', offset(rs1') - offset must be multiple of 4, 0..124
-                if imm >= 0 && imm <= 124 && (imm % 4) == 0 {
+                if (0..=124).contains(&imm) && (imm % 4) == 0 {
                     let uoff = imm as u32;
                     let rs1_prime = creg_num(rs1);
                     let rs2_prime = creg_num(rs2);
@@ -479,11 +480,11 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── FLD (opcode 0000111, funct3=011) ──
         0b0000111 if funct3 == 0b011 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if rs1 == 2 {
                 // C.FLDSP: fld rd, offset(sp) - offset must be multiple of 8, 0..504
                 let offset = imm;
-                if offset >= 0 && offset <= 504 && (offset % 8) == 0 {
+                if (0..=504).contains(&offset) && (offset % 8) == 0 {
                     let uoff = offset as u32;
                     let bit5 = (uoff >> 5) & 1;
                     let bits4_3 = (uoff >> 3) & 0x3;
@@ -499,7 +500,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
             } else if is_creg(rs1) && is_creg(rd) {
                 // C.FLD: fld rd', offset(rs1') - offset must be multiple of 8, 0..248
                 let offset = imm;
-                if offset >= 0 && offset <= 248 && (offset % 8) == 0 {
+                if (0..=248).contains(&offset) && (offset % 8) == 0 {
                     let uoff = offset as u32;
                     let rs1_prime = creg_num(rs1);
                     let rd_prime = creg_num(rd);
@@ -527,7 +528,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
             if rs1 == 2 {
                 // C.FSDSP: fsd rs2, offset(sp) - offset must be multiple of 8, 0..504
-                if imm >= 0 && imm <= 504 && (imm % 8) == 0 {
+                if (0..=504).contains(&imm) && (imm % 8) == 0 {
                     let uoff = imm as u32;
                     let bits5_3 = (uoff >> 3) & 0x7;
                     let bits8_6 = (uoff >> 6) & 0x7;
@@ -540,7 +541,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
                 }
             } else if is_creg(rs1) && is_creg(rs2) {
                 // C.FSD: fsd rs2', offset(rs1') - offset must be multiple of 8, 0..248
-                if imm >= 0 && imm <= 248 && (imm % 8) == 0 {
+                if (0..=248).contains(&imm) && (imm % 8) == 0 {
                     let uoff = imm as u32;
                     let rs1_prime = creg_num(rs1);
                     let rs2_prime = creg_num(rs2);
@@ -561,7 +562,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 
         // ── JALR (opcode 1100111) ──
         0b1100111 => {
-            let imm = ((word as i32) >> 20) as i32;
+            let imm = (word as i32) >> 20;
             if imm == 0 && rs2 == 0 {
                 if rd == 0 && rs1 != 0 {
                     // C.JR: jalr x0, 0(rs1)
@@ -614,7 +615,7 @@ pub fn try_compress_rv64(word: u32) -> Option<u16> {
 /// These are the registers that can be encoded in 3-bit fields.
 #[inline]
 fn is_creg(reg: u32) -> bool {
-    reg >= 8 && reg <= 15
+    (8..=15).contains(&reg)
 }
 
 /// Convert a full register number (x8-x15) to its 3-bit compressed encoding (0-7).

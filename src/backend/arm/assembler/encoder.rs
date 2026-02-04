@@ -167,8 +167,7 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
     let mn = mnemonic.to_lowercase();
 
     // Handle condition-code suffixed branches: b.eq, b.ne, b.lt, etc.
-    if mn.starts_with("b.") {
-        let cond = &mn[2..];
+    if let Some(cond) = mn.strip_prefix("b.") {
         return encode_cond_branch(cond, operands);
     }
 
@@ -418,7 +417,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     // NEON register-to-register move: mov v1.16b, v0.16b -> ORR v1.16b, v0.16b, v0.16b
     if let (Some(Operand::RegArrangement { reg: rd_name, arrangement: arr_d }),
             Some(Operand::RegArrangement { reg: rm_name, arrangement: _arr_m })) =
-        (operands.get(0), operands.get(1))
+        (operands.first(), operands.get(1))
     {
         let rd = parse_reg_num(rd_name).ok_or("invalid NEON rd")?;
         let rm = parse_reg_num(rm_name).ok_or("invalid NEON rm")?;
@@ -432,7 +431,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     // NEON lane insert: mov v0.d[1], x1 -> INS Vd.D[index], Xn
     if let (Some(Operand::RegLane { reg: vd_name, elem_size, index }),
             Some(Operand::Reg(rn_name))) =
-        (operands.get(0), operands.get(1))
+        (operands.first(), operands.get(1))
     {
         let vd = parse_reg_num(vd_name).ok_or("invalid NEON vd")?;
         let rn = parse_reg_num(rn_name).ok_or("invalid rn")?;
@@ -453,7 +452,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     // NEON lane extract: mov x0, v0.d[1] -> UMOV Xd, Vn.D[index]
     if let (Some(Operand::Reg(rd_name)),
             Some(Operand::RegLane { reg: vn_name, elem_size, index })) =
-        (operands.get(0), operands.get(1))
+        (operands.first(), operands.get(1))
     {
         let rd = parse_reg_num(rd_name).ok_or("invalid rd")?;
         let vn = parse_reg_num(vn_name).ok_or("invalid NEON vn")?;
@@ -473,7 +472,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     // NEON element-to-element move: mov v0.s[3], v1.s[0] -> INS Vd.Ts[i1], Vn.Ts[i2]
     if let (Some(Operand::RegLane { reg: vd_name, elem_size: es_d, index: idx_d }),
             Some(Operand::RegLane { reg: vn_name, elem_size: _es_n, index: idx_n })) =
-        (operands.get(0), operands.get(1))
+        (operands.first(), operands.get(1))
     {
         let vd = parse_reg_num(vd_name).ok_or("invalid NEON vd")?;
         let vn = parse_reg_num(vn_name).ok_or("invalid NEON vn")?;
@@ -486,8 +485,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
             "d" => ((idx_d << 4) | 0b01000, idx_n << 3),
             _ => return Err(format!("unsupported element size for ins: {}", es_d)),
         };
-        let word = (0b01101110000u32 << 21) | (imm5 << 16)
-            | (0 << 15) | (imm4 << 11) | (1 << 10) | (vn << 5) | vd;
+        let word = ((0b01101110000u32 << 21) | (imm5 << 16)) | (imm4 << 11) | (1 << 10) | (vn << 5) | vd;
         return Ok(EncodeResult::Word(word));
     }
 
@@ -497,7 +495,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
         let imm = *imm;
 
         // Check if it can be a simple MOVZ
-        if imm >= 0 && imm <= 0xFFFF {
+        if (0..=0xFFFF).contains(&imm) {
             let sf = sf_bit(is_64);
             let word = (sf << 31) | (0b10100101 << 23) | ((imm as u32 & 0xFFFF) << 5) | rd;
             return Ok(EncodeResult::Word(word));
@@ -506,7 +504,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
         // Negative: try MOVN
         if imm < 0 {
             let not_imm = !imm;
-            if not_imm >= 0 && not_imm <= 0xFFFF {
+            if (0..=0xFFFF).contains(&not_imm) {
                 let sf = sf_bit(is_64);
                 let word = (sf << 31) | (0b00100101 << 23) | ((not_imm as u32 & 0xFFFF) << 5) | rd;
                 return Ok(EncodeResult::Word(word));
@@ -518,7 +516,7 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     }
 
     // mov Xd, Xm -> ORR Xd, XZR, Xm
-    if let (Some(Operand::Reg(rd_name)), Some(Operand::Reg(rm_name))) = (operands.get(0), operands.get(1)) {
+    if let (Some(Operand::Reg(rd_name)), Some(Operand::Reg(rm_name))) = (operands.first(), operands.get(1)) {
         let rd = parse_reg_num(rd_name).ok_or("invalid rd")?;
         let rm = parse_reg_num(rm_name).ok_or("invalid rm")?;
         let is_64 = is_64bit_reg(rd_name);
@@ -527,13 +525,13 @@ fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
         if rd_name.to_lowercase() == "sp" || rm_name.to_lowercase() == "sp" {
             let sf = sf_bit(is_64);
             // ADD Xd, Xn, #0: sf 0 0 10001 00 imm12=0 Rn Rd
-            let word = (sf << 31) | (0b10001 << 24) | (0 << 22) | (0 << 10) | (rm << 5) | rd;
+            let word = ((sf << 31) | (0b10001 << 24)) | (rm << 5) | rd;
             return Ok(EncodeResult::Word(word));
         }
 
         let sf = sf_bit(is_64);
         // ORR Rd, XZR, Rm: sf 01 01010 00 0 Rm 000000 11111 Rd
-        let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (0 << 21) | (rm << 16) | (0b11111 << 5) | rd;
+        let word = ((sf << 31) | (0b01 << 29) | (0b01010 << 24)) | (rm << 16) | (0b11111 << 5) | rd;
         return Ok(EncodeResult::Word(word));
     }
 
@@ -653,7 +651,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
     }
 
     // NEON vector form: ADD/SUB Vd.T, Vn.T, Vm.T
-    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+    if let Some(Operand::RegArrangement { .. }) = operands.first() {
         if !set_flags {
             return encode_neon_add_sub(operands, is_sub);
         }
@@ -696,7 +694,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
     // ADD Rd, Rn, :lo12:symbol
     if let Some(Operand::Modifier { kind, symbol }) = operands.get(2) {
         if kind == "lo12" {
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24) | (0 << 22) | (0 << 10) | (rn << 5) | rd;
+            let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24)) | (rn << 5) | rd;
             return Ok(EncodeResult::WordWithReloc {
                 word,
                 reloc: Relocation {
@@ -707,7 +705,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
             });
         }
         if kind == "tprel_lo12_nc" {
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24) | (0 << 22) | (0 << 10) | (rn << 5) | rd;
+            let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24)) | (rn << 5) | rd;
             return Ok(EncodeResult::WordWithReloc {
                 word,
                 reloc: Relocation {
@@ -718,7 +716,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
             });
         }
         if kind == "tprel_hi12" {
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24) | (1 << 22) | (0 << 10) | (rn << 5) | rd;
+            let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24) | (1 << 22)) | (rn << 5) | rd;
             return Ok(EncodeResult::WordWithReloc {
                 word,
                 reloc: Relocation {
@@ -731,7 +729,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
     }
     if let Some(Operand::ModifierOffset { kind, symbol, offset }) = operands.get(2) {
         if kind == "lo12" {
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24) | (0 << 22) | (0 << 10) | (rn << 5) | rd;
+            let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b10001 << 24)) | (rn << 5) | rd;
             return Ok(EncodeResult::WordWithReloc {
                 word,
                 reloc: Relocation {
@@ -760,10 +758,9 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
                 "sxtx" => 0b111,
                 _ => 0b011, // default UXTX/LSL
             };
-            let imm3 = (*amount as u32) & 0x7;
+            let imm3 = *amount & 0x7;
             // Extended register form: sf op S 01011 00 1 Rm option imm3 Rn Rd
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24)
-                | (0b00 << 22) | (1 << 21) | (rm << 16) | (option << 13) | (imm3 << 10) | (rn << 5) | rd;
+            let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24)) | (1 << 21) | (rm << 16) | (option << 13) | (imm3 << 10) | (rn << 5) | rd;
             return Ok(EncodeResult::Word(word));
         }
 
@@ -780,8 +777,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
         if (rn_is_sp || rd_is_sp) && operands.len() <= 3 {
             // Extended register form with UXTX #0: sf op S 01011 00 1 Rm 011 000 Rn Rd
             let option = if is_64 { 0b011u32 } else { 0b010u32 }; // UXTX for 64-bit, UXTW for 32-bit
-            let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24)
-                | (0b00 << 22) | (1 << 21) | (rm << 16) | (option << 13) | (0 << 10) | (rn << 5) | rd;
+            let word = (((sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24)) | (1 << 21) | (rm << 16) | (option << 13)) | (rn << 5) | rd;
             return Ok(EncodeResult::Word(word));
         }
 
@@ -798,8 +794,7 @@ fn encode_add_sub(operands: &[Operand], is_sub: bool, set_flags: bool) -> Result
             (0, 0)
         };
 
-        let word = (sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24) | (shift_type << 22)
-            | (0 << 21) | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
+        let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24) | (shift_type << 22)) | (rm << 16) | ((shift_amount & 0x3F) << 10) | (rn << 5) | rd;
         return Ok(EncodeResult::Word(word));
     }
 
@@ -814,7 +809,7 @@ fn encode_logical(operands: &[Operand], opc: u32) -> Result<EncodeResult, String
     }
 
     // NEON vector form: ORR/AND/EOR Vd.T, Vn.T, Vm.T
-    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+    if let Some(Operand::RegArrangement { .. }) = operands.first() {
         return encode_neon_logical(operands, opc);
     }
 
@@ -848,8 +843,8 @@ fn encode_logical(operands: &[Operand], opc: u32) -> Result<EncodeResult, String
             (0, 0)
         };
 
-        let word = (sf << 31) | (opc << 29) | (0b01010 << 24) | (shift_type << 22) | (0 << 21)
-            | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
+        let word = ((sf << 31) | (opc << 29) | (0b01010 << 24) | (shift_type << 22))
+            | (rm << 16) | ((shift_amount & 0x3F) << 10) | (rn << 5) | rd;
         return Ok(EncodeResult::Word(word));
     }
 
@@ -922,7 +917,7 @@ fn encode_bitmask_imm(val: u64, is_64: bool) -> Option<(u32, u32, u32)> {
             4 => 0b111000 | (ones - 1),
             8 => 0b110000 | (ones - 1),
             16 => 0b100000 | (ones - 1),
-            32 => 0b000000 | (ones - 1),
+            32 => ones - 1,
             64 => ones - 1,
             _ => unreachable!(),
         };
@@ -937,7 +932,7 @@ fn encode_bitmask_imm(val: u64, is_64: bool) -> Option<(u32, u32, u32)> {
 
 fn encode_mul(operands: &[Operand]) -> Result<EncodeResult, String> {
     // NEON vector form: MUL Vd.T, Vn.T, Vm.T
-    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+    if let Some(Operand::RegArrangement { .. }) = operands.first() {
         return encode_neon_mul(operands);
     }
     // MUL Rd, Rn, Rm is MADD Rd, Rn, Rm, XZR
@@ -955,7 +950,7 @@ fn encode_madd(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rm, _) = get_reg(operands, 2)?;
     let (ra, _) = get_reg(operands, 3)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (0b0011011000 << 21) | (rm << 16) | (0 << 15) | (ra << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b0011011000 << 21) | (rm << 16)) | (ra << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1004,8 +999,8 @@ fn encode_neg(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0b01011 << 24) | (0 << 22) | (0 << 21)
-        | (rm << 16) | (0 << 10) | (0b11111 << 5) | rd;
+    let word = (((sf << 31) | (1 << 30) | (0b01011 << 24))
+        | (rm << 16)) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1014,8 +1009,8 @@ fn encode_negs(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24) | (0 << 22) | (0 << 21)
-        | (rm << 16) | (0 << 10) | (0b11111 << 5) | rd;
+    let word = (((sf << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24))
+        | (rm << 16)) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1024,8 +1019,8 @@ fn encode_mvn(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rm, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (0 << 22) | (1 << 21)
-        | (rm << 16) | (0 << 10) | (0b11111 << 5) | rd;
+    let word = (((sf << 31) | (0b01 << 29) | (0b01010 << 24)) | (1 << 21)
+        | (rm << 16)) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1035,7 +1030,7 @@ fn encode_adc(operands: &[Operand], set_flags: bool) -> Result<EncodeResult, Str
     let (rm, _) = get_reg(operands, 2)?;
     let sf = sf_bit(is_64);
     let s = if set_flags { 1u32 } else { 0 };
-    let word = (sf << 31) | (0 << 30) | (s << 29) | (0b11010000 << 21) | (rm << 16) | (0 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (s << 29) | (0b11010000 << 21) | (rm << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1045,7 +1040,7 @@ fn encode_sbc(operands: &[Operand], set_flags: bool) -> Result<EncodeResult, Str
     let (rm, _) = get_reg(operands, 2)?;
     let sf = sf_bit(is_64);
     let s = if set_flags { 1u32 } else { 0 };
-    let word = (sf << 31) | (1 << 30) | (s << 29) | (0b11010000 << 21) | (rm << 16) | (0 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (1 << 30) | (s << 29) | (0b11010000 << 21) | (rm << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1081,7 +1076,7 @@ fn encode_shift(operands: &[Operand], shift_type: u32) -> Result<EncodeResult, S
                 // ASR #imm -> SBFM Rd, Rn, #imm, #(width-1)
                 let immr = imm;
                 let imms = width - 1;
-                let word = (sf << 31) | (0b00 << 29) | (0b100110 << 23) | (n << 22) | (immr << 16) | (imms << 10) | (rn << 5) | rd;
+                let word = (sf << 31) | (0b100110 << 23) | (n << 22) | (immr << 16) | (imms << 10) | (rn << 5) | rd;
                 return Ok(EncodeResult::Word(word));
             }
             _ => {}
@@ -1107,7 +1102,7 @@ fn encode_sxtw(operands: &[Operand]) -> Result<EncodeResult, String> {
     // SXTW Xd, Wn -> SBFM Xd, Xn, #0, #31
     let (rd, _) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
-    let word = (1u32 << 31) | (0b00 << 29) | (0b100110 << 23) | (1 << 22) | (0 << 16) | (31 << 10) | (rn << 5) | rd;
+    let word = ((1u32 << 31) | (0b100110 << 23) | (1 << 22)) | (31 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1116,7 +1111,7 @@ fn encode_sxth(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     let n = if is_64 { 1u32 } else { 0 };
-    let word = (sf << 31) | (0b00 << 29) | (0b100110 << 23) | (n << 22) | (0 << 16) | (15 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b100110 << 23) | (n << 22)) | (15 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1125,7 +1120,7 @@ fn encode_sxtb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     let n = if is_64 { 1u32 } else { 0 };
-    let word = (sf << 31) | (0b00 << 29) | (0b100110 << 23) | (n << 22) | (0 << 16) | (7 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b100110 << 23) | (n << 22)) | (7 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1144,7 +1139,7 @@ fn encode_uxth(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     let n = if is_64 { 1u32 } else { 0 };
-    let word = (sf << 31) | (0b10 << 29) | (0b100110 << 23) | (n << 22) | (0 << 16) | (15 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b10 << 29) | (0b100110 << 23) | (n << 22)) | (15 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1153,7 +1148,7 @@ fn encode_uxtb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     let n = if is_64 { 1u32 } else { 0 };
-    let word = (sf << 31) | (0b10 << 29) | (0b100110 << 23) | (n << 22) | (0 << 16) | (7 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b10 << 29) | (0b100110 << 23) | (n << 22)) | (7 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1164,7 +1159,7 @@ fn encode_cmp(operands: &[Operand]) -> Result<EncodeResult, String> {
     let mut new_ops = vec![Operand::Reg("xzr".to_string())];
     new_ops.extend(operands.iter().cloned());
     // Determine if 32-bit or 64-bit from the first operand
-    let is_32 = if let Some(Operand::Reg(r)) = operands.get(0) {
+    let is_32 = if let Some(Operand::Reg(r)) = operands.first() {
         is_32bit_reg(r)
     } else {
         false
@@ -1179,7 +1174,7 @@ fn encode_cmn(operands: &[Operand]) -> Result<EncodeResult, String> {
     // CMN Rn, op -> ADDS XZR, Rn, op
     let mut new_ops = vec![Operand::Reg("xzr".to_string())];
     new_ops.extend(operands.iter().cloned());
-    let is_32 = if let Some(Operand::Reg(r)) = operands.get(0) {
+    let is_32 = if let Some(Operand::Reg(r)) = operands.first() {
         is_32bit_reg(r)
     } else {
         false
@@ -1194,7 +1189,7 @@ fn encode_tst(operands: &[Operand]) -> Result<EncodeResult, String> {
     // TST Rn, op -> ANDS XZR, Rn, op
     let mut new_ops = vec![Operand::Reg("xzr".to_string())];
     new_ops.extend(operands.iter().cloned());
-    let is_32 = if let Some(Operand::Reg(r)) = operands.get(0) {
+    let is_32 = if let Some(Operand::Reg(r)) = operands.first() {
         is_32bit_reg(r)
     } else {
         false
@@ -1214,8 +1209,8 @@ fn encode_ccmp(operands: &[Operand]) -> Result<EncodeResult, String> {
         (operands.get(1), operands.get(2), operands.get(3))
     {
         let cond_val = encode_cond(cond).ok_or("invalid condition")?;
-        let word = (sf << 31) | (1 << 30) | (1 << 29) | (0b11010010 << 21)
-            | ((*imm5 as u32 & 0x1F) << 16) | (cond_val << 12) | (1 << 11) | (0 << 10) | (rn << 5) | (*nzcv as u32 & 0xF);
+        let word = ((sf << 31) | (1 << 30) | (1 << 29) | (0b11010010 << 21)
+            | ((*imm5 as u32 & 0x1F) << 16) | (cond_val << 12) | (1 << 11)) | (rn << 5) | (*nzcv as u32 & 0xF);
         return Ok(EncodeResult::Word(word));
     }
 
@@ -1225,8 +1220,8 @@ fn encode_ccmp(operands: &[Operand]) -> Result<EncodeResult, String> {
     {
         let rm = parse_reg_num(rm_name).ok_or("invalid rm")?;
         let cond_val = encode_cond(cond).ok_or("invalid condition")?;
-        let word = (sf << 31) | (1 << 30) | (1 << 29) | (0b11010010 << 21)
-            | (rm << 16) | (cond_val << 12) | (0 << 11) | (0 << 10) | (rn << 5) | (*nzcv as u32 & 0xF);
+        let word = ((sf << 31) | (1 << 30) | (1 << 29) | (0b11010010 << 21)
+            | (rm << 16) | (cond_val << 12)) | (rn << 5) | (*nzcv as u32 & 0xF);
         return Ok(EncodeResult::Word(word));
     }
 
@@ -1244,8 +1239,8 @@ fn encode_csel(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err("csel requires condition".to_string()),
     };
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (0 << 30) | (0 << 29) | (0b11010100 << 21)
-        | (rm << 16) | (cond << 12) | (0b00 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b11010100 << 21)
+        | (rm << 16) | (cond << 12)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1258,7 +1253,7 @@ fn encode_csinc(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err("csinc requires condition".to_string()),
     };
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (0 << 30) | (0 << 29) | (0b11010100 << 21)
+    let word = (sf << 31) | (0b11010100 << 21)
         | (rm << 16) | (cond << 12) | (0b01 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -1272,8 +1267,8 @@ fn encode_csinv(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err("csinv requires condition".to_string()),
     };
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0 << 29) | (0b11010100 << 21)
-        | (rm << 16) | (cond << 12) | (0b00 << 10) | (rn << 5) | rd;
+    let word = (((sf << 31) | (1 << 30)) | (0b11010100 << 21)
+        | (rm << 16) | (cond << 12)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1286,7 +1281,7 @@ fn encode_csneg(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err("csneg requires condition".to_string()),
     };
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0 << 29) | (0b11010100 << 21)
+    let word = ((sf << 31) | (1 << 30)) | (0b11010100 << 21)
         | (rm << 16) | (cond << 12) | (0b01 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -1300,7 +1295,7 @@ fn encode_cset(operands: &[Operand]) -> Result<EncodeResult, String> {
     };
     let sf = sf_bit(is_64);
     let inv_cond = cond ^ 1; // invert least significant bit
-    let word = (sf << 31) | (0 << 30) | (0 << 29) | (0b11010100 << 21)
+    let word = (sf << 31) | (0b11010100 << 21)
         | (0b11111 << 16) | (inv_cond << 12) | (0b01 << 10) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -1314,8 +1309,8 @@ fn encode_csetm(operands: &[Operand]) -> Result<EncodeResult, String> {
     };
     let sf = sf_bit(is_64);
     let inv_cond = cond ^ 1;
-    let word = (sf << 31) | (1 << 30) | (0 << 29) | (0b11010100 << 21)
-        | (0b11111 << 16) | (inv_cond << 12) | (0b00 << 10) | (0b11111 << 5) | rd;
+    let word = (((sf << 31) | (1 << 30)) | (0b11010100 << 21)
+        | (0b11111 << 16) | (inv_cond << 12)) | (0b11111 << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -1429,7 +1424,7 @@ fn encode_tbz(operands: &[Operand], is_nz: bool) -> Result<EncodeResult, String>
 fn encode_ldr_str_auto(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
     // Determine size from register: Wn -> 32-bit (size=10), Xn -> 64-bit (size=11)
     // FP: Sn -> 32-bit, Dn -> 64-bit, Qn -> 128-bit
-    let reg_name = match operands.get(0) {
+    let reg_name = match operands.first() {
         Some(Operand::Reg(r)) => r.to_lowercase(),
         _ => return Err("ldr/str needs register operand".to_string()),
     };
@@ -1458,7 +1453,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
     }
 
     let (rt, _) = get_reg(operands, 0)?;
-    let fp = is_fp_reg(operands.get(0).map(|o| match o { Operand::Reg(r) => r.as_str(), _ => "" }).unwrap_or(""));
+    let fp = is_fp_reg(operands.first().map(|o| match o { Operand::Reg(r) => r.as_str(), _ => "" }).unwrap_or(""));
 
     // Use the size parameter as-is (auto-detection happens in encode_ldr_str_auto)
     let actual_size = size;
@@ -1473,7 +1468,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
             // Unsigned offset encoding
             // Size determines the shift for offset alignment
             // For 128-bit Q registers: shift=4, opc=11 (load) or 10 (store)
-            let shift = if is_128bit { 4 } else { actual_size as u32 };
+            let shift = if is_128bit { 4 } else { actual_size };
             let opc = if is_128bit {
                 if is_load { 0b11 } else { 0b10 }
             } else if is_load {
@@ -1485,7 +1480,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
             // Check if offset is aligned and fits in 12-bit unsigned field
             let abs_offset = *offset as u64;
             let align = 1u64 << shift;
-            if *offset >= 0 && abs_offset % align == 0 {
+            if *offset >= 0 && abs_offset.is_multiple_of(align) {
                 let imm12 = (abs_offset / align) as u32;
                 if imm12 < 4096 {
                     // Unsigned offset form: size 111 V 01 opc imm12 Rn Rt
@@ -1504,8 +1499,8 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
             } else {
                 0b00
             };
-            let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (0b00 << 24) | (opc << 22)
-                | ((imm9 as u32 & 0x1FF) << 12) | (0b00 << 10) | (rn << 5) | rt;
+            let word = (((actual_size << 30) | (0b111 << 27) | (v << 26)) | (opc << 22)
+                | ((imm9 as u32 & 0x1FF) << 12)) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
 
@@ -1516,7 +1511,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
             let opc = if is_128bit {
                 if is_load { 0b11 } else { 0b10 }
             } else if is_load { 0b01 } else { 0b00 };
-            let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (0b00 << 24) | (opc << 22)
+            let word = ((actual_size << 30) | (0b111 << 27) | (v << 26)) | (opc << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b11 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
@@ -1528,7 +1523,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
             let opc = if is_128bit {
                 if is_load { 0b11 } else { 0b10 }
             } else if is_load { 0b01 } else { 0b00 };
-            let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (0b00 << 24) | (opc << 22)
+            let word = ((actual_size << 30) | (0b111 << 27) | (v << 26)) | (opc << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b01 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
@@ -1576,8 +1571,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
                     _ => return Err(format!("unsupported modifier in load/store: {}", kind)),
                 };
 
-                let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (opc << 22)
-                    | (0 << 10) | (rn << 5) | rt;
+                let word = ((actual_size << 30) | (0b111 << 27) | (v << 26) | (opc << 22)) | (rn << 5) | rt;
                 return Ok(EncodeResult::WordWithReloc {
                     word,
                     reloc: Relocation {
@@ -1653,25 +1647,25 @@ fn encode_ldrsw(operands: &[Operand]) -> Result<EncodeResult, String> {
             // LDRSW: size=10 111 V=0 01 opc=10 -> unsigned offset
             // Actually: 10 111 0 01 10 imm12 Rn Rt
             let abs_offset = *offset as u64;
-            if *offset >= 0 && abs_offset % 4 == 0 {
+            if *offset >= 0 && abs_offset.is_multiple_of(4) {
                 let imm12 = (abs_offset / 4) as u32;
                 if imm12 < 4096 {
-                    let word = (0b10 << 30) | (0b111 << 27) | (0 << 26) | (0b01 << 24) | (0b10 << 22)
+                    let word = ((0b10 << 30) | (0b111 << 27)) | (0b01 << 24) | (0b10 << 22)
                         | (imm12 << 10) | (rn << 5) | rt;
                     return Ok(EncodeResult::Word(word));
                 }
             }
             // Unscaled: LDURSW
             let imm9 = (*offset as i32) & 0x1FF;
-            let word = (0b10 << 30) | (0b111 << 27) | (0 << 26) | (0b00 << 24) | (0b10 << 22)
-                | ((imm9 as u32 & 0x1FF) << 12) | (0b00 << 10) | (rn << 5) | rt;
+            let word = (((0b10 << 30) | (0b111 << 27)) | (0b10 << 22)
+                | ((imm9 as u32 & 0x1FF) << 12)) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
 
         Some(Operand::MemPostIndex { base, offset }) => {
             let rn = parse_reg_num(base).ok_or("invalid base reg")?;
             let imm9 = (*offset as i32) & 0x1FF;
-            let word = (0b10 << 30) | (0b111 << 27) | (0 << 26) | (0b00 << 24) | (0b10 << 22)
+            let word = ((0b10 << 30) | (0b111 << 27)) | (0b10 << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b01 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
@@ -1679,7 +1673,7 @@ fn encode_ldrsw(operands: &[Operand]) -> Result<EncodeResult, String> {
         Some(Operand::MemPreIndex { base, offset }) => {
             let rn = parse_reg_num(base).ok_or("invalid base reg")?;
             let imm9 = (*offset as i32) & 0x1FF;
-            let word = (0b10 << 30) | (0b111 << 27) | (0 << 26) | (0b00 << 24) | (0b10 << 22)
+            let word = ((0b10 << 30) | (0b111 << 27)) | (0b10 << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b11 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
         }
@@ -1699,27 +1693,24 @@ fn encode_ldrs(operands: &[Operand], size: u32) -> Result<EncodeResult, String> 
     let (rt, is_64) = get_reg(operands, 0)?;
     let opc = if is_64 { 0b10 } else { 0b11 }; // 64-bit target: opc=10, 32-bit: opc=11
 
-    match operands.get(1) {
-        Some(Operand::Mem { base, offset }) => {
-            let rn = parse_reg_num(base).ok_or("invalid base reg")?;
-            let shift = size;
-            let abs_offset = *offset as u64;
-            let align = 1u64 << shift;
-            if *offset >= 0 && abs_offset % align == 0 {
-                let imm12 = (abs_offset / align) as u32;
-                if imm12 < 4096 {
-                    let word = (size << 30) | (0b111 << 27) | (0 << 26) | (0b01 << 24) | (opc << 22)
-                        | (imm12 << 10) | (rn << 5) | rt;
-                    return Ok(EncodeResult::Word(word));
-                }
+    if let Some(Operand::Mem { base, offset }) = operands.get(1) {
+        let rn = parse_reg_num(base).ok_or("invalid base reg")?;
+        let shift = size;
+        let abs_offset = *offset as u64;
+        let align = 1u64 << shift;
+        if *offset >= 0 && abs_offset.is_multiple_of(align) {
+            let imm12 = (abs_offset / align) as u32;
+            if imm12 < 4096 {
+                let word = ((size << 30) | (0b111 << 27)) | (0b01 << 24) | (opc << 22)
+                    | (imm12 << 10) | (rn << 5) | rt;
+                return Ok(EncodeResult::Word(word));
             }
-            // Unscaled
-            let imm9 = (*offset as i32) & 0x1FF;
-            let word = (size << 30) | (0b111 << 27) | (0 << 26) | (0b00 << 24) | (opc << 22)
-                | ((imm9 as u32 & 0x1FF) << 12) | (0b00 << 10) | (rn << 5) | rt;
-            return Ok(EncodeResult::Word(word));
         }
-        _ => {}
+        // Unscaled
+        let imm9 = (*offset as i32) & 0x1FF;
+        let word = (((size << 30) | (0b111 << 27)) | (opc << 22)
+            | ((imm9 as u32 & 0x1FF) << 12)) | (rn << 5) | rt;
+        return Ok(EncodeResult::Word(word));
     }
 
     Err(format!("unsupported ldrsb/ldrsh operands: {:?}", operands))
@@ -1738,11 +1729,9 @@ fn encode_ldp_stp(operands: &[Operand], is_load: bool) -> Result<EncodeResult, S
         let r = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
         if r.starts_with('s') { 0b00 }
         else if r.starts_with('d') { 0b01 }
-        else if r.starts_with('q') { 0b10 }
-        else { if is_64 { 0b10 } else { 0b00 } }
-    } else {
-        if is_64 { 0b10 } else { 0b00 }
-    };
+        else if r.starts_with('q') || is_64 { 0b10 }
+        else { 0b00 }
+    } else if is_64 { 0b10 } else { 0b00 };
 
     let v = if fp { 1u32 } else { 0u32 };
     let l = if is_load { 1u32 } else { 0u32 };
@@ -1753,10 +1742,8 @@ fn encode_ldp_stp(operands: &[Operand], is_load: bool) -> Result<EncodeResult, S
         if r.starts_with('s') { 2 }
         else if r.starts_with('d') { 3 }
         else if r.starts_with('q') { 4 }
-        else { if is_64 { 3 } else { 2 } }
-    } else {
-        if is_64 { 3 } else { 2 }
-    };
+        else if is_64 { 3 } else { 2 }
+    } else if is_64 { 3 } else { 2 };
 
     match operands.get(2) {
         // STP rt1, rt2, [base, #offset]! (pre-index)
@@ -1804,7 +1791,7 @@ fn encode_ldxr_stxr(operands: &[Operand], is_load: bool, forced_size: Option<u32
             _ => return Err("ldxr needs memory operand".to_string()),
         };
         let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
-        let word = (size << 30) | (0b001000010 << 21) | (0b11111 << 16) | (0 << 15)
+        let word = ((size << 30) | (0b001000010 << 21) | (0b11111 << 16))
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     } else {
@@ -1815,7 +1802,7 @@ fn encode_ldxr_stxr(operands: &[Operand], is_load: bool, forced_size: Option<u32
             _ => return Err("stxr needs memory operand".to_string()),
         };
         let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
-        let word = (size << 30) | (0b001000000 << 21) | (ws << 16) | (0 << 15)
+        let word = ((size << 30) | (0b001000000 << 21) | (ws << 16))
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     }
@@ -1857,7 +1844,7 @@ fn encode_ldar_stlr(operands: &[Operand], is_load: bool, forced_size: Option<u32
     let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
     let l = if is_load { 1u32 } else { 0 };
     // LDAR/STLR: size 001000 1 L 0 11111 1 11111 Rn Rt
-    let word = (size << 30) | (0b001000 << 24) | (1 << 23) | (l << 22) | (0 << 21)
+    let word = ((size << 30) | (0b001000 << 24) | (1 << 23) | (l << 22))
         | (0b11111 << 16) | (1 << 15) | (0b11111 << 10) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
@@ -1905,7 +1892,7 @@ fn encode_adr(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, _) = get_reg(operands, 0)?;
     let (sym, addend) = get_symbol(operands, 1)?;
     // ADR: 0 immlo[1:0] 10000 immhi[18:0] Rd
-    let word = (0u32 << 31) | (0b10000 << 24) | rd;
+    let word = (0b10000 << 24) | rd;
     Ok(EncodeResult::WordWithReloc {
         word,
         reloc: Relocation {
@@ -1954,11 +1941,11 @@ fn encode_fmov(operands: &[Operand]) -> Result<EncodeResult, String> {
         let is_double = rd_lower.starts_with('d');
         if is_double {
             // FMOV Dd, Xn: 1 00 11110 01 1 00 111 000000 Rn Rd
-            let word = (0b1001111001 << 22) | (0b100111 << 16) | (0 << 10) | (rm << 5) | rd;
+            let word = ((0b1001111001 << 22) | (0b100111 << 16)) | (rm << 5) | rd;
             return Ok(EncodeResult::Word(word));
         } else {
             // FMOV Sd, Wn: 0 00 11110 00 1 00 111 000000 Rn Rd
-            let word = (0b0001111000 << 22) | (0b100111 << 16) | (0 << 10) | (rm << 5) | rd;
+            let word = ((0b0001111000 << 22) | (0b100111 << 16)) | (rm << 5) | rd;
             return Ok(EncodeResult::Word(word));
         }
     }
@@ -1968,11 +1955,11 @@ fn encode_fmov(operands: &[Operand]) -> Result<EncodeResult, String> {
         let is_double = rm_lower.starts_with('d');
         if is_double {
             // FMOV Xd, Dn: 1 00 11110 01 1 00 110 000000 Rn Rd
-            let word = (0b1001111001 << 22) | (0b100110 << 16) | (0 << 10) | (rm << 5) | rd;
+            let word = ((0b1001111001 << 22) | (0b100110 << 16)) | (rm << 5) | rd;
             return Ok(EncodeResult::Word(word));
         } else {
             // FMOV Wd, Sn: 0 00 11110 00 1 00 110 000000 Rn Rd
-            let word = (0b0001111000 << 22) | (0b100110 << 16) | (0 << 10) | (rm << 5) | rd;
+            let word = ((0b0001111000 << 22) | (0b100110 << 16)) | (rm << 5) | rd;
             return Ok(EncodeResult::Word(word));
         }
     }
@@ -2035,13 +2022,13 @@ fn encode_fcmp(operands: &[Operand]) -> Result<EncodeResult, String> {
 
     // FCMP Dn, #0.0
     if operands.len() < 2 || matches!(operands.get(1), Some(Operand::Imm(0))) {
-        let word = (0b00011110 << 24) | (ftype << 22) | (1 << 21) | (0 << 16) | (0b001000 << 10) | (rn << 5) | 0b01000;
+        let word = ((0b00011110 << 24) | (ftype << 22) | (1 << 21)) | (0b001000 << 10) | (rn << 5) | 0b01000;
         return Ok(EncodeResult::Word(word));
     }
 
     let (rm, _) = get_reg(operands, 1)?;
     // FCMP Dn, Dm: 0 00 11110 ftype 1 Rm 00 1000 Rn 00 000
-    let word = (0b00011110 << 24) | (ftype << 22) | (1 << 21) | (rm << 16) | (0b001000 << 10) | (rn << 5) | 0;
+    let word = (0b00011110 << 24) | (ftype << 22) | (1 << 21) | (rm << 16) | (0b001000 << 10) | (rn << 5);
     Ok(EncodeResult::Word(word))
 }
 
@@ -2064,8 +2051,8 @@ fn encode_fcvt_rounding(operands: &[Operand], rmode: u32, opcode: u32) -> Result
     let ftype: u32 = if src_name.starts_with('d') { 0b01 } else { 0b00 };
     let sf: u32 = if rd_is_64 { 1 } else { 0 };
 
-    let word = (sf << 31) | (0b00 << 29) | (0b11110 << 24) | (ftype << 22)
-        | (1 << 21) | (rmode << 19) | (opcode << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (0b11110 << 24) | (ftype << 22)
+        | (1 << 21) | (rmode << 19) | (opcode << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2097,8 +2084,8 @@ fn encode_int_to_float(operands: &[Operand], is_signed: bool) -> Result<EncodeRe
     let sf: u32 = if rn_is_64 { 1 } else { 0 };
     let opcode: u32 = if is_signed { 0b010 } else { 0b011 };
 
-    let word = (sf << 31) | (0b00 << 29) | (0b11110 << 24) | (ftype << 22)
-        | (1 << 21) | (0b00 << 19) | (opcode << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    let word = (((sf << 31) | (0b11110 << 24) | (ftype << 22)
+        | (1 << 21)) | (opcode << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2172,7 +2159,7 @@ fn encode_cnt(operands: &[Operand]) -> Result<EncodeResult, String> {
     let q: u32 = if arr_d == "16b" { 1 } else { 0 }; // .8b -> Q=0, .16b -> Q=1
 
     // 0 Q 00 1110 00 10 0000 0101 10 Rn Rd
-    let word = (q << 30) | (0b001110 << 24) | (0b00 << 22) | (0b100000 << 16)
+    let word = ((q << 30) | (0b001110 << 24)) | (0b100000 << 16)
         | (0b010110 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2201,15 +2188,15 @@ fn encode_uaddlv(operands: &[Operand]) -> Result<EncodeResult, String> {
     };
 
     // 0 Q 1 01110 size 11 0000 0011 10 Rn Rd
-    let word = (q << 30) | (0b1 << 29) | (0b01110 << 24) | (size << 22)
-        | (0b11 << 20) | (0b0000 << 16) | (0b001110 << 10) | (rn << 5) | rd;
+    let word = ((q << 30) | (0b1 << 29) | (0b01110 << 24) | (size << 22)
+        | (0b11 << 20)) | (0b001110 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
 // ── System instructions ──────────────────────────────────────────────────
 
 fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let option = match operands.get(0) {
+    let option = match operands.first() {
         Some(Operand::Barrier(b)) => match b.as_str() {
             "sy" => 0b1111,
             "ish" => 0b1011,
@@ -2240,7 +2227,7 @@ fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
 }
 
 fn encode_dsb(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let option = match operands.get(0) {
+    let option = match operands.first() {
         Some(Operand::Barrier(b)) => match b.as_str() {
             "sy" => 0b1111u32,
             "ish" => 0b1011,
@@ -2284,7 +2271,7 @@ fn encode_mrs(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
     // MSR system_reg, Xt
-    let sysreg = match operands.get(0) {
+    let sysreg = match operands.first() {
         Some(Operand::Symbol(s)) => s.to_lowercase(),
         _ => return Err("msr needs system register name".to_string()),
     };
@@ -2321,7 +2308,7 @@ fn encode_clz(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     // CLZ: sf 1 0 11010110 00000 00010 0 Rn Rd
-    let word = (sf << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
+    let word = ((sf << 31) | (1 << 30) | (0b011010110 << 21))
         | (0b000100 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2330,7 +2317,7 @@ fn encode_cls(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
+    let word = ((sf << 31) | (1 << 30) | (0b011010110 << 21))
         | (0b000101 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2339,8 +2326,7 @@ fn encode_rbit(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
-        | (0b000000 << 10) | (rn << 5) | rd;
+    let word = ((sf << 31) | (1 << 30) | (0b011010110 << 21)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2349,7 +2335,7 @@ fn encode_rev(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
     let opc = if is_64 { 0b000011 } else { 0b000010 };
-    let word = (sf << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
+    let word = ((sf << 31) | (1 << 30) | (0b011010110 << 21))
         | (opc << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2358,7 +2344,7 @@ fn encode_rev16(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
-    let word = (sf << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
+    let word = ((sf << 31) | (1 << 30) | (0b011010110 << 21))
         | (0b000001 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2367,7 +2353,7 @@ fn encode_rev32(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rd, _) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
     // REV32 is 64-bit only: 1 1 0 11010110 00000 000010 Rn Rd
-    let word = (1u32 << 31) | (1 << 30) | (0b011010110 << 21) | (0b00000 << 16)
+    let word = ((1u32 << 31) | (1 << 30) | (0b011010110 << 21))
         | (0b000010 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2591,8 +2577,8 @@ fn encode_neon_ext(operands: &[Operand]) -> Result<EncodeResult, String> {
 
     // EXT Vd.T, Vn.T, Vm.T, #index
     // Encoding: 0 Q 10 1110 00 0 Rm 0 imm4 0 Rn Rd
-    let word = (q << 30) | (0b101110 << 24) | (0b00 << 22) | (0 << 21)
-        | (rm << 16) | (0 << 15) | ((index & 0xF) << 11) | (0 << 10) | (rn << 5) | rd;
+    let word = ((((q << 30) | (0b101110 << 24))
+        | (rm << 16)) | ((index & 0xF) << 11)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2717,7 +2703,7 @@ fn encode_neon_not(operands: &[Operand]) -> Result<EncodeResult, String> {
     let q: u32 = if arr_d == "16b" { 1 } else { 0 };
 
     // NOT Vd.T, Vn.T (alias of MVN): 0 Q 1 01110 00 10000 00101 10 Rn Rd
-    let word = (q << 30) | (1 << 29) | (0b01110 << 24) | (0b00 << 22)
+    let word = ((q << 30) | (1 << 29) | (0b01110 << 24))
         | (0b10000 << 17) | (0b00101 << 12) | (0b10 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -2886,8 +2872,8 @@ fn encode_neon_tbl(operands: &[Operand]) -> Result<EncodeResult, String> {
     let len = (num_regs - 1) & 0x3;
 
     // TBL: 0 Q 00 1110 000 Rm 0 len 0 00 Rn Rd
-    let word = (q << 30) | (0b001110 << 24) | (0b000 << 21)
-        | (rm << 16) | (0 << 15) | (len << 13) | (0b000 << 10) | (rn << 5) | rd;
+    let word = ((((q << 30) | (0b001110 << 24))
+        | (rm << 16)) | (len << 13)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2951,8 +2937,7 @@ fn encode_neon_ld_st(operands: &[Operand], is_load: bool) -> Result<EncodeResult
     // Handle post-index form from merged MemPostIndex
     if let Some(_imm) = post_index {
         // Post-index with immediate: use Rm=11111 (0x1F)
-        let word = (q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)
-            | (0 << 21) | (0b11111 << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
+        let word = ((q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)) | (0b11111 << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
         return Ok(EncodeResult::Word(word));
     }
 
@@ -2961,14 +2946,12 @@ fn encode_neon_ld_st(operands: &[Operand], is_load: bool) -> Result<EncodeResult
         match &operands[2] {
             Operand::Imm(_) => {
                 // Post-index with immediate: use Rm=11111
-                let word = (q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)
-                    | (0 << 21) | (0b11111 << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
+                let word = ((q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)) | (0b11111 << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
                 return Ok(EncodeResult::Word(word));
             }
             Operand::Reg(rm_name) => {
                 let rm = parse_reg_num(rm_name).ok_or("invalid rm")?;
-                let word = (q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)
-                    | (0 << 21) | (rm << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
+                let word = ((q << 30) | (0b001100 << 24) | (1 << 23) | (l_bit << 22)) | (rm << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
                 return Ok(EncodeResult::Word(word));
             }
             _ => {}
@@ -2977,8 +2960,7 @@ fn encode_neon_ld_st(operands: &[Operand], is_load: bool) -> Result<EncodeResult
 
     // No post-index: LD1/ST1 {Vt.T...}, [Xn]
     // 0 Q 001100 0 L 0 00000 opcode size Rn Rt
-    let word = (q << 30) | (0b001100 << 24) | (0 << 23) | (l_bit << 22)
-        | (0 << 21) | (0b00000 << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
+    let word = (((q << 30) | (0b001100 << 24)) | (l_bit << 22)) | (opcode << 12) | (size << 10) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
@@ -2996,8 +2978,7 @@ fn encode_neon_zip_uzp(operands: &[Operand], op_bits: u32, _is_zip: bool) -> Res
     // UZP2: 0 Q 0 01110 size 0 Rm 0 101 10 Rn Rd  (op_bits=101)
     // ZIP1: 0 Q 0 01110 size 0 Rm 0 011 10 Rn Rd  (op_bits=011)
     // ZIP2: 0 Q 0 01110 size 0 Rm 0 111 10 Rn Rd  (op_bits=111)
-    let word = (q << 30) | (0b001110 << 24) | (size << 22)
-        | (0 << 21) | (rm << 16) | (0 << 15) | (op_bits << 12) | (0b10 << 10) | (rn << 5) | rd;
+    let word = (((q << 30) | (0b001110 << 24) | (size << 22)) | (rm << 16)) | (op_bits << 12) | (0b10 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -3013,8 +2994,7 @@ fn encode_neon_eor3(operands: &[Operand]) -> Result<EncodeResult, String> {
 
     // EOR3 Vd.16b, Vn.16b, Vm.16b, Vk.16b
     // Encoding: 11001110 000 Rm 0 Rk(4:0) 00 Rn Rd
-    let word = (0b11001110u32 << 24) | (0b000 << 21) | (rm << 16)
-        | (0 << 15) | (rk << 10) | (rn << 5) | rd;
+    let word = ((0b11001110u32 << 24) | (rm << 16)) | (rk << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -3031,8 +3011,8 @@ fn encode_neon_pmull(operands: &[Operand], is_pmull2: bool) -> Result<EncodeResu
 
     // PMULL  Vd.1q, Vn.1d, Vm.1d: 0 0 00 1110 11 1 Rm 11100 0 Rn Rd  (size=11)
     // PMULL2 Vd.1q, Vn.2d, Vm.2d: 0 1 00 1110 11 1 Rm 11100 0 Rn Rd
-    let word = (q << 30) | (0b001110 << 24) | (0b11 << 22) | (1 << 21)
-        | (rm << 16) | (0b11100 << 11) | (0 << 10) | (rn << 5) | rd;
+    let word = ((q << 30) | (0b001110 << 24) | (0b11 << 22) | (1 << 21)
+        | (rm << 16) | (0b11100 << 11)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -3116,7 +3096,7 @@ fn encode_neon_sshr(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err(format!("unsupported sshr arrangement: {}", arr_d)),
     };
 
-    let word = (q << 30) | (0 << 29) | (0b011110 << 23) | (immh_immb << 16)
+    let word = (q << 30) | (0b011110 << 23) | (immh_immb << 16)
         | (0b000001 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -3143,7 +3123,7 @@ fn encode_neon_shl(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => return Err(format!("unsupported shl arrangement: {}", arr_d)),
     };
 
-    let word = (q << 30) | (0 << 29) | (0b011110 << 23) | (immh_immb << 16)
+    let word = (q << 30) | (0b011110 << 23) | (immh_immb << 16)
         | (0b010101 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -3181,7 +3161,7 @@ fn encode_orn(operands: &[Operand]) -> Result<EncodeResult, String> {
     }
 
     // NEON vector form: ORN Vd.T, Vn.T, Vm.T
-    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+    if let Some(Operand::RegArrangement { .. }) = operands.first() {
         let (rd, arr_d) = get_neon_reg(operands, 0)?;
         let (rn, _) = get_neon_reg(operands, 1)?;
         let (rm, _) = get_neon_reg(operands, 2)?;
@@ -3198,8 +3178,8 @@ fn encode_orn(operands: &[Operand]) -> Result<EncodeResult, String> {
     let sf = sf_bit(is_64);
 
     // ORN Rd, Rn, Rm: sf 01 01010 00 1 Rm 000000 Rn Rd
-    let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (0b00 << 22) | (1 << 21)
-        | (rm << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    let word = (((sf << 31) | (0b01 << 29) | (0b01010 << 24)) | (1 << 21)
+        | (rm << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
@@ -3214,15 +3194,15 @@ fn encode_bics(operands: &[Operand]) -> Result<EncodeResult, String> {
     let sf = sf_bit(is_64);
 
     // BICS Rd, Rn, Rm: sf 11 01010 00 1 Rm 000000 Rn Rd
-    let word = (sf << 31) | (0b11 << 29) | (0b01010 << 24) | (0b00 << 22) | (1 << 21)
-        | (rm << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    let word = (((sf << 31) | (0b11 << 29) | (0b01010 << 24)) | (1 << 21)
+        | (rm << 16)) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
 /// Encode DC (data cache) instruction: dc civac, Xt
 fn encode_dc(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, String> {
     // Check for the operation type in the operands or raw string
-    let op = match operands.get(0) {
+    let op = match operands.first() {
         Some(Operand::Symbol(s)) => s.to_lowercase(),
         _ => raw_operands.to_lowercase(),
     };

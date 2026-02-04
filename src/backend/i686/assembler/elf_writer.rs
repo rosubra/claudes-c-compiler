@@ -206,9 +206,9 @@ impl ElfWriter {
                     let aligned = (current + align - 1) & !(align - 1);
                     let padding = (aligned - current) as usize;
                     if section.flags & SHF_EXECINSTR != 0 {
-                        section.data.extend(std::iter::repeat(0x90).take(padding));
+                        section.data.extend(std::iter::repeat_n(0x90, padding));
                     } else {
-                        section.data.extend(std::iter::repeat(0).take(padding));
+                        section.data.extend(std::iter::repeat_n(0, padding));
                     }
                 }
             }
@@ -231,7 +231,7 @@ impl ElfWriter {
             }
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
-                section.data.extend(std::iter::repeat(0u8).take(*n as usize));
+                section.data.extend(std::iter::repeat_n(0u8, *n as usize));
             }
             AsmItem::Asciz(bytes) | AsmItem::Ascii(bytes) => {
                 let section = self.current_section_mut()?;
@@ -245,7 +245,7 @@ impl ElfWriter {
                     sym_type: STT_OBJECT,
                     visibility: STV_DEFAULT,
                     section: None,
-                    value: *align as u32,
+                    value: *align,
                     size: *size as u32,
                     is_common: true,
                     common_align: *align,
@@ -339,7 +339,7 @@ impl ElfWriter {
                         addend: 0,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolOffset(sym, addend) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
@@ -350,7 +350,7 @@ impl ElfWriter {
                         addend: *addend as i32,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolDiff(a, _b) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
@@ -361,7 +361,7 @@ impl ElfWriter {
                         addend: 0,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
             }
         }
@@ -387,7 +387,7 @@ impl ElfWriter {
                         addend: 0,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(8));
+                    section.data.extend(std::iter::repeat_n(0, 8));
                 }
                 DataValue::SymbolOffset(sym, addend) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
@@ -398,7 +398,7 @@ impl ElfWriter {
                         addend: *addend as i32,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(8));
+                    section.data.extend(std::iter::repeat_n(0, 8));
                 }
                 DataValue::SymbolDiff(a, _b) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
@@ -409,7 +409,7 @@ impl ElfWriter {
                         addend: 0,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(8));
+                    section.data.extend(std::iter::repeat_n(0, 8));
                 }
             }
         }
@@ -531,7 +531,7 @@ impl ElfWriter {
                     if let Some(&target_off) = local_labels.get(&jump.target) {
                         let short_end = jump.offset as i64 + 2;
                         let disp = target_off as i64 - short_end;
-                        if disp >= -128 && disp <= 127 {
+                        if (-128..=127).contains(&disp) {
                             to_relax.push(j_idx);
                         }
                     }
@@ -713,7 +713,7 @@ impl Elf32ByteWriter {
                 strtab.add(&sym.name);
             }
         }
-        for (alias, _) in aliases {
+        for alias in aliases.keys() {
             strtab.add(alias);
         }
 

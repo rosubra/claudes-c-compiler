@@ -412,7 +412,7 @@ fn read_dynsyms(path: &str) -> Result<Vec<DynSymInfo>, String> {
 
     // Read section header string table for section name lookups
     let shstrtab_off_hdr = e_shoff + e_shstrndx * e_shentsize;
-    let shstrtab_data = if shstrtab_off_hdr + 40 <= data.len() {
+    let _shstrtab_data = if shstrtab_off_hdr + 40 <= data.len() {
         let off = read_u32(&data, shstrtab_off_hdr + 16) as usize;
         let sz = read_u32(&data, shstrtab_off_hdr + 20) as usize;
         if off + sz <= data.len() { &data[off..off + sz] } else { &[] as &[u8] }
@@ -524,7 +524,7 @@ fn read_dynsyms(path: &str) -> Result<Vec<DynSymInfo>, String> {
 
         // Look up version for this symbol
         let (version, is_default_ver) = if let Some((vs_off, _vs_size)) = versym_shdr {
-            let vs_entry = vs_off + (j as usize) * 2;
+            let vs_entry = vs_off + j * 2;
             if vs_entry + 2 <= data.len() {
                 let raw_ver = read_u16(&data, vs_entry);
                 let hidden = raw_ver & 0x8000 != 0;
@@ -648,28 +648,26 @@ pub fn link_builtin(
         let arg = &user_args[i];
         if arg == "-nostdlib" || arg == "-shared" || arg == "-static" || arg == "-r" {
             // handled above
-        } else if arg.starts_with("-l") {
-            let libarg = &arg[2..];
-            if libarg.starts_with(':') {
-                extra_lib_files.push(libarg[1..].to_string());
+        } else if let Some(libarg) = arg.strip_prefix("-l") {
+            if let Some(rest) = libarg.strip_prefix(':') {
+                extra_lib_files.push(rest.to_string());
             } else {
                 extra_libs.push(libarg.to_string());
             }
-        } else if arg.starts_with("-L") {
-            extra_lib_paths.push(arg[2..].to_string());
+        } else if let Some(rest) = arg.strip_prefix("-L") {
+            extra_lib_paths.push(rest.to_string());
         } else if arg == "-rdynamic" || arg == "--export-dynamic" {
             _rdynamic = true;
-        } else if arg.starts_with("-Wl,") {
-            for part in arg[4..].split(',') {
-                if part.starts_with("-l") {
-                    let libarg = &part[2..];
-                    if libarg.starts_with(':') {
-                        extra_lib_files.push(libarg[1..].to_string());
+        } else if let Some(wl_args) = arg.strip_prefix("-Wl,") {
+            for part in wl_args.split(',') {
+                if let Some(libarg) = part.strip_prefix("-l") {
+                    if let Some(rest) = libarg.strip_prefix(':') {
+                        extra_lib_files.push(rest.to_string());
                     } else {
                         extra_libs.push(libarg.to_string());
                     }
-                } else if part.starts_with("-L") {
-                    extra_lib_paths.push(part[2..].to_string());
+                } else if let Some(rest) = part.strip_prefix("-L") {
+                    extra_lib_paths.push(rest.to_string());
                 } else if part == "--export-dynamic" || part == "-export-dynamic" {
                     _rdynamic = true;
                 }
@@ -788,7 +786,6 @@ pub fn link_builtin(
                     let path = format!("{}/{}", dir, ar_filename);
                     if Path::new(&path).exists() {
                         static_lib_objects.push(path);
-                        found = true;
                         break;
                     }
                 }
@@ -868,10 +865,9 @@ pub fn link_builtin(
             let members = parse_archive(&data, obj_path)?;
             for (name, mdata) in members {
                 let member_name = format!("{}({})", obj_path, name);
-                match parse_elf32(&mdata, &member_name) {
-                    Ok(obj) => inputs.push(obj),
-                    Err(_) => {} // Skip non-ELF32 members
-                }
+                if let Ok(obj) = parse_elf32(&mdata, &member_name) {
+                    inputs.push(obj);
+                } // Skip non-ELF32 members
             }
         } else {
             inputs.push(parse_elf32(&data, obj_path)?);
@@ -952,7 +948,7 @@ pub fn link_builtin(
     }
 
     for (obj_idx, obj) in inputs.iter().enumerate() {
-        for (sec_idx, sec) in obj.sections.iter().enumerate() {
+        for sec in obj.sections.iter() {
             let out_name = match output_section_name(&sec.name, sec.flags, sec.sh_type) {
                 Some(n) => n,
                 None => continue,
@@ -995,7 +991,7 @@ pub fn link_builtin(
                 out_sec.align = align;
             }
             let padding = (align - (out_sec.data.len() as u32 % align)) % align;
-            out_sec.data.extend(std::iter::repeat(0u8).take(padding as usize));
+            out_sec.data.extend(std::iter::repeat_n(0u8, padding as usize));
             let offset = out_sec.data.len() as u32;
 
             section_map.insert((obj_idx, sec.input_index), (out_idx, offset));
@@ -1003,7 +999,7 @@ pub fn link_builtin(
             if sec.sh_type != SHT_NOBITS {
                 out_sec.data.extend_from_slice(&sec.data);
             } else {
-                out_sec.data.extend(std::iter::repeat(0u8).take(sec.data.len()));
+                out_sec.data.extend(std::iter::repeat_n(0u8, sec.data.len()));
             }
         }
     }
@@ -1059,9 +1055,9 @@ pub fn link_builtin(
                 }
                 Some(existing) => {
                     // Global beats weak, defined beats undefined
-                    if sym.binding == STB_GLOBAL && existing.binding == STB_WEAK {
-                        global_symbols.insert(name.clone(), new_sym);
-                    } else if !existing.is_defined && new_sym.is_defined {
+                    if (sym.binding == STB_GLOBAL && existing.binding == STB_WEAK)
+                        || (!existing.is_defined && new_sym.is_defined)
+                    {
                         global_symbols.insert(name.clone(), new_sym);
                     }
                     // Otherwise keep existing definition
@@ -1162,7 +1158,7 @@ pub fn link_builtin(
 
     // Mark symbols that need PLT entries (called via R_386_PLT32 and are dynamic)
     // and symbols that need GOT entries (referenced via R_386_GOT32X, R_386_GOT32)
-    for (obj_idx, obj) in inputs.iter().enumerate() {
+    for obj in inputs.iter() {
         for sec in &obj.sections {
             for &(_, rel_type, sym_idx, _) in &sec.relocations {
                 let sym = if (sym_idx as usize) < obj.symbols.len() {
@@ -1255,7 +1251,7 @@ pub fn link_builtin(
     }
 
     let num_plt = plt_symbols.len();
-    let num_got_total = plt_symbols.len() + got_symbols.len();
+    let _num_got_total = plt_symbols.len() + got_symbols.len();
 
     // ── Layout ───────────────────────────────────────────────────────────────
     // ELF32 header: 52 bytes
@@ -1297,7 +1293,7 @@ pub fn link_builtin(
         needed_libs.push("libc.so.6".to_string());
     }
     // Add libraries from dynamic symbols
-    for (_, sym) in &global_symbols {
+    for sym in global_symbols.values() {
         if sym.is_dynamic && !sym.dynlib.is_empty() && !needed_libs.contains(&sym.dynlib) {
             needed_libs.push(sym.dynlib.clone());
         }
@@ -1495,7 +1491,7 @@ pub fn link_builtin(
         let next_off = if is_last_lib {
             0u32
         } else {
-            (16 + vers.len() as u32 * 16) as u32 // skip this header + all vernaux entries
+            16 + vers.len() as u32 * 16 // skip this header + all vernaux entries
         };
         verneed_data.extend_from_slice(&next_off.to_le_bytes()); // vn_next
         verneed_count += 1;
@@ -1517,11 +1513,10 @@ pub fn link_builtin(
 
     // Now lay out the file
     // Segment 0 (read-only headers): starts at BASE_ADDR
-    let mut file_offset: u32 = 0;
+    let mut file_offset: u32 = ehdr_size;
     let mut vaddr: u32 = BASE_ADDR;
 
     // ELF header
-    file_offset = ehdr_size;
     vaddr += ehdr_size;
 
     // Program headers
@@ -1542,7 +1537,7 @@ pub fn link_builtin(
     // Note section
     let note_sec_idx = section_name_to_idx.get(".note").copied();
     let note_offset = file_offset;
-    let note_vaddr = vaddr;
+    let _note_vaddr = vaddr;
     let note_size = note_sec_idx.map(|i| output_sections[i].data.len() as u32).unwrap_or(0);
     if note_size > 0 {
         file_offset += note_size;
@@ -1626,8 +1621,8 @@ pub fn link_builtin(
     }
 
     let ro_headers_end = file_offset;
-    let ro_headers_vaddr_end = vaddr;
-    let ro_headers_size = ro_headers_end; // starts at 0
+    let _ro_headers_vaddr_end = vaddr;
+    let _ro_headers_size = ro_headers_end; // starts at 0
 
     // ── Segment 1 (RX): .init + .plt + .text + .fini ──
     file_offset = align_up(file_offset, PAGE_SIZE);
@@ -1643,7 +1638,7 @@ pub fn link_builtin(
 
     // .init section
     let init_sec_idx = section_name_to_idx.get(".init").copied();
-    let init_offset;
+    let _init_offset;
     let init_vaddr;
     let init_size;
     if let Some(idx) = init_sec_idx {
@@ -1651,7 +1646,7 @@ pub fn link_builtin(
         let a = sec.align.max(4);
         file_offset = align_up(file_offset, a);
         vaddr = align_up(vaddr, a);
-        init_offset = file_offset;
+        _init_offset = file_offset;
         init_vaddr = vaddr;
         init_size = sec.data.len() as u32;
         sec.addr = vaddr;
@@ -1659,7 +1654,7 @@ pub fn link_builtin(
         file_offset += init_size;
         vaddr += init_size;
     } else {
-        init_offset = file_offset;
+        _init_offset = file_offset;
         init_vaddr = vaddr;
         init_size = 0;
     }
@@ -1768,7 +1763,7 @@ pub fn link_builtin(
 
     let data_seg_file_start = file_offset;
     let data_seg_vaddr_start = vaddr;
-    let relro_start_vaddr = vaddr;
+    let _relro_start_vaddr = vaddr;
 
     // .init_array
     let init_array_sec_idx = section_name_to_idx.get(".init_array").copied();
@@ -1870,7 +1865,7 @@ pub fn link_builtin(
 
     // RELRO covers .init_array + .fini_array + .dynamic + .got (non-PLT)
     // It must NOT cover .got.plt (which needs to be writable for lazy binding).
-    let relro_end_vaddr = vaddr; // Not page-aligned: RELRO ends right before .got.plt
+    let _relro_end_vaddr = vaddr; // Not page-aligned: RELRO ends right before .got.plt
 
     // .got.plt (for PLT GOT entries)
     let gotplt_offset = file_offset;
@@ -1904,19 +1899,17 @@ pub fn link_builtin(
     // .bss (no file data)
     let bss_sec_idx = section_name_to_idx.get(".bss").copied();
     let bss_vaddr;
-    let bss_size;
     if let Some(idx) = bss_sec_idx {
         let sec = &mut output_sections[idx];
         let a = sec.align.max(4);
         vaddr = align_up(vaddr, a);
         bss_vaddr = vaddr;
-        bss_size = sec.data.len() as u32;
+        let bss_size = sec.data.len() as u32;
         sec.addr = vaddr;
         sec.file_offset = file_offset; // BSS doesn't occupy file space
         vaddr += bss_size;
     } else {
         bss_vaddr = vaddr;
-        bss_size = 0;
     }
 
     // Allocate space in BSS for copy relocations (dynamic data symbols).
@@ -2041,7 +2034,7 @@ pub fn link_builtin(
         for sec in &obj.sections {
             if sec.relocations.is_empty() { continue; }
 
-            let out_name = match output_section_name(&sec.name, sec.flags, sec.sh_type) {
+            let _out_name = match output_section_name(&sec.name, sec.flags, sec.sh_type) {
                 Some(n) => n,
                 None => continue,
             };
@@ -2143,7 +2136,7 @@ pub fn link_builtin(
                                 (sym_addr as i32 + addend - got_base as i32) as u32
                             }
                         } else {
-                            (addend as i32 - got_base as i32) as u32
+                            (addend - got_base as i32) as u32
                         }
                     }
                     other => {

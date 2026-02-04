@@ -156,8 +156,8 @@ pub fn reg_num(name: &str) -> Option<u32> {
         "t6" => Some(31),
         _ => {
             // x0-x31
-            if name.starts_with('x') {
-                let n: u32 = name[1..].parse().ok()?;
+            if let Some(rest) = name.strip_prefix('x') {
+                let n: u32 = rest.parse().ok()?;
                 if n <= 31 { Some(n) } else { None }
             } else {
                 None
@@ -677,7 +677,7 @@ fn encode_lui(operands: &[Operand]) -> Result<EncodeResult, String> {
                 },
             })
         }
-        _ => Err(format!("lui: invalid operands")),
+        _ => Err("lui: invalid operands".to_string()),
     }
 }
 
@@ -698,7 +698,7 @@ fn encode_auipc(operands: &[Operand]) -> Result<EncodeResult, String> {
                 },
             })
         }
-        _ => Err(format!("auipc: invalid operands")),
+        _ => Err("auipc: invalid operands".to_string()),
     }
 }
 
@@ -794,7 +794,7 @@ fn encode_branch_instr(operands: &[Operand], funct3: u32) -> Result<EncodeResult
                 },
             })
         }
-        _ => Err(format!("branch: expected offset or label as 3rd operand")),
+        _ => Err("branch: expected offset or label as 3rd operand".to_string()),
     }
 }
 
@@ -953,7 +953,7 @@ fn encode_amo(operands: &[Operand], funct3: u32, funct5: u32) -> Result<EncodeRe
 fn encode_lr_suffixed(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
     // Parse lr.w, lr.d, lr.w.aq, lr.w.rl, lr.w.aqrl, etc.
     let parts: Vec<&str> = mnemonic.split('.').collect();
-    let funct3 = match parts.get(1).map(|s| *s) {
+    let funct3 = match parts.get(1).copied() {
         Some("w") => 0b010,
         Some("d") => 0b011,
         _ => return Err(format!("lr: invalid width: {}", mnemonic)),
@@ -967,7 +967,7 @@ fn encode_lr_suffixed(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResu
 
 fn encode_sc_suffixed(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
     let parts: Vec<&str> = mnemonic.split('.').collect();
-    let funct3 = match parts.get(1).map(|s| *s) {
+    let funct3 = match parts.get(1).copied() {
         Some("w") => 0b010,
         Some("d") => 0b011,
         _ => return Err(format!("sc: invalid width: {}", mnemonic)),
@@ -988,7 +988,7 @@ fn encode_amo_suffixed(mnemonic: &str, operands: &[Operand]) -> Result<EncodeRes
     }
 
     let op_name = parts[0]; // e.g., "amoswap", "amoadd"
-    let funct3 = match parts.get(1).map(|s| *s) {
+    let funct3 = match parts.get(1).copied() {
         Some("w") => 0b010,
         Some("d") => 0b011,
         _ => return Err(format!("amo: invalid width in {}", mnemonic)),
@@ -1124,8 +1124,8 @@ fn csr_name_to_num(name: &str) -> Result<u32, String> {
             // Try parsing as a number
             if let Ok(v) = name.parse::<u32>() {
                 Ok(v)
-            } else if name.starts_with("0x") {
-                u32::from_str_radix(&name[2..], 16)
+            } else if let Some(hex) = name.strip_prefix("0x") {
+                u32::from_str_radix(hex, 16)
                     .map_err(|_| format!("invalid CSR: {}", name))
             } else {
                 Err(format!("unknown CSR: {}", name))
@@ -1351,7 +1351,7 @@ fn sign_extend_li(val: i64, bits: u32) -> i64 {
 /// for `li` on RV64. For small values (fits in 12 bits), `addi rd, x0, imm`
 /// is sufficient since the result is the same.
 fn encode_li_32bit(rd: u32, imm: i32) -> Vec<u32> {
-    if imm >= -2048 && imm <= 2047 {
+    if (-2048..=2047).contains(&imm) {
         return vec![encode_i(OP_OP_IMM, rd, 0, 0, imm)]; // addi rd, x0, imm
     }
     let lo = (imm << 20) >> 20; // sign-extend low 12 bits
@@ -1374,12 +1374,12 @@ fn encode_li_32bit(rd: u32, imm: i32) -> Vec<u32> {
 /// where upper fits in 32 bits and each lo fits in 12 signed bits.
 fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
     // Case 1: fits in 12 bits (addi rd, x0, imm)
-    if imm >= -2048 && imm <= 2047 {
+    if (-2048..=2047).contains(&imm) {
         return vec![encode_i(OP_OP_IMM, rd, 0, 0, imm as i32)];
     }
 
     // Case 2: fits in 32 bits (lui + addi)
-    if imm >= -0x80000000 && imm <= 0x7FFFFFFF {
+    if (-0x80000000..=0x7FFFFFFF).contains(&imm) {
         return encode_li_32bit(rd, imm as i32);
     }
 
@@ -1393,7 +1393,7 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
             continue;
         }
         let upper = remainder >> shift;
-        if upper < -0x80000000 || upper > 0x7FFFFFFF {
+        if !(-0x80000000..=0x7FFFFFFF).contains(&upper) {
             continue;
         }
 
@@ -1406,7 +1406,7 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
                 words[1] = (words[1] & !0x7F) | OP_OP_IMM_32;
             }
         }
-        words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift as i32)); // slli
+        words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift)); // slli
         if lo12 != 0 {
             words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12 as i32)); // addi
         }
@@ -1435,7 +1435,7 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
                 continue;
             }
             let upper = remainder_b >> shift1;
-            if upper < -0x80000000 || upper > 0x7FFFFFFF {
+            if !(-0x80000000..=0x7FFFFFFF).contains(&upper) {
                 continue;
             }
 
@@ -1447,11 +1447,11 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
                     words[1] = (words[1] & !0x7F) | OP_OP_IMM_32;
                 }
             }
-            words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift1 as i32)); // slli
+            words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift1)); // slli
             if lo12_b != 0 {
                 words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12_b as i32)); // addi
             }
-            words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift2 as i32)); // slli
+            words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift2)); // slli
             if lo12 != 0 {
                 words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12 as i32)); // addi
             }
@@ -1489,7 +1489,7 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
                     continue;
                 }
                 let upper = rem_a >> shift1;
-                if upper < -0x80000000 || upper > 0x7FFFFFFF {
+                if !(-0x80000000..=0x7FFFFFFF).contains(&upper) {
                     continue;
                 }
 
@@ -1501,15 +1501,15 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
                         words[1] = (words[1] & !0x7F) | OP_OP_IMM_32;
                     }
                 }
-                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift1 as i32));
+                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift1));
                 if lo12_a != 0 {
                     words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12_a as i32));
                 }
-                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift2 as i32));
+                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift2));
                 if lo12_b != 0 {
                     words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12_b as i32));
                 }
-                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift3 as i32));
+                words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, shift3));
                 if lo12 != 0 {
                     words.push(encode_i(OP_OP_IMM, rd, 0, rd, lo12 as i32));
                 }
@@ -1539,7 +1539,7 @@ fn encode_li_immediate(rd: u32, imm: i64) -> Vec<u32> {
     words.push(encode_i(OP_OP_IMM, rd, 0b001, rd, 32)); // slli rd, rd, 32
     let mut remaining = imm as i32 as i64;
     while remaining != 0 {
-        let chunk = remaining.max(-2048).min(2047);
+        let chunk = remaining.clamp(-2048, 2047);
         words.push(encode_i(OP_OP_IMM, rd, 0, rd, chunk as i32));
         remaining -= chunk;
     }

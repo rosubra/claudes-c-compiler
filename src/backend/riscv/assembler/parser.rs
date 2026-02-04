@@ -233,14 +233,14 @@ fn strip_comment(line: &str) -> &str {
     // Handle # comments (GAS RISC-V comment character)
     if let Some(pos) = line.find('#') {
         let before = &line[..pos];
-        if before.matches('"').count() % 2 == 0 {
+        if before.matches('"').count().is_multiple_of(2) {
             return &line[..pos];
         }
     }
     // Handle // comments
     if let Some(pos) = line.find("//") {
         let before = &line[..pos];
-        if before.matches('"').count() % 2 == 0 {
+        if before.matches('"').count().is_multiple_of(2) {
             return &line[..pos];
         }
     }
@@ -289,7 +289,7 @@ fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
 
 /// Split a directive line into name and args, then dispatch to typed parsing.
 fn parse_directive(line: &str) -> Result<AsmStatement, String> {
-    let (name, args) = if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
+    let (name, args) = if let Some(space_pos) = line.find([' ', '\t']) {
         let name = &line[..space_pos];
         let args = line[space_pos..].trim();
         (name, args)
@@ -456,8 +456,7 @@ fn parse_size_directive(args: &str) -> Directive {
     if parts.len() == 2 {
         let sym = parts[0].trim().to_string();
         let size_expr = parts[1].trim();
-        if size_expr.starts_with(".-") {
-            let label = &size_expr[2..];
+        if let Some(label) = size_expr.strip_prefix(".-") {
             Directive::Size(sym, SizeExpr::CurrentMinus(label.to_string()))
         } else if let Ok(size) = size_expr.parse::<u64>() {
             Directive::Size(sym, SizeExpr::Absolute(size))
@@ -540,14 +539,14 @@ fn parse_data_value_int(s: &str) -> Result<i64, String> {
         return Ok(0);
     }
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
 
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16)
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
             .map_err(|e| format!("invalid hex: {}: {}", s, e))?
     } else {
         s.parse::<u64>()
@@ -675,7 +674,7 @@ pub fn parse_string_literal(s: &str) -> Result<String, String> {
 
 fn parse_instruction(line: &str) -> Result<AsmStatement, String> {
     // Split mnemonic from operands
-    let (mnemonic, operands_str) = if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
+    let (mnemonic, operands_str) = if let Some(space_pos) = line.find([' ', '\t']) {
         (&line[..space_pos], line[space_pos..].trim())
     } else {
         (line, "")
@@ -955,17 +954,17 @@ pub fn parse_int_literal(s: &str) -> Result<i64, String> {
         return Err("empty integer literal".to_string());
     }
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
 
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16)
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
             .map_err(|e| format!("invalid hex literal '{}': {}", s, e))?
-    } else if s.starts_with("0b") || s.starts_with("0B") {
-        u64::from_str_radix(&s[2..], 2)
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u64::from_str_radix(bin, 2)
             .map_err(|e| format!("invalid binary literal '{}': {}", s, e))?
     } else {
         s.parse::<u64>()

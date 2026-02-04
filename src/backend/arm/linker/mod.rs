@@ -120,8 +120,8 @@ pub fn link_builtin(
             if let Some(lib_path) = resolve_lib(l, &all_lib_paths) {
                 load_file(&lib_path, &mut objects, &mut globals, &all_lib_paths)?;
             }
-        } else if arg.starts_with("-Wl,") {
-            for part in arg[4..].split(',') {
+        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            for part in wl_arg.split(',') {
                 if let Some(lib) = part.strip_prefix("-l") {
                     if let Some(lib_path) = resolve_lib(lib, &all_lib_paths) {
                         load_file(&lib_path, &mut objects, &mut globals, &all_lib_paths)?;
@@ -528,7 +528,7 @@ fn allocate_common_symbols(globals: &mut HashMap<String, GlobalSymbol>, output_s
 fn emit_executable(
     objects: &[ElfObject],
     globals: &mut HashMap<String, GlobalSymbol>,
-    output_sections: &mut Vec<OutputSection>,
+    output_sections: &mut [OutputSection],
     section_map: &HashMap<(usize, usize), (usize, u64)>,
     output_path: &str,
 ) -> Result<(), String> {
@@ -572,7 +572,7 @@ fn emit_executable(
         }
     }
     let rx_filesz = offset; // RX segment: [0, rx_filesz)
-    let rx_memsz = rx_filesz;
+    let _rx_memsz = rx_filesz;
 
     // Pre-count IFUNC symbols so we can reserve space for IPLT stubs in the RX gap.
     // Each IPLT stub is 16 bytes (ADRP + LDR + BR + NOP), placed in the gap between
@@ -778,13 +778,13 @@ fn emit_executable(
             if obj_idx == usize::MAX { continue; } // linker-defined
             if gsym.section_idx == SHN_COMMON || gsym.section_idx == 0xffff {
                 if let Some(bss_sec) = output_sections.iter().find(|s| s.name == ".bss") {
-                    gsym.value = bss_sec.addr + gsym.value;
+                    gsym.value += bss_sec.addr;
                 }
             } else if gsym.section_idx != SHN_UNDEF && gsym.section_idx != SHN_ABS {
                 let si = gsym.section_idx as usize;
                 if let Some(&(oi, so)) = section_map.get(&(obj_idx, si)) {
                     let old_val = gsym.value;
-                    gsym.value = output_sections[oi].addr + so + gsym.value;
+                    gsym.value += output_sections[oi].addr + so;
                     if std::env::var("LINKER_DEBUG").is_ok() && gsym.info & 0xf == STT_TLS {
                         eprintln!("  TLS sym '{}': old=0x{:x} -> new=0x{:x} (sec={} addr=0x{:x} off=0x{:x})",
                                   name, old_val, gsym.value, output_sections[oi].name, output_sections[oi].addr, so);
@@ -896,11 +896,11 @@ fn emit_executable(
                         if si < objects[obj_idx].symbols.len() {
                             let sym = &objects[obj_idx].symbols[si];
                             let key = reloc::got_key(obj_idx, sym);
-                            if !got_resolved.contains_key(&key) {
-                                let addr = reloc::resolve_sym(obj_idx, sym, &globals_snap,
-                                                              section_map, output_sections, bss_addr, bss_size);
-                                got_resolved.insert(key, addr);
-                            }
+                            got_resolved.entry(key).or_insert_with(|| {
+                                
+                                reloc::resolve_sym(obj_idx, sym, &globals_snap,
+                                                              section_map, output_sections, bss_addr, bss_size)
+                            });
                         }
                     }
                     _ => {}

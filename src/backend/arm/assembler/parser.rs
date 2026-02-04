@@ -227,7 +227,7 @@ fn strip_comment(line: &str) -> &str {
     if let Some(pos) = line.find("//") {
         // Make sure it's not inside a string
         let before = &line[..pos];
-        if before.matches('"').count() % 2 == 0 {
+        if before.matches('"').count().is_multiple_of(2) {
             return &line[..pos];
         }
     }
@@ -243,7 +243,7 @@ fn strip_comment(line: &str) -> &str {
             && !after.starts_with("note")
         {
             let before = &line[..pos];
-            if before.matches('"').count() % 2 == 0 {
+            if before.matches('"').count().is_multiple_of(2) {
                 return &line[..pos];
             }
         }
@@ -297,7 +297,7 @@ fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
 
 fn parse_directive(line: &str) -> Result<AsmStatement, String> {
     // Split directive name from arguments
-    let (name, args) = if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
+    let (name, args) = if let Some(space_pos) = line.find([' ', '\t']) {
         let name = &line[..space_pos];
         let args = line[space_pos..].trim();
         (name, args)
@@ -424,7 +424,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
 
 fn parse_instruction(line: &str) -> Result<AsmStatement, String> {
     // Split mnemonic from operands
-    let (mnemonic, operands_str) = if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
+    let (mnemonic, operands_str) = if let Some(space_pos) = line.find([' ', '\t']) {
         (&line[..space_pos], line[space_pos..].trim())
     } else {
         (line, "")
@@ -536,8 +536,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     }
 
     // Immediate: #value
-    if s.starts_with('#') {
-        return parse_immediate(&s[1..]);
+    if let Some(rest) = s.strip_prefix('#') {
+        return parse_immediate(rest);
     }
 
     // :modifier:symbol
@@ -550,8 +550,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     if lower.starts_with("lsl ") || lower.starts_with("lsr ") || lower.starts_with("asr ") || lower.starts_with("ror ") {
         let kind = &lower[..3];
         let amount_str = s[4..].trim();
-        let amount = if amount_str.starts_with('#') {
-            parse_int_literal(&amount_str[1..])?
+        let amount = if let Some(stripped) = amount_str.strip_prefix('#') {
+            parse_int_literal(stripped)?
         } else {
             parse_int_literal(amount_str)?
         };
@@ -568,8 +568,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
             }
             if lower.starts_with(prefix) && lower.as_bytes().get(prefix.len()) == Some(&b' ') {
                 let amount_str = s[prefix.len()..].trim();
-                let amount = if amount_str.starts_with('#') {
-                    parse_int_literal(&amount_str[1..])?
+                let amount = if let Some(stripped) = amount_str.strip_prefix('#') {
+                    parse_int_literal(stripped)?
                 } else {
                     parse_int_literal(amount_str)?
                 };
@@ -642,7 +642,7 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
 
     // Bare integer (without # prefix) - some inline asm constraints emit these
     // e.g., "eor w9, w10, 255" or "ccmp x10, x13, 0, eq"
-    if s.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         if let Ok(val) = parse_int_literal(s) {
             return Ok(Operand::Imm(val));
         }
@@ -714,8 +714,8 @@ fn parse_memory_operand(s: &str) -> Result<Operand, String> {
     let second = parts[1].trim();
 
     // [base, #imm]
-    if second.starts_with('#') {
-        let offset = parse_int_literal(&second[1..])?;
+    if let Some(imm_str) = second.strip_prefix('#') {
+        let offset = parse_int_literal(imm_str)?;
         if has_writeback {
             return Ok(Operand::MemPreIndex { base, offset });
         }
@@ -835,17 +835,17 @@ fn parse_int_literal(s: &str) -> Result<i64, String> {
         return Err("empty integer literal".to_string());
     }
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
 
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16)
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
             .map_err(|e| format!("invalid hex literal '{}': {}", s, e))?
-    } else if s.starts_with("0b") || s.starts_with("0B") {
-        u64::from_str_radix(&s[2..], 2)
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u64::from_str_radix(bin, 2)
             .map_err(|e| format!("invalid binary literal '{}': {}", s, e))?
     } else {
         s.parse::<u64>()
@@ -948,8 +948,8 @@ fn parse_size_directive(args: &str) -> Result<AsmDirective, String> {
     }
     let sym = parts[0].trim().to_string();
     let expr_str = parts[1].trim();
-    if expr_str.starts_with(".-") {
-        let label = expr_str[2..].trim().to_string();
+    if let Some(rest) = expr_str.strip_prefix(".-") {
+        let label = rest.trim().to_string();
         Ok(AsmDirective::Size(sym, SizeExpr::CurrentMinusSymbol(label)))
     } else if let Ok(size) = expr_str.parse::<u64>() {
         Ok(AsmDirective::Size(sym, SizeExpr::Constant(size)))
@@ -1086,13 +1086,13 @@ fn parse_data_value(s: &str) -> Result<i64, String> {
     if s.is_empty() {
         return Ok(0);
     }
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16)
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
             .map_err(|e| format!("invalid hex: {}: {}", s, e))?
     } else {
         s.parse::<u64>()
@@ -1127,12 +1127,12 @@ fn parse_string_literal(s: &str) -> Result<Vec<u8>, String> {
                 Some('b') => result.push(0x08),
                 Some('f') => result.push(0x0c),
                 Some('v') => result.push(0x0b),
-                Some(c) if c >= '0' && c <= '7' => {
+                Some(c) if ('0'..='7').contains(&c) => {
                     let mut octal = String::new();
                     octal.push(c);
                     while octal.len() < 3 {
                         if let Some(&next) = chars.peek() {
-                            if next >= '0' && next <= '7' {
+                            if ('0'..='7').contains(&next) {
                                 octal.push(chars.next().unwrap());
                             } else {
                                 break;

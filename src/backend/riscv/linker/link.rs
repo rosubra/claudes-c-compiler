@@ -24,6 +24,7 @@ const DT_NULL: i64 = 0;
 const DT_NEEDED: i64 = 1;
 const DT_PLTRELSZ: i64 = 2;
 const DT_PLTGOT: i64 = 3;
+#[allow(dead_code)]
 const DT_HASH: i64 = 4;
 const DT_STRTAB: i64 = 5;
 const DT_SYMTAB: i64 = 6;
@@ -35,6 +36,7 @@ const DT_SYMENT: i64 = 11;
 const DT_DEBUG: i64 = 21;
 const DT_JMPREL: i64 = 23;
 const DT_PLTREL: i64 = 20;
+#[allow(dead_code)]
 const DT_FLAGS: i64 = 30;
 const DT_GNU_HASH: i64 = 0x6ffffef5;
 const DT_VERSYM: i64 = 0x6ffffff0;
@@ -93,6 +95,7 @@ const BASE_ADDR: u64 = 0x10000;
 const INTERP: &[u8] = b"/lib/ld-linux-riscv64-lp64d.so.1\0";
 
 /// A merged input section with its assigned virtual address.
+#[allow(dead_code)]
 struct MergedSection {
     name: String,
     sh_type: u32,
@@ -124,6 +127,7 @@ struct GlobalSym {
 }
 
 /// A pending relocation from an input object file, remapped to merged sections.
+#[allow(dead_code)]
 struct PendingReloc {
     /// Index of the merged section this relocation applies to.
     target_section: usize,
@@ -136,6 +140,7 @@ struct PendingReloc {
 }
 
 /// Dynamic symbol entry for the output .dynsym.
+#[allow(dead_code)]
 struct DynSym {
     name: String,
     name_offset: u32,
@@ -255,11 +260,10 @@ pub fn link_builtin(
     }
     for (_, obj) in &input_objs {
         for sym in &obj.symbols {
-            if sym.section_idx == SHN_UNDEF && !sym.name.is_empty() && sym.binding != STB_LOCAL {
-                if !defined_syms.contains(&sym.name) {
+            if sym.section_idx == SHN_UNDEF && !sym.name.is_empty() && sym.binding != STB_LOCAL
+                && !defined_syms.contains(&sym.name) {
                     undefined_syms.insert(sym.name.clone());
                 }
-            }
         }
     }
 
@@ -710,8 +714,8 @@ pub fn link_builtin(
     let mut tls_got_symbols: HashSet<String> = HashSet::new();
     {
         let mut got_set: HashSet<String> = HashSet::new();
-        for (_obj_idx, (_, obj)) in input_objs.iter().enumerate() {
-            for (_sec_idx, relocs) in &obj.relocs {
+        for (_, obj) in input_objs.iter() {
+            for relocs in obj.relocs.values() {
                 for reloc in relocs {
                     if reloc.reloc_type == R_RISCV_GOT_HI20
                         || reloc.reloc_type == R_RISCV_TLS_GOT_HI20
@@ -796,9 +800,7 @@ pub fn link_builtin(
     let num_phdrs = if is_static {
         let base = 6; // LOAD(RX), LOAD(RW), NOTE, GNU_EH_FRAME, GNU_STACK, RISCV_ATTR
         if has_tls { base + 1 } else { base }
-    } else {
-        if has_tls { 11 } else { 10 } // PHDR, INTERP, LOAD(RX), LOAD(RW), DYNAMIC, NOTE, GNU_EH_FRAME, GNU_STACK, GNU_RELRO, RISCV_ATTR [, TLS]
-    };
+    } else if has_tls { 11 } else { 10 };
     let phdr_size = num_phdrs * 56u64;
     let headers_size = 64 + phdr_size;
 
@@ -830,8 +832,8 @@ pub fn link_builtin(
     let mut dynstr_data = vec![0u8]; // Leading null (minimum)
     let mut dynsym_data = vec![0u8; 24]; // null entry (minimum)
     let mut gnu_hash_data = Vec::new();
-    let mut versym_data: Vec<u8> = Vec::new();
-    let mut verneed_data: Vec<u8> = Vec::new();
+    let versym_data: Vec<u8> = Vec::new();
+    let verneed_data: Vec<u8> = Vec::new();
     let mut needed_lib_offsets: Vec<u32> = Vec::new();
     let mut dynsym_names: Vec<String> = Vec::new();
     let copy_sym_names: Vec<String> = copy_symbols.iter().map(|(n, _)| n.clone()).collect();
@@ -870,7 +872,7 @@ pub fn link_builtin(
         // COPY symbol entries will be patched after layout to set st_value, st_size, st_shndx
         dynsym_data = vec![0u8; 24]; // null entry
         let copy_sym_set: HashSet<String> = copy_sym_names.iter().cloned().collect();
-        for (_i, name) in dynsym_names.iter().enumerate() {
+        for name in dynsym_names.iter() {
             let mut entry = [0u8; 24];
             let name_off = dynstr_offsets.get(name).copied().unwrap_or(0);
             entry[0..4].copy_from_slice(&name_off.to_le_bytes());
@@ -1382,12 +1384,7 @@ pub fn link_builtin(
                 } else if !sym.name.is_empty() && sym.binding != STB_LOCAL {
                     // Global symbol
                     if let Some(gs) = global_syms.get(&sym.name) {
-                        if gs.needs_plt && matches!(reloc.reloc_type, R_RISCV_CALL_PLT) {
-                            // Use PLT address
-                            gs.value
-                        } else if gs.defined {
-                            gs.value
-                        } else if gs.needs_plt {
+                        if gs.needs_plt || gs.defined {
                             gs.value
                         } else {
                             // Undefined symbol - might be weak
@@ -1483,11 +1480,7 @@ pub fn link_builtin(
                         // AUIPC + JALR pair (8 bytes)
                         let target = if !sym.name.is_empty() && sym.binding != STB_LOCAL {
                             if let Some(gs) = global_syms.get(&sym.name) {
-                                if gs.needs_plt {
-                                    gs.value as i64
-                                } else {
-                                    gs.value as i64
-                                }
+                                gs.value as i64
                             } else {
                                 s as i64
                             }
@@ -1568,8 +1561,8 @@ pub fn link_builtin(
                         let val = (s as i64 + a - tls_vaddr as i64) as u32;
                         patch_s_type(data, off, val & 0xFFF);
                     }
-                    R_RISCV_TPREL_ADD | R_RISCV_ALIGN => {
-                        // Hints for linker relaxation - no patching needed
+                    R_RISCV_TPREL_ADD => {
+                        // Hint for linker relaxation - no patching needed
                     }
                     R_RISCV_ADD8 => {
                         if off < data.len() {
@@ -1732,17 +1725,6 @@ pub fn link_builtin(
 
                         let offset_val = got_entry_vaddr as i64 + a - p as i64;
                         patch_u_type(data, off, offset_val as u32);
-                    }
-                    R_RISCV_SET_ULEB128 => {
-                        // Set ULEB128 value at offset
-                        let val = (s as i64 + a) as u64;
-                        encode_uleb128_in_place(data, off, val);
-                    }
-                    R_RISCV_SUB_ULEB128 => {
-                        // Subtract from ULEB128 value at offset
-                        let cur = decode_uleb128(data, off);
-                        let val = cur.wrapping_sub((s as i64 + a) as u64);
-                        encode_uleb128_in_place(data, off, val);
                     }
                     other => {
                         return Err(format!(
@@ -1957,12 +1939,8 @@ pub fn link_builtin(
     let eh_frame_vaddr = merged_map.get(".eh_frame")
         .map(|&i| section_vaddrs[i])
         .unwrap_or(0);
-    let eh_frame_hdr_data = if eh_frame_vaddr > 0 {
-        let mut hdr = Vec::new();
-        hdr.push(1); // version
-        hdr.push(0x1b); // eh_frame_ptr encoding: DW_EH_PE_pcrel | DW_EH_PE_sdata4
-        hdr.push(0x03); // fde_count encoding: DW_EH_PE_udata4
-        hdr.push(0x3b); // table encoding: DW_EH_PE_datarel | DW_EH_PE_sdata4
+    let _eh_frame_hdr_data = if eh_frame_vaddr > 0 {
+        let mut hdr = vec![1, 0x1b, 0x03, 0x3b];
         // eh_frame_ptr: will be patched with offset
         hdr.extend_from_slice(&0i32.to_le_bytes()); // placeholder
         // fde_count
@@ -2242,7 +2220,7 @@ pub fn link_builtin(
 
     let get_name = |n: &str| -> u32 { shstr_offsets.get(n).copied().unwrap_or(0) };
 
-    let mut dynsym_shidx = 0u32;
+    let mut _dynsym_shidx = 0u32;
     if !is_static {
         // .interp
         write_shdr(&mut elf, get_name(".interp"), SHT_PROGBITS, SHF_ALLOC,
@@ -2254,7 +2232,7 @@ pub fn link_builtin(
                    gnu_hash_vaddr, gnu_hash_offset, gnu_hash_data.len() as u64,
                    section_count + 1, 0, 8, 0); // link to .dynsym
         section_count += 1;
-        dynsym_shidx = section_count;
+        _dynsym_shidx = section_count;
 
         // .dynsym
         write_shdr(&mut elf, get_name(".dynsym"), 11 /* SHT_DYNSYM */, SHF_ALLOC,
@@ -2270,7 +2248,7 @@ pub fn link_builtin(
         // .gnu.version
         write_shdr(&mut elf, get_name(".gnu.version"), 0x6fffffff /* SHT_GNU_versym */, SHF_ALLOC,
                    versym_vaddr, versym_offset, versym_data.len() as u64,
-                   dynsym_shidx, 0, 2, 2);
+                   _dynsym_shidx, 0, 2, 2);
         section_count += 1;
 
         // .gnu.version_r
@@ -2283,7 +2261,7 @@ pub fn link_builtin(
         if rela_dyn_size > 0 {
             write_shdr(&mut elf, get_name(".rela.dyn"), SHT_RELA, SHF_ALLOC,
                        rela_dyn_vaddr, rela_dyn_offset, rela_dyn_size,
-                       dynsym_shidx, 0, 8, 24);
+                       _dynsym_shidx, 0, 8, 24);
             section_count += 1;
         }
 
@@ -2291,7 +2269,7 @@ pub fn link_builtin(
         let _rela_plt_shidx = section_count;
         write_shdr(&mut elf, get_name(".rela.plt"), SHT_RELA, SHF_ALLOC | 0x40 /* SHF_INFO_LINK */,
                    rela_plt_vaddr, rela_plt_offset, rela_plt_size,
-                   dynsym_shidx, section_count + 1, 8, 24);
+                   _dynsym_shidx, section_count + 1, 8, 24);
         section_count += 1;
 
         // .plt
@@ -2539,6 +2517,7 @@ fn patch_cj_type(data: &mut [u8], off: usize, value: u32) {
 }
 
 /// Decode a ULEB128 value from data at offset.
+#[allow(dead_code)]
 fn decode_uleb128(data: &[u8], off: usize) -> u64 {
     let mut result: u64 = 0;
     let mut shift = 0u32;
@@ -2556,6 +2535,7 @@ fn decode_uleb128(data: &[u8], off: usize) -> u64 {
 }
 
 /// Encode a ULEB128 value in place, reusing the same number of bytes.
+#[allow(dead_code)]
 fn encode_uleb128_in_place(data: &mut [u8], off: usize, value: u64) {
     // First, count how many bytes the existing ULEB128 occupies
     let mut num_bytes = 0;
@@ -2714,13 +2694,14 @@ fn build_gnu_hash(nsyms: usize) -> Vec<u8> {
     }
     // hash values (one per symbol, with chain terminator bit set)
     for _i in 0..nsyms {
-        let hash = 1u32 | 1; // Set bit 0 = end of chain
+        let hash = 1u32; // Set bit 0 = end of chain
         data.extend_from_slice(&hash.to_le_bytes());
     }
     data
 }
 
 /// ELF GNU hash function.
+#[allow(dead_code)]
 fn elf_hash_gnu(name: &[u8]) -> u32 {
     let mut h: u32 = 5381;
     for &b in name {
@@ -2755,11 +2736,10 @@ fn resolve_archive_members(
                     }
                 }
                 for sym in &obj.symbols {
-                    if sym.section_idx == SHN_UNDEF && !sym.name.is_empty() && sym.binding != STB_LOCAL {
-                        if !defined_syms.contains(&sym.name) {
+                    if sym.section_idx == SHN_UNDEF && !sym.name.is_empty() && sym.binding != STB_LOCAL
+                        && !defined_syms.contains(&sym.name) {
                             undefined_syms.insert(sym.name.clone());
                         }
-                    }
                 }
                 input_objs.push((name, obj));
                 added_any = true;

@@ -393,7 +393,7 @@ impl ElfWriter {
                 if name.chars().all(|c| c.is_ascii_digit()) {
                     self.numeric_label_positions
                         .entry(name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push((sec_idx, offset));
                 }
 
@@ -413,9 +413,9 @@ impl ElfWriter {
                     let padding = (aligned - current) as usize;
                     if section.flags & SHF_EXECINSTR != 0 {
                         // NOP-fill for code sections
-                        section.data.extend(std::iter::repeat(0x90).take(padding));
+                        section.data.extend(std::iter::repeat_n(0x90, padding));
                     } else {
-                        section.data.extend(std::iter::repeat(0).take(padding));
+                        section.data.extend(std::iter::repeat_n(0, padding));
                     }
                 }
             }
@@ -437,7 +437,7 @@ impl ElfWriter {
             }
             AsmItem::Zero(n) => {
                 let section = self.current_section_mut()?;
-                section.data.extend(std::iter::repeat(0u8).take(*n as usize));
+                section.data.extend(std::iter::repeat_n(0u8, *n as usize));
             }
             AsmItem::Asciz(bytes) | AsmItem::Ascii(bytes) => {
                 let section = self.current_section_mut()?;
@@ -556,7 +556,7 @@ impl ElfWriter {
                         diff_symbol: None,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolOffset(sym, addend) => {
                     let offset = self.sections[sec_idx].data.len() as u64;
@@ -569,7 +569,7 @@ impl ElfWriter {
                         diff_symbol: None,
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
                 DataValue::SymbolDiff(a, b) => {
                     // For `.long a - b` (e.g., .long .LBB3 - .Ljt_0):
@@ -585,7 +585,7 @@ impl ElfWriter {
                         diff_symbol: Some(b.clone()),
                     });
                     let section = &mut self.sections[sec_idx];
-                    section.data.extend(std::iter::repeat(0).take(size));
+                    section.data.extend(std::iter::repeat_n(0, size));
                 }
             }
         }
@@ -640,7 +640,7 @@ impl ElfWriter {
     /// Extract the target label from a jump instruction, if any.
     fn get_jump_target_label(&self, instr: &Instruction) -> Option<String> {
         let mnem = &instr.mnemonic;
-        let is_jump = mnem == "jmp" || (mnem.starts_with('j') && mnem.len() >= 2 && mnem != "jmp");
+        let is_jump = mnem.starts_with('j') && mnem.len() >= 2;
         if !is_jump {
             return None;
         }
@@ -859,7 +859,7 @@ impl ElfWriter {
                         // Short form is always 2 bytes, so end = jump.offset + 2
                         let short_end = jump.offset as i64 + 2;
                         let disp = target_off as i64 - short_end;
-                        if disp >= -128 && disp <= 127 {
+                        if (-128..=127).contains(&disp) {
                             to_relax.push(j_idx);
                         }
                     }
@@ -1026,22 +1026,20 @@ impl ElfWriter {
             // Backward: find the nearest label BEFORE (or at) reloc_offset in the same section
             let mut best: Option<(usize, u64)> = None;
             for &(s_idx, off) in positions {
-                if s_idx == sec_idx && off <= reloc_offset {
-                    if best.is_none() || off > best.unwrap().1 {
+                if s_idx == sec_idx && off <= reloc_offset
+                    && (best.is_none() || off > best.unwrap().1) {
                         best = Some((s_idx, off));
                     }
-                }
             }
             best
         } else {
             // Forward: find the nearest label AFTER reloc_offset in the same section
             let mut best: Option<(usize, u64)> = None;
             for &(s_idx, off) in positions {
-                if s_idx == sec_idx && off > reloc_offset {
-                    if best.is_none() || off < best.unwrap().1 {
+                if s_idx == sec_idx && off > reloc_offset
+                    && (best.is_none() || off < best.unwrap().1) {
                         best = Some((s_idx, off));
                     }
-                }
             }
             best
         }
@@ -1087,7 +1085,7 @@ impl ElfWriter {
                     // Handle internal PC8 relocations (loop/jrcxz)
                     if reloc.reloc_type == R_X86_64_PC8_INTERNAL && target_sec == sec_idx {
                         let rel = (target_off as i64) + reloc.addend - (reloc.offset as i64);
-                        if rel >= -128 && rel <= 127 {
+                        if (-128..=127).contains(&rel) {
                             pc8_patches.push((reloc.offset as usize, rel as u8));
                         }
                         // Either way, don't keep as unresolved
@@ -1179,7 +1177,7 @@ impl ElfByteWriter {
             }
         }
         // Add names for alias symbols
-        for (alias, _) in aliases {
+        for alias in aliases.keys() {
             strtab.add(alias);
         }
 
@@ -1492,7 +1490,7 @@ impl ElfByteWriter {
                 sec.flags,
                 0, // addr
                 section_offsets[i],
-                if sec.section_type == SHT_NOBITS { sec.data.len() as u64 } else { sec.data.len() as u64 },
+                sec.data.len() as u64,
                 0, // link
                 0, // info
                 sec.alignment,

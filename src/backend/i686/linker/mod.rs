@@ -14,6 +14,7 @@
 //! - R_386_GOT32 (GOT entry reference)
 //! - R_386_NONE (no-op)
 
+#[allow(dead_code)]
 mod elf;
 
 /// Built-in linker entry point with pre-resolved CRT objects and library paths.

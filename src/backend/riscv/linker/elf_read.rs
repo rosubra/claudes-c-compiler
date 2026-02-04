@@ -60,6 +60,7 @@ pub struct ObjFile {
     pub symbols: Vec<ObjSymbol>,
     /// Relocations keyed by section index they apply to.
     pub relocs: HashMap<usize, Vec<ObjReloc>>,
+    #[allow(dead_code)]
     pub elf_flags: u32,
 }
 
@@ -238,9 +239,8 @@ pub fn parse_archive(data: &[u8]) -> Result<Vec<(String, ObjFile)>, String> {
     for (name, offset, size) in members {
         let member_data = &data[offset..offset + size];
         if member_data.len() >= 4 && &member_data[0..4] == b"\x7fELF" {
-            match parse_obj(member_data) {
-                Ok(obj) => results.push((name, obj)),
-                Err(_) => {} // Skip non-RISC-V objects
+            if let Ok(obj) = parse_obj(member_data) {
+                results.push((name, obj));
             }
         }
     }

@@ -1,4 +1,5 @@
 pub(crate) mod common;
+#[allow(dead_code)]
 pub(crate) mod elf;
 
 // Shared codegen framework, split into focused modules:

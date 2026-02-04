@@ -4,7 +4,6 @@
 /// a dynamically-linked ELF executable. Resolves undefined symbols against
 /// shared libraries (e.g., libc.so.6) and generates PLT/GOT entries for
 /// dynamic function calls.
-
 #[allow(dead_code)]
 pub mod elf;
 
@@ -155,8 +154,8 @@ pub fn link_builtin(
         } else if let Some(lib) = arg.strip_prefix("-l") {
             let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
             libs_to_load.push(l.to_string());
-        } else if arg.starts_with("-Wl,") {
-            for part in arg[4..].split(',') {
+        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            for part in wl_arg.split(',') {
                 if let Some(lpath) = part.strip_prefix("-L") {
                     extra_lib_paths.push(lpath.to_string());
                 } else if let Some(lib) = part.strip_prefix("-l") {
@@ -649,7 +648,7 @@ fn create_plt_got(
 #[allow(clippy::too_many_arguments)]
 fn emit_executable(
     objects: &[ElfObject], globals: &mut HashMap<String, GlobalSymbol>,
-    output_sections: &mut Vec<OutputSection>,
+    output_sections: &mut [OutputSection],
     section_map: &HashMap<(usize, usize), (usize, u64)>,
     plt_names: &[String], got_entries: &[(String, bool)],
     needed_sonames: &[String], output_path: &str,
@@ -876,12 +875,12 @@ fn emit_executable(
         if let Some(obj_idx) = gsym.defined_in {
             if gsym.section_idx == SHN_COMMON || gsym.section_idx == 0xffff {
                 if let Some(bss_sec) = output_sections.iter().find(|s| s.name == ".bss") {
-                    gsym.value = bss_sec.addr + gsym.value;
+                    gsym.value += bss_sec.addr;
                 }
             } else if gsym.section_idx != SHN_UNDEF && gsym.section_idx != SHN_ABS {
                 let si = gsym.section_idx as usize;
                 if let Some(&(oi, so)) = section_map.get(&(obj_idx, si)) {
-                    gsym.value = output_sections[oi].addr + so + gsym.value;
+                    gsym.value += output_sections[oi].addr + so;
                 }
             }
         }
@@ -1021,7 +1020,7 @@ fn emit_executable(
     for &(tag, val) in &[
         (DT_STRTAB, dynstr_addr), (DT_SYMTAB, dynsym_addr), (DT_STRSZ, dynstr_size),
         (DT_SYMENT, 24), (DT_DEBUG, 0), (DT_PLTGOT, got_plt_addr),
-        (DT_PLTRELSZ, rela_plt_size), (DT_PLTREL as i64, 7u64), (DT_JMPREL, rela_plt_addr),
+        (DT_PLTRELSZ, rela_plt_size), (DT_PLTREL, 7u64), (DT_JMPREL, rela_plt_addr),
         (DT_RELA, rela_dyn_addr), (DT_RELASZ, rela_dyn_size), (DT_RELAENT, 24),
         (DT_GNU_HASH, gnu_hash_addr),
     ] {

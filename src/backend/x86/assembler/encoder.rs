@@ -156,14 +156,11 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
 /// Returns None when no register operands are present.
 fn infer_size_from_ops(ops: &[Operand]) -> Option<u8> {
     for op in ops.iter().rev() {
-        match op {
-            Operand::Register(r) => {
-                if is_reg64(&r.name) { return Some(8); }
-                if is_reg32(&r.name) { return Some(4); }
-                if is_reg16(&r.name) { return Some(2); }
-                if is_reg8(&r.name) { return Some(1); }
-            }
-            _ => {}
+        if let Operand::Register(r) = op {
+            if is_reg64(&r.name) { return Some(8); }
+            if is_reg32(&r.name) { return Some(4); }
+            if is_reg16(&r.name) { return Some(2); }
+            if is_reg8(&r.name) { return Some(1); }
         }
     }
     None
@@ -175,17 +172,16 @@ fn is_ymm(name: &str) -> bool {
 }
 
 /// Get YMM/XMM register number.
+#[allow(dead_code)]
 fn ymm_num(name: &str) -> Option<u8> {
     let n: u8 = name.strip_prefix("ymm")?.parse().ok()?;
     if n < 16 { Some(n & 7) } else { None }
 }
 
 /// Does this YMM register need VEX.B extension?
+#[allow(dead_code)]
 fn ymm_needs_ext(name: &str) -> bool {
-    match name {
-        "ymm8" | "ymm9" | "ymm10" | "ymm11" | "ymm12" | "ymm13" | "ymm14" | "ymm15" => true,
-        _ => false,
-    }
+    matches!(name, "ymm8" | "ymm9" | "ymm10" | "ymm11" | "ymm12" | "ymm13" | "ymm14" | "ymm15")
 }
 
 /// Is this a segment register?
@@ -840,7 +836,6 @@ impl InstructionEncoder {
             // Additional SSE data movement
             "movups" => self.encode_sse_rr_rm(ops, &[0x0F, 0x10], &[0x0F, 0x11]),
             "movapd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x28], &[0x66, 0x0F, 0x29]),
-            "movupd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x10], &[0x66, 0x0F, 0x11]),
             "movlps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x12], &[0x0F, 0x13]),
             "movhps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x16], &[0x0F, 0x17]),
             "movhlps" => self.encode_sse_op(ops, &[0x0F, 0x12]),
@@ -1180,11 +1175,6 @@ impl InstructionEncoder {
             "outw" => self.encode_out(ops, 0xEF, 0xE7, 2),
             "outl" => self.encode_out(ops, 0xEF, 0xE7, 4),
 
-            // Standalone prefix mnemonics (e.g. from "rep; nop" split on semicolon)
-            "rep" | "repe" | "repz" if ops.is_empty() => { self.bytes.push(0xF3); Ok(()) }
-            "repnz" | "repne" if ops.is_empty() => { self.bytes.push(0xF2); Ok(()) }
-            "lock" if ops.is_empty() => { self.bytes.push(0xF0); Ok(()) }
-
             _ => {
                 // TODO: many more instructions to handle
                 Err(format!("unhandled instruction: {} {:?}", mnemonic, ops))
@@ -1251,8 +1241,8 @@ impl InstructionEncoder {
     fn emit_rex_rm(&mut self, size: u8, reg: &str, mem: &MemoryOperand) {
         let w = size == 8;
         let r = needs_rex_ext(reg);
-        let b = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name));
-        let x = mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+        let b = mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name));
+        let x = mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name));
         let need_rex = w || r || b || x || is_rex_required_8bit(reg);
         if need_rex {
             self.bytes.push(self.rex(w, r, x, b));
@@ -1366,7 +1356,7 @@ impl InstructionEncoder {
         } else if disp_val == 0 && (base_num & 7) != 5 {
             // No displacement (RBP/R13 always need at least disp8)
             (0, 0)
-        } else if disp_val >= -128 && disp_val <= 127 {
+        } else if (-128..=127).contains(&disp_val) {
             (1, 1) // disp8
         } else {
             (2, 4) // disp32
@@ -1452,7 +1442,7 @@ impl InstructionEncoder {
             (Operand::Immediate(imm), Operand::Memory(mem)) => {
                 self.encode_mov_imm_mem(imm, mem, size)
             }
-            _ => Err(format!("unsupported mov operand combination")),
+            _ => Err("unsupported mov operand combination".to_string()),
         }
     }
 
@@ -1518,7 +1508,7 @@ impl InstructionEncoder {
                 }
             }
             ImmediateValue::SymbolMod(_, _) => {
-                Err(format!("unsupported immediate type for mov"))?
+                Err("unsupported immediate type for mov".to_string())?
             }
         }
         Ok(())
@@ -1811,7 +1801,7 @@ impl InstructionEncoder {
                     self.bytes.push(0x80);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
                     self.bytes.push(val as u8);
-                } else if val >= -128 && val <= 127 {
+                } else if (-128..=127).contains(&val) {
                     // Sign-extended imm8
                     self.bytes.push(0x83);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
@@ -1869,7 +1859,7 @@ impl InstructionEncoder {
                     self.bytes.push(0x80);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
-                } else if val >= -128 && val <= 127 {
+                } else if (-128..=127).contains(&val) {
                     self.bytes.push(0x83);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
@@ -1934,7 +1924,7 @@ impl InstructionEncoder {
                 }
                 Ok(())
             }
-            _ => Err(format!("unsupported test operands")),
+            _ => Err("unsupported test operands".to_string()),
         }
     }
 
@@ -2225,10 +2215,10 @@ impl InstructionEncoder {
 
         // Extract condition code: strip "cmov" prefix and size suffix
         let without_prefix = &mnemonic[4..];
-        let (cc_str, size) = if without_prefix.ends_with('q') {
-            (&without_prefix[..without_prefix.len()-1], 8u8)
-        } else if without_prefix.ends_with('l') {
-            (&without_prefix[..without_prefix.len()-1], 4u8)
+        let (cc_str, size) = if let Some(stripped) = without_prefix.strip_suffix('q') {
+            (stripped, 8u8)
+        } else if let Some(stripped) = without_prefix.strip_suffix('l') {
+            (stripped, 4u8)
         } else {
             (without_prefix, 8u8) // default to 64-bit
         };
@@ -2311,11 +2301,7 @@ impl InstructionEncoder {
             Operand::Label(label) => {
                 self.bytes.push(0xE8);
                 // Use PLT32 for external function calls (linker will resolve)
-                let reloc_type = if label.ends_with("@PLT") {
-                    R_X86_64_PLT32
-                } else {
-                    R_X86_64_PLT32 // Default to PLT32 for calls
-                };
+                let reloc_type = R_X86_64_PLT32;
                 let sym = label.trim_end_matches("@PLT");
                 self.add_relocation(sym, reloc_type, -4);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
@@ -2861,8 +2847,8 @@ impl InstructionEncoder {
 
                 let w = src_size == 8;
                 let r = needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name));
                 let need_rex = w || r || b_ext || x;
                 if need_rex {
                     self.bytes.push(self.rex(w, r, x, b_ext));
@@ -3329,8 +3315,8 @@ impl InstructionEncoder {
             {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, l, pp);
                 } else {
@@ -3345,8 +3331,8 @@ impl InstructionEncoder {
             {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&src.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, l, pp);
                 } else {
@@ -3389,8 +3375,8 @@ impl InstructionEncoder {
             {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, l, pp);
                 } else {
@@ -3404,8 +3390,8 @@ impl InstructionEncoder {
             {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&src.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, l, pp);
                 } else {
@@ -3452,8 +3438,8 @@ impl InstructionEncoder {
                 let src2_num = reg_num(&src2.name).ok_or("bad register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 let vvvv = src2_num | if needs_rex_ext(&src2.name) { 8 } else { 0 };
                 if b_ext && x {
                     self.emit_vex2(r, vvvv, l, pp);
@@ -3497,8 +3483,8 @@ impl InstructionEncoder {
                 let src2_num = reg_num(&src2.name).ok_or("bad register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 let vvvv = src2_num | if needs_rex_ext(&src2.name) { 8 } else { 0 };
                 self.emit_vex3(r, x, b_ext, 2, false, vvvv, l, pp);
                 self.bytes.push(opcode);
@@ -3535,8 +3521,8 @@ impl InstructionEncoder {
             (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, l, pp);
                 } else {
@@ -3664,8 +3650,8 @@ impl InstructionEncoder {
             (Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 self.emit_vex3(r, x, b_ext, 2, false, 0, l, pp); // mmmmm=2 for 0F 38
                 self.bytes.push(opcode);
                 self.encode_modrm_mem(dst_num, mem)
@@ -3714,8 +3700,8 @@ impl InstructionEncoder {
             (Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, false, pp);
                 } else {
@@ -3753,8 +3739,8 @@ impl InstructionEncoder {
                 let src2_num = reg_num(&src2.name).ok_or("bad register")?;
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 let vvvv = src2_num | if needs_rex_ext(&src2.name) { 8 } else { 0 };
                 self.emit_vex3(r, x, b_ext, 3, false, vvvv, true, pp);
                 self.bytes.push(opcode);
@@ -3788,8 +3774,8 @@ impl InstructionEncoder {
             (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Register(src), Operand::Memory(mem)) => {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&src.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 self.emit_vex3(r, x, b_ext, 3, false, 0, true, pp);
                 self.bytes.push(opcode);
                 self.encode_modrm_mem(src_num, mem)?;
@@ -3952,8 +3938,8 @@ impl InstructionEncoder {
             (Operand::Memory(mem), Operand::Register(dst)) if is_xmm(&dst.name) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, false, 1);
                 } else {
@@ -3965,8 +3951,8 @@ impl InstructionEncoder {
             (Operand::Register(src), Operand::Memory(mem)) if is_xmm(&src.name) => {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&src.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, false, 1);
                 } else {
@@ -4025,8 +4011,8 @@ impl InstructionEncoder {
             (Operand::Memory(mem), Operand::Register(dst)) if is_xmm(&dst.name) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, false, 2);
                 } else {
@@ -4038,8 +4024,8 @@ impl InstructionEncoder {
             (Operand::Register(src), Operand::Memory(mem)) if is_xmm(&src.name) => {
                 let src_num = reg_num(&src.name).ok_or("bad register")?;
                 let r = !needs_rex_ext(&src.name);
-                let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                 if b_ext && x {
                     self.emit_vex2(r, 0, false, 1);
                 } else {
@@ -4110,8 +4096,8 @@ impl InstructionEncoder {
                 (Operand::Memory(mem), Operand::Register(dst)) => {
                     let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                     let r = !needs_rex_ext(&dst.name);
-                    let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                    let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                    let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                    let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                     if b_ext && x {
                         self.emit_vex2(r, 0, false, pp);
                     } else {
@@ -4123,8 +4109,8 @@ impl InstructionEncoder {
                 (Operand::Register(src), Operand::Memory(mem)) => {
                     let src_num = reg_num(&src.name).ok_or("bad register")?;
                     let r = !needs_rex_ext(&src.name);
-                    let b_ext = mem.base.as_ref().map_or(true, |b| !needs_rex_ext(&b.name));
-                    let x = mem.index.as_ref().map_or(true, |i| !needs_rex_ext(&i.name));
+                    let b_ext = mem.base.as_ref().is_none_or(|b| !needs_rex_ext(&b.name));
+                    let x = mem.index.as_ref().is_none_or(|i| !needs_rex_ext(&i.name));
                     if b_ext && x {
                         self.emit_vex2(r, 0, false, pp);
                     } else {
@@ -4307,11 +4293,11 @@ impl InstructionEncoder {
         }
         match &ops[0] {
             Operand::Memory(mem) => {
-                let rex_needed = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name))
-                    || mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+                let rex_needed = mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name))
+                    || mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name));
                 if rex_needed {
-                    let b_ext = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name));
-                    let x_ext = mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+                    let b_ext = mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name));
+                    let x_ext = mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name));
                     let rex = 0x40 | if b_ext { 1 } else { 0 } | if x_ext { 2 } else { 0 };
                     self.bytes.push(rex);
                 }
@@ -4330,8 +4316,8 @@ impl InstructionEncoder {
         }
         match &ops[0] {
             Operand::Memory(mem) => {
-                let b_ext = mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name));
-                let x_ext = mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name));
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name));
+                let x_ext = mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name));
                 let rex = 0x48 | if b_ext { 1 } else { 0 } | if x_ext { 2 } else { 0 };
                 self.bytes.push(rex);
                 self.bytes.push(0x0F);
@@ -4440,10 +4426,10 @@ impl InstructionEncoder {
         }
         match &ops[0] {
             Operand::Memory(mem) => {
-                if mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name)) || mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name)) {
+                if mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name)) || mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name)) {
                     let rex = 0x40
-                        | if mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name)) { 1 } else { 0 }
-                        | if mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name)) { 2 } else { 0 };
+                        | if mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name)) { 1 } else { 0 }
+                        | if mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name)) { 2 } else { 0 };
                     self.bytes.push(rex);
                 }
                 self.bytes.push(0x0F);
@@ -4507,13 +4493,13 @@ impl InstructionEncoder {
                 self.bytes.push(0xF3);
                 if size == 8 {
                     let rex = 0x48 | if needs_rex_ext(&dst.name) { 4 } else { 0 }
-                        | if mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name)) { 1 } else { 0 }
-                        | if mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name)) { 2 } else { 0 };
+                        | if mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name)) { 1 } else { 0 }
+                        | if mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name)) { 2 } else { 0 };
                     self.bytes.push(rex);
-                } else if needs_rex_ext(&dst.name) || mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name)) || mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name)) {
+                } else if needs_rex_ext(&dst.name) || mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name)) || mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name)) {
                     let rex = 0x40 | if needs_rex_ext(&dst.name) { 4 } else { 0 }
-                        | if mem.base.as_ref().map_or(false, |b| needs_rex_ext(&b.name)) { 1 } else { 0 }
-                        | if mem.index.as_ref().map_or(false, |i| needs_rex_ext(&i.name)) { 2 } else { 0 };
+                        | if mem.base.as_ref().is_some_and(|b| needs_rex_ext(&b.name)) { 1 } else { 0 }
+                        | if mem.index.as_ref().is_some_and(|i| needs_rex_ext(&i.name)) { 2 } else { 0 };
                     self.bytes.push(rex);
                 }
                 self.bytes.push(0x0F);
@@ -4625,6 +4611,7 @@ impl InstructionEncoder {
 
     /// VPROLD - VEX-encoded packed rotate left (EVEX needed for AVX-512, but for AVX2 we use vpsll + vpsr combo)
     /// Actually vprold is only AVX-512, so this is a placeholder that returns an error for now
+    #[allow(dead_code)]
     fn encode_vprold(&mut self, _ops: &[Operand]) -> Result<(), String> {
         Err("vprold requires AVX-512 (EVEX encoding not supported)".to_string())
     }

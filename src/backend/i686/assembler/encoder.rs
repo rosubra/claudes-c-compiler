@@ -609,7 +609,7 @@ impl InstructionEncoder {
         } else if disp_val == 0 && (base_num & 7) != 5 {
             // No displacement (EBP always needs at least disp8)
             (0, 0)
-        } else if disp_val >= -128 && disp_val <= 127 {
+        } else if (-128..=127).contains(&disp_val) {
             (1, 1) // disp8
         } else {
             (2, 4) // disp32
@@ -1054,7 +1054,7 @@ impl InstructionEncoder {
                     self.bytes.push(0x80);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
                     self.bytes.push(val as u8);
-                } else if val >= -128 && val <= 127 {
+                } else if (-128..=127).contains(&val) {
                     self.bytes.push(0x83);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
                     self.bytes.push(val as u8);
@@ -1116,7 +1116,7 @@ impl InstructionEncoder {
                     self.bytes.push(0x80);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
-                } else if val >= -128 && val <= 127 {
+                } else if (-128..=127).contains(&val) {
                     self.bytes.push(0x83);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
@@ -1189,7 +1189,7 @@ impl InstructionEncoder {
 
                 if size == 1 {
                     self.bytes.push(0x80);
-                } else if val >= -128 && val <= 127 {
+                } else if (-128..=127).contains(&val) {
                     self.bytes.push(0x83);
                 } else {
                     self.bytes.push(0x81);
@@ -1205,9 +1205,7 @@ impl InstructionEncoder {
                     self.add_relocation(label, R_386_32, 0);
                 }
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
-                if size == 1 {
-                    self.bytes.push(val as u8);
-                } else if val >= -128 && val <= 127 {
+                if size == 1 || (-128..=127).contains(&val) {
                     self.bytes.push(val as u8);
                 } else if size == 2 {
                     self.bytes.extend_from_slice(&(val as i16).to_le_bytes());

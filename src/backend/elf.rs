@@ -446,10 +446,10 @@ pub fn parse_archive_members(data: &[u8]) -> Result<Vec<(String, usize, usize)>,
             // Extended name table
             extended_names = Some(&data[data_start..(data_start + size).min(data.len())]);
         } else {
-            let member_name = if name_str.starts_with('/') {
+            let member_name = if let Some(rest) = name_str.strip_prefix('/') {
                 // Extended name: /offset into extended names table
                 if let Some(ext) = extended_names {
-                    let name_off: usize = name_str[1..].trim_end_matches('/').parse().unwrap_or(0);
+                    let name_off: usize = rest.trim_end_matches('/').parse().unwrap_or(0);
                     if name_off < ext.len() {
                         let end = ext[name_off..]
                             .iter()
@@ -503,12 +503,11 @@ pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
             ")" => { in_as_needed = false; continue; }
             _ => {}
         }
-        if token.starts_with('/') || token.ends_with(".so") || token.ends_with(".a") ||
-           token.contains(".so.") {
-            if !in_as_needed {
+        if (token.starts_with('/') || token.ends_with(".so") || token.ends_with(".a") ||
+           token.contains(".so."))
+            && !in_as_needed {
                 paths.push(token.to_string());
             }
-        }
     }
 
     if paths.is_empty() { None } else { Some(paths) }
@@ -543,9 +542,8 @@ pub fn section_index(section_name: &str, content_sections: &[String]) -> u16 {
 pub fn default_section_flags(name: &str) -> u64 {
     if name == ".text" || name.starts_with(".text.") {
         SHF_ALLOC | SHF_EXECINSTR
-    } else if name == ".data" || name.starts_with(".data.") {
-        SHF_ALLOC | SHF_WRITE
-    } else if name == ".bss" || name.starts_with(".bss.") {
+    } else if name == ".data" || name.starts_with(".data.")
+        || name == ".bss" || name.starts_with(".bss.") {
         SHF_ALLOC | SHF_WRITE
     } else if name == ".rodata" || name.starts_with(".rodata.") {
         SHF_ALLOC
@@ -553,9 +551,7 @@ pub fn default_section_flags(name: &str) -> u64 {
         0 // Non-executable stack marker, no flags
     } else if name.starts_with(".note") {
         SHF_ALLOC
-    } else if name.starts_with(".tdata") {
-        SHF_ALLOC | SHF_WRITE | SHF_TLS
-    } else if name.starts_with(".tbss") {
+    } else if name.starts_with(".tdata") || name.starts_with(".tbss") {
         SHF_ALLOC | SHF_WRITE | SHF_TLS
     } else if name.starts_with(".init") || name.starts_with(".fini") {
         SHF_ALLOC | SHF_EXECINSTR

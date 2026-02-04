@@ -188,6 +188,7 @@ pub enum Displacement {
     Integer(i64),
     Symbol(String),
     /// Symbol with an addend offset: symbol+offset or symbol-offset (e.g., GD_struct+128(%rip))
+    #[allow(dead_code)]
     SymbolAddend(String, i64),
     /// Symbol with relocation modifier: symbol@GOT, symbol@GOTPCREL, symbol@TPOFF, etc.
     SymbolMod(String, String),
@@ -553,8 +554,8 @@ fn parse_size_directive(args: &str) -> Result<AsmItem, String> {
     let name = parts[0].trim().to_string();
     let expr_str = parts[1].trim();
 
-    if expr_str.starts_with(".-") {
-        let sym = expr_str[2..].trim().to_string();
+    if let Some(rest) = expr_str.strip_prefix(".-") {
+        let sym = rest.trim().to_string();
         Ok(AsmItem::Size(name, SizeExpr::CurrentMinusSymbol(sym)))
     } else {
         let val: u64 = parse_integer_expr(expr_str)
@@ -677,8 +678,8 @@ fn parse_operand(s: &str) -> Result<Operand, String> {
     let s = s.trim();
 
     // Indirect: *%reg or *addr
-    if s.starts_with('*') {
-        let inner = parse_operand(&s[1..])?;
+    if let Some(rest) = s.strip_prefix('*') {
+        let inner = parse_operand(rest)?;
         return Ok(Operand::Indirect(Box::new(inner)));
     }
 
@@ -688,8 +689,8 @@ fn parse_operand(s: &str) -> Result<Operand, String> {
     }
 
     // Immediate: $42, $symbol, $symbol@GOTPCREL
-    if s.starts_with('$') {
-        return parse_immediate_operand(&s[1..]);
+    if let Some(rest) = s.strip_prefix('$') {
+        return parse_immediate_operand(rest);
     }
 
     // Memory or label reference
@@ -951,8 +952,8 @@ fn parse_integer_expr(s: &str) -> Result<i64, String> {
     }
 
     // Handle ~ (bitwise NOT) prefix: ~7 = -8, ~0xFFF = -0x1000
-    if s.starts_with('~') {
-        let inner = parse_integer_expr(&s[1..])?;
+    if let Some(rest) = s.strip_prefix('~') {
+        let inner = parse_integer_expr(rest)?;
         return Ok(!inner);
     }
 
@@ -969,22 +970,22 @@ fn parse_integer_expr(s: &str) -> Result<i64, String> {
         return Ok(val);
     }
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
 
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         // Parse as u64 to handle values like 0x8000000000000000
-        let uval = u64::from_str_radix(&s[2..], 16)
+        let uval = u64::from_str_radix(hex, 16)
             .map_err(|_| format!("bad hex: {}", s))?;
         if negative {
             return Ok(-(uval as i64));
         }
         return Ok(uval as i64);
-    } else if s.starts_with("0b") || s.starts_with("0B") {
-        i64::from_str_radix(&s[2..], 2)
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        i64::from_str_radix(bin, 2)
             .map_err(|_| format!("bad binary: {}", s))?
     } else if s.starts_with('0') && s.len() > 1 && s.chars().all(|c| c.is_ascii_digit()) {
         i64::from_str_radix(s, 8)
@@ -1067,13 +1068,13 @@ fn parse_single_number(s: &str) -> Result<i64, String> {
     if let Ok(val) = s.parse::<i64>() {
         return Ok(val);
     }
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
     } else {
         (false, s)
     };
-    let val = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16).map_err(|_| format!("bad hex: {}", s))? as i64
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|_| format!("bad hex: {}", s))? as i64
     } else if s.starts_with('0') && s.len() > 1 && s.chars().all(|c| c.is_ascii_digit()) {
         i64::from_str_radix(s, 8).map_err(|_| format!("bad octal: {}", s))?
     } else {
@@ -1113,7 +1114,7 @@ fn parse_string_literal(s: &str) -> Result<Vec<u8>, String> {
                         let mut val = c as u32 - '0' as u32;
                         for _ in 0..2 {
                             if let Some(&next) = chars.as_str().as_bytes().first() {
-                                if next >= b'0' && next <= b'7' {
+                                if (b'0'..=b'7').contains(&next) {
                                     val = val * 8 + (next - b'0') as u32;
                                     chars.next();
                                 } else {
