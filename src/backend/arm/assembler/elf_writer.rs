@@ -56,7 +56,7 @@ struct PendingSymDiff {
     sym_b: String,
     /// Extra addend
     extra_addend: i64,
-    /// Size in bytes (4 or 8)
+    /// Size in bytes (1, 4, or 8)
     size: usize,
 }
 
@@ -83,7 +83,9 @@ impl ElfWriter {
                         let value = (off_a as i64) - (off_b as i64) + diff.extra_addend;
                         if let Some(section) = self.base.sections.get_mut(&diff.section) {
                             let off = diff.offset as usize;
-                            if diff.size == 4 && off + 4 <= section.data.len() {
+                            if diff.size == 1 && off < section.data.len() {
+                                section.data[off] = value as u8;
+                            } else if diff.size == 4 && off + 4 <= section.data.len() {
                                 section.data[off..off + 4].copy_from_slice(&(value as i32).to_le_bytes());
                             } else if diff.size == 8 && off + 8 <= section.data.len() {
                                 section.data[off..off + 8].copy_from_slice(&value.to_le_bytes());
@@ -212,7 +214,7 @@ impl ElfWriter {
                 Ok(())
             }
 
-            AsmDirective::Byte(vals) => { self.base.emit_bytes(vals); Ok(()) }
+            AsmDirective::Byte(vals) => self.emit_data_values(vals, 1),
 
             AsmDirective::Short(vals) => {
                 for val in vals {

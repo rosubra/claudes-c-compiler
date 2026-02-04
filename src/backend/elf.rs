@@ -2173,31 +2173,34 @@ impl ElfWriterBase {
         result
     }
 
-    /// Emit a plain integer value for .long (size=4) or .quad (size=8).
+    /// Emit a plain integer value for .byte (size=1), .short (size=2), .long (size=4) or .quad (size=8).
     pub fn emit_data_integer(&mut self, val: i64, size: usize) {
-        if size == 4 {
-            self.emit_bytes(&(val as u32).to_le_bytes());
-        } else {
-            self.emit_bytes(&(val as u64).to_le_bytes());
+        match size {
+            1 => self.emit_bytes(&[val as u8]),
+            2 => self.emit_bytes(&(val as u16).to_le_bytes()),
+            4 => self.emit_bytes(&(val as u32).to_le_bytes()),
+            _ => self.emit_bytes(&(val as u64).to_le_bytes()),
         }
     }
 
     /// Emit a symbol reference with a relocation.
     pub fn emit_data_symbol_ref(&mut self, sym: &str, addend: i64, size: usize, reloc_type: u32) {
         self.add_reloc(reloc_type, sym.to_string(), addend);
-        if size == 4 {
-            self.emit_bytes(&0u32.to_le_bytes());
-        } else {
-            self.emit_bytes(&0u64.to_le_bytes());
+        match size {
+            1 => self.emit_bytes(&[0u8]),
+            2 => self.emit_bytes(&0u16.to_le_bytes()),
+            4 => self.emit_bytes(&0u32.to_le_bytes()),
+            _ => self.emit_bytes(&0u64.to_le_bytes()),
         }
     }
 
     /// Emit placeholder bytes for a deferred value (symbol diff, etc.).
     pub fn emit_placeholder(&mut self, size: usize) {
-        if size == 4 {
-            self.emit_bytes(&0u32.to_le_bytes());
-        } else {
-            self.emit_bytes(&0u64.to_le_bytes());
+        match size {
+            1 => self.emit_bytes(&[0u8]),
+            2 => self.emit_bytes(&0u16.to_le_bytes()),
+            4 => self.emit_bytes(&0u32.to_le_bytes()),
+            _ => self.emit_bytes(&0u64.to_le_bytes()),
         }
     }
 

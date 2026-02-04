@@ -172,6 +172,9 @@ fn resolve_numeric_directive(
     defs: &HashMap<String, Vec<(usize, String)>>,
 ) -> AsmDirective {
     match dir {
+        AsmDirective::Byte(vals) => {
+            AsmDirective::Byte(resolve_numeric_data_values(vals, current_idx, defs))
+        }
         AsmDirective::Long(vals) => {
             AsmDirective::Long(resolve_numeric_data_values(vals, current_idx, defs))
         }
