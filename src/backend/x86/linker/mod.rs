@@ -268,6 +268,7 @@ pub fn link_shared(
     output_path: &str,
     user_args: &[String],
     lib_paths: &[&str],
+    needed_libs: &[&str],
 ) -> Result<(), String> {
     let mut objects: Vec<ElfObject> = Vec::new();
     let mut globals: HashMap<String, GlobalSymbol> = HashMap::new();
@@ -370,6 +371,28 @@ pub fn link_shared(
             changed = false;
             let prev_count = objects.len();
             for lib_path in &lib_paths_resolved {
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+            }
+            if objects.len() != prev_count { changed = true; }
+        }
+    }
+
+    // Resolve implicit libraries (e.g. libgcc.a) to provide compiler runtime
+    // functions like __udivti3 that may be referenced by user code.
+    if !needed_libs.is_empty() {
+        let mut implicit_paths: Vec<String> = Vec::new();
+        for lib_name in needed_libs {
+            if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
+                if !implicit_paths.contains(&lib_path) {
+                    implicit_paths.push(lib_path);
+                }
+            }
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let prev_count = objects.len();
+            for lib_path in &implicit_paths {
                 load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
             }
             if objects.len() != prev_count { changed = true; }

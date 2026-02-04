@@ -673,15 +673,17 @@ pub(crate) fn link_builtin_x86(
     use crate::backend::x86::linker;
 
     if is_shared {
-        // Shared libraries: no CRT objects, no default libs (like -nostdlib).
-        // Library paths are still useful for resolving -l flags.
+        // Shared libraries: no CRT objects, but we do need libgcc for compiler
+        // runtime functions like __udivti3, __divti3, etc.
         let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, true, false);
         let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+        let implicit_libs: Vec<&str> = if is_nostdlib { vec![] } else { vec!["gcc"] };
         return linker::link_shared(
             object_files,
             output_path,
             user_args,
             &lib_path_refs,
+            &implicit_libs,
         );
     }
 

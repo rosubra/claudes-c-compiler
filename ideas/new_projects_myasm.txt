@@ -201,3 +201,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | mandoc  | PASS | TODO | TODO | TODO | Passes x86 |
 | dropbear | PASS | TODO | TODO | TODO | Passes x86 |
 | pigz    | PASS | TODO | TODO | TODO | Passes x86 |
+| Chibi-Scheme | PASS | TODO | TODO | TODO | Fixed x86: shared lib linker now includes libgcc.a for __udivti3 etc.; check script needs ANSI strip fix |
