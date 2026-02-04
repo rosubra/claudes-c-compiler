@@ -40,9 +40,15 @@ impl Lowerer {
             return result;
         }
 
+        // Evaluate the LHS lvalue address BEFORE the RHS expression.
+        // This matches GCC's evaluation order: the address where we store is
+        // computed using the state before any RHS side effects (e.g., i++ in
+        // `a[i] = i++` uses the pre-increment value of i for the index).
+        let lhs_ty = self.get_expr_type(lhs);
+        let lv = self.lower_lvalue(lhs);
+
         // When assigning a complex RHS to a non-complex LHS, extract the real part first
         let rhs_ct = self.expr_ctype(rhs);
-        let lhs_ty = self.get_expr_type(lhs);
         let is_bool_target = self.is_bool_lvalue(lhs);
         let rhs_val = if rhs_ct.is_complex() && !lhs_ct.is_complex() {
             let complex_val = self.lower_expr(rhs);
@@ -67,7 +73,7 @@ impl Lowerer {
             self.emit_implicit_cast(rhs_val, rhs_ty, lhs_ty)
         };
 
-        if let Some(lv) = self.lower_lvalue(lhs) {
+        if let Some(lv) = lv {
             self.store_lvalue_typed(&lv, rhs_val, lhs_ty);
             return rhs_val;
         }
