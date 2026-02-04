@@ -2281,7 +2281,10 @@ pub fn link_builtin(
                 } else if sym.name.is_empty() {
                     0
                 } else if sym.binding == STB_LOCAL {
-                    // Local symbol: resolve via section_map + sym.value (per-object)
+                    // Local symbols must be resolved per-object via section_map + sym.value.
+                    // They must NOT be looked up in global_symbols because local symbols
+                    // like .LC0, .LC1 from different object files would collide in the
+                    // global HashMap, causing wrong address resolution.
                     if sym.section_index != SHN_UNDEF && sym.section_index != SHN_ABS {
                         match section_map.get(&(obj_idx, sym.section_index as usize)) {
                             Some(&(sec_out_idx, sec_out_offset)) => {

@@ -22,3 +22,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | cmark   | PASS | FAIL (i686 group info) | PASS | PASS | Fixed x86/riscv asm octal escape parsing (\0 prefix consumed too early) |
 | Duktape | PASS | PASS | PASS | PASS | Passes all architectures out of the box |
 | Wren    | PASS | TODO | TODO | TODO | Passes x86 (minor flaky timing tests, pass on retry) |
+| json-c  | PASS | FAIL (asm issue) | PASS | PASS | Fixed i686 linker local symbol collision (GOTOFF relocations); i686 passes with GCC asm + builtin LD; builtin asm still has issues |
