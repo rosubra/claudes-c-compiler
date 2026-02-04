@@ -1595,12 +1595,12 @@ impl ArmCodegen {
             let fp_reg_off = (reg_idx * 16) as i64;
             if ty == IrType::F32 {
                 self.state.emit_fmt(format_args!("    ldr s0, [sp, #{}]", fp_reg_off));
-                self.state.emit("    fmov w0, s0");
+                self.state.emit("    fmov w9, s0");
             } else {
                 self.state.emit_fmt(format_args!("    ldr d0, [sp, #{}]", fp_reg_off));
-                self.state.emit("    fmov x0, d0");
+                self.state.emit("    fmov x9, d0");
             }
-            self.emit_store_to_sp("x0", slot.0 + 128, "str");
+            self.emit_store_to_sp("x9", slot.0 + 128, "str");
         }
 
         // Process F128 FP reg params: store full 16-byte f128, then f64 approx.
@@ -1626,6 +1626,9 @@ impl ArmCodegen {
 
     /// Store FP params when no F128 params are present (simple path).
     fn emit_store_fp_params_simple(&mut self, func: &IrFunction, param_classes: &[ParamClass]) {
+        // Use x9/w9 as scratch instead of x0/w0 to avoid clobbering GP argument
+        // registers (x0-x7) that may not have been spilled yet (e.g. when mem2reg
+        // promoted their allocas and emit_param_ref will read them later).
         for (i, _) in func.params.iter().enumerate() {
             let reg_idx = match param_classes[i] {
                 ParamClass::FloatReg { reg_idx } => reg_idx,
@@ -1636,11 +1639,11 @@ impl ArmCodegen {
                 None => continue,
             };
             if ty == IrType::F32 {
-                self.state.emit_fmt(format_args!("    fmov w0, s{}", reg_idx));
+                self.state.emit_fmt(format_args!("    fmov w9, s{}", reg_idx));
             } else {
-                self.state.emit_fmt(format_args!("    fmov x0, d{}", reg_idx));
+                self.state.emit_fmt(format_args!("    fmov x9, d{}", reg_idx));
             }
-            self.emit_store_to_sp("x0", slot.0, "str");
+            self.emit_store_to_sp("x9", slot.0, "str");
         }
     }
 

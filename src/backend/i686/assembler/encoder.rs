@@ -79,7 +79,9 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
         "cltd" | "cdq" | "ret" | "nop" | "ud2" | "pause"
         | "mfence" | "lfence" | "sfence" | "clflush"
         | "ldmxcsr" | "stmxcsr"
-        | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp" => return None,
+        | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp"
+        // Base ALU/shift mnemonics whose last letter is NOT a size suffix
+        | "sub" | "sbb" | "add" | "and" | "shl" | "rol" | "xadd" => return None,
         _ => {}
     }
     let last = mnemonic.as_bytes().last()?;
