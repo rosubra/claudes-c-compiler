@@ -4,7 +4,8 @@
 //! a statically-linked ELF64 executable for AArch64 (ARM 64-bit).
 //!
 //! When `MY_LD=builtin` is set, the compiler uses this built-in linker
-//! instead of calling an external `ld`.
+//! instead of calling an external `ld`. CRT object discovery and library
+//! path resolution are handled by common.rs's `resolve_builtin_link_setup`.
 //!
 //! Supported AArch64 relocations:
 //! - R_AARCH64_ABS64, ABS32, ABS16 (absolute)
@@ -31,21 +32,6 @@ const BASE_ADDR: u64 = 0x400000;
 /// Page size for alignment
 const PAGE_SIZE: u64 = 0x10000; // AArch64 uses 64KB pages for linker alignment
 
-/// CRT object search paths
-const CRT_PATHS: &[&str] = &[
-    "/usr/aarch64-linux-gnu/lib",
-    "/usr/lib/aarch64-linux-gnu",
-];
-
-/// GCC library paths for crtbegin/crtend
-const GCC_PATHS: &[&str] = &[
-    "/usr/lib/gcc-cross/aarch64-linux-gnu/13",
-    "/usr/lib/gcc-cross/aarch64-linux-gnu/12",
-    "/usr/lib/gcc-cross/aarch64-linux-gnu/11",
-    "/usr/lib/gcc/aarch64-linux-gnu/13",
-    "/usr/lib/gcc/aarch64-linux-gnu/12",
-    "/usr/lib/gcc/aarch64-linux-gnu/11",
-];
 
 /// An output section in the final executable
 pub struct OutputSection {
@@ -80,66 +66,41 @@ pub struct GlobalSymbol {
 
 // ── Public entry point ─────────────────────────────────────────────────
 
-/// Link AArch64 object files into a static ELF executable.
-pub fn link(object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
+/// Link AArch64 object files into a static ELF executable (pre-resolved CRT/library variant).
+///
+/// This is the primary entry point, matching the pattern used by x86-64 and i686 linkers.
+/// CRT objects and library paths are resolved by common.rs before being passed in.
+///
+/// `object_files`: paths to user .o files and .a archives
+/// `output_path`: path for the output executable
+/// `user_args`: additional linker flags from the user
+/// `lib_paths`: pre-resolved library search paths (user -L first, then system)
+/// `needed_libs`: pre-resolved default libraries (e.g., ["gcc", "gcc_eh", "c"])
+/// `crt_objects_before`: CRT objects to link before user objects (e.g., crt1.o, crti.o, crtbeginT.o)
+/// `crt_objects_after`: CRT objects to link after user objects (e.g., crtend.o, crtn.o)
+#[allow(clippy::too_many_arguments)]
+pub fn link_builtin(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    lib_paths: &[&str],
+    needed_libs: &[&str],
+    crt_objects_before: &[&str],
+    crt_objects_after: &[&str],
+) -> Result<(), String> {
     if std::env::var("LINKER_DEBUG").is_ok() {
         eprintln!("arm linker: object_files={:?} output={} user_args={:?}", object_files, output_path, user_args);
     }
     let mut objects: Vec<ElfObject> = Vec::new();
     let mut globals: HashMap<String, GlobalSymbol> = HashMap::new();
 
-    // Parse user args for library paths and libraries
-    let mut extra_lib_paths: Vec<String> = Vec::new();
-    let mut _libs_to_load: Vec<String> = Vec::new();
-    let mut is_static = false;
-    let mut is_nostdlib = false;
+    // Use pre-resolved library search paths
+    let all_lib_paths: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
 
-    let mut i = 0;
-    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
-    while i < args.len() {
-        let arg = args[i];
-        if let Some(path) = arg.strip_prefix("-L") {
-            let p = if path.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { path };
-            extra_lib_paths.push(p.to_string());
-        } else if let Some(lib) = arg.strip_prefix("-l") {
-            let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
-            _libs_to_load.push(l.to_string());
-        } else if arg == "-static" {
-            is_static = true;
-        } else if arg == "-nostdlib" {
-            is_nostdlib = true;
-        } else if arg.starts_with("-Wl,") {
-            for part in arg[4..].split(',') {
-                if let Some(lpath) = part.strip_prefix("-L") {
-                    extra_lib_paths.push(lpath.to_string());
-                } else if let Some(lib) = part.strip_prefix("-l") {
-                    _libs_to_load.push(lib.to_string());
-                } else if part == "-static" {
-                    is_static = true;
-                } else if part == "-nostdlib" {
-                    is_nostdlib = true;
-                }
-            }
-        }
-        i += 1;
-    }
-
-    // Build library search paths
-    let mut all_lib_paths: Vec<String> = extra_lib_paths;
-    for p in CRT_PATHS {
-        all_lib_paths.push(p.to_string());
-    }
-    for p in GCC_PATHS {
-        all_lib_paths.push(p.to_string());
-    }
-
-    // Load CRT objects if not -nostdlib
-    if !is_nostdlib {
-        let crt_before = find_crt_objects_before();
-        for path in &crt_before {
-            if Path::new(path).exists() {
-                load_file(path, &mut objects, &mut globals, &all_lib_paths)?;
-            }
+    // Load CRT objects before user objects
+    for path in crt_objects_before {
+        if Path::new(path).exists() {
+            load_file(path, &mut objects, &mut globals, &all_lib_paths)?;
         }
     }
 
@@ -150,6 +111,7 @@ pub fn link(object_files: &[&str], output_path: &str, user_args: &[String]) -> R
 
     // Then load objects, archives and libraries from user_args in order.
     // user_args may contain .o files, .a files, -l flags, and -Wl, flags.
+    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
     let mut arg_i = 0;
     while arg_i < args.len() {
         let arg = args[arg_i];
@@ -173,27 +135,20 @@ pub fn link(object_files: &[&str], output_path: &str, user_args: &[String]) -> R
         arg_i += 1;
     }
 
-    // Load CRT objects after
-    if !is_nostdlib {
-        let crt_after = find_crt_objects_after();
-        for path in &crt_after {
-            if Path::new(path).exists() {
-                load_file(path, &mut objects, &mut globals, &all_lib_paths)?;
-            }
+    // Load CRT objects after user objects
+    for path in crt_objects_after {
+        if Path::new(path).exists() {
+            load_file(path, &mut objects, &mut globals, &all_lib_paths)?;
         }
     }
 
-    // If not -nostdlib, load default libraries in a group (like ld's --start-group).
+    // Load default libraries in a group (like ld's --start-group).
     // This iterates all archives until no new symbols are resolved, handling
     // circular dependencies between libgcc, libgcc_eh, and libc.
-    if !is_nostdlib {
-        let lib_names: Vec<&str> = if is_static {
-            vec!["gcc", "gcc_eh", "c"]
-        } else {
-            vec!["gcc", "c"]
-        };
+    // Note: gcc_eh is added by the common.rs wrapper for static linking.
+    if !needed_libs.is_empty() {
         let mut lib_paths_resolved: Vec<String> = Vec::new();
-        for lib_name in &lib_names {
+        for lib_name in needed_libs {
             if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
                 lib_paths_resolved.push(lib_path);
             }
@@ -422,41 +377,6 @@ fn resolve_lib(name: &str, paths: &[String]) -> Option<String> {
         if Path::new(&so).exists() { return Some(so); }
     }
     None
-}
-
-fn find_crt_objects_before() -> Vec<String> {
-    let mut result = Vec::new();
-    // crt1.o (entry point)
-    for p in CRT_PATHS {
-        let path = format!("{}/crt1.o", p);
-        if Path::new(&path).exists() { result.push(path); break; }
-    }
-    // crti.o (init)
-    for p in CRT_PATHS {
-        let path = format!("{}/crti.o", p);
-        if Path::new(&path).exists() { result.push(path); break; }
-    }
-    // crtbeginT.o for static linking (from GCC)
-    for p in GCC_PATHS {
-        let path = format!("{}/crtbeginT.o", p);
-        if Path::new(&path).exists() { result.push(path); break; }
-    }
-    result
-}
-
-fn find_crt_objects_after() -> Vec<String> {
-    let mut result = Vec::new();
-    // crtend.o
-    for p in GCC_PATHS {
-        let path = format!("{}/crtend.o", p);
-        if Path::new(&path).exists() { result.push(path); break; }
-    }
-    // crtn.o
-    for p in CRT_PATHS {
-        let path = format!("{}/crtn.o", p);
-        if Path::new(&path).exists() { result.push(path); break; }
-    }
-    result
 }
 
 // ── Section merging ────────────────────────────────────────────────────

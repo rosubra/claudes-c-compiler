@@ -294,10 +294,11 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
         let is_disabled = matches!(lower.as_str(), "0" | "false" | "no" | "off" | "");
 
         if !is_disabled {
-            // For x86-64 and i686, use the built-in native linker.
+            // Use the built-in native linker for all supported architectures.
             // This avoids requiring an external ld binary entirely.
-            // Both architectures use the same pattern: CRT/library discovery
-            // via DirectLdArchConfig, then delegate to the native linker.
+            // All architectures use the same pattern: CRT/library discovery
+            // via DirectLdArchConfig, then delegate to the architecture-specific
+            // native linker.
             if !is_shared && !is_relocatable {
                 if config.expected_elf_machine == 62 {
                     return link_builtin_x86(
@@ -307,6 +308,18 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                 }
                 if config.expected_elf_machine == 3 {
                     return link_builtin_i686(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+                if config.expected_elf_machine == 183 {
+                    return link_builtin_aarch64(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+                if config.expected_elf_machine == 243 {
+                    return link_builtin_riscv(
                         object_files, output_path, user_args,
                         is_nostdlib, is_static,
                     );
@@ -602,8 +615,9 @@ fn find_crt_dir(arch: &DirectLdArchConfig) -> Option<String> {
 
 /// Resolve CRT objects and library paths for a built-in linker using DirectLdArchConfig.
 ///
-/// This shared helper is used by both `link_builtin_x86` and `link_builtin_i686`
-/// to avoid duplicating CRT/library discovery logic. Returns:
+/// This shared helper is used by all four built-in linker wrappers
+/// (x86-64, i686, AArch64, RISC-V) to avoid duplicating CRT/library
+/// discovery logic. Returns:
 /// - `crt_before`: CRT objects to link before user objects
 /// - `crt_after`: CRT objects to link after user objects
 /// - `lib_paths`: Combined library search paths (user -L first, then system paths)
@@ -619,6 +633,7 @@ fn resolve_builtin_link_setup(
     arch: &DirectLdArchConfig,
     user_args: &[String],
     is_nostdlib: bool,
+    is_static: bool,
 ) -> BuiltinLinkSetup {
     let gcc_lib_dir = find_gcc_lib_dir(arch);
     let crt_dir = find_crt_dir(arch);
@@ -666,17 +681,40 @@ fn resolve_builtin_link_setup(
     let mut crt_after: Vec<String> = Vec::new();
 
     if !is_nostdlib {
+        // crt1.o comes from the CRT dir
         if let Some(ref crt) = crt_dir {
             crt_before.push(format!("{}/crt1.o", crt));
+        }
+        // crti.o: from GCC dir for cross-compilation (e.g., RISC-V), otherwise from CRT dir
+        if arch.crti_from_gcc_dir {
+            if let Some(ref gcc) = gcc_lib_dir {
+                crt_before.push(format!("{}/crti.o", gcc));
+            }
+        } else if let Some(ref crt) = crt_dir {
             crt_before.push(format!("{}/crti.o", crt));
         }
+        // crtbegin: use crtbeginT.o for static linking, crtbegin.o for dynamic
         if let Some(ref gcc) = gcc_lib_dir {
-            crt_before.push(format!("{}/crtbegin.o", gcc));
+            if is_static {
+                let crtbegin_t = format!("{}/crtbeginT.o", gcc);
+                if std::path::Path::new(&crtbegin_t).exists() {
+                    crt_before.push(crtbegin_t);
+                } else {
+                    crt_before.push(format!("{}/crtbegin.o", gcc));
+                }
+            } else {
+                crt_before.push(format!("{}/crtbegin.o", gcc));
+            }
         }
         if let Some(ref gcc) = gcc_lib_dir {
             crt_after.push(format!("{}/crtend.o", gcc));
         }
-        if let Some(ref crt) = crt_dir {
+        // crtn.o: from GCC dir for cross-compilation, otherwise from CRT dir
+        if arch.crti_from_gcc_dir {
+            if let Some(ref gcc) = gcc_lib_dir {
+                crt_after.push(format!("{}/crtn.o", gcc));
+            }
+        } else if let Some(ref crt) = crt_dir {
             crt_after.push(format!("{}/crtn.o", crt));
         }
     }
@@ -706,11 +744,11 @@ pub(crate) fn link_builtin_x86(
     output_path: &str,
     user_args: &[String],
     is_nostdlib: bool,
-    _is_static: bool,
+    is_static: bool,
 ) -> Result<(), String> {
     use crate::backend::x86::linker;
 
-    let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, is_nostdlib);
+    let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, is_nostdlib, is_static);
 
     let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
     let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();
@@ -737,17 +775,95 @@ pub(crate) fn link_builtin_i686(
     output_path: &str,
     user_args: &[String],
     is_nostdlib: bool,
-    _is_static: bool,
+    is_static: bool,
 ) -> Result<(), String> {
     use crate::backend::i686::linker;
 
-    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_I686, user_args, is_nostdlib);
+    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_I686, user_args, is_nostdlib, is_static);
 
     // The i686 builtin linker scans shared libraries for dynamic symbol resolution.
     // Unlike the x86-64 linker which resolves libgcc via libgcc_s.so.1, the i686
     // environment uses libgcc.a (static archive) linked through CRT objects. Only
     // libc and libm need dynamic symbol scanning.
     setup.needed_libs.retain(|lib| lib != "gcc");
+
+    let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+    let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();
+    let crt_before_refs: Vec<&str> = setup.crt_before.iter().map(|s| s.as_str()).collect();
+    let crt_after_refs: Vec<&str> = setup.crt_after.iter().map(|s| s.as_str()).collect();
+
+    linker::link_builtin(
+        object_files,
+        output_path,
+        user_args,
+        &lib_path_refs,
+        &needed_lib_refs,
+        &crt_before_refs,
+        &crt_after_refs,
+    )
+}
+
+/// Link using the built-in native AArch64 ELF linker.
+///
+/// Parallel to `link_builtin_x86`: uses `DIRECT_LD_AARCH64` for CRT/library
+/// discovery, then delegates to the AArch64 native static linker.
+pub(crate) fn link_builtin_aarch64(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    is_nostdlib: bool,
+    _is_static: bool, // AArch64 builtin linker always produces static output
+) -> Result<(), String> {
+    use crate::backend::arm::linker;
+
+    // AArch64 builtin linker is always static, so force crtbeginT.o
+    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_AARCH64, user_args, is_nostdlib, true);
+
+    // AArch64 static linking needs gcc_eh for exception handling (unwinding)
+    if !is_nostdlib {
+        if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
+            setup.needed_libs.insert(pos + 1, "gcc_eh".to_string());
+        }
+    }
+
+    let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+    let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();
+    let crt_before_refs: Vec<&str> = setup.crt_before.iter().map(|s| s.as_str()).collect();
+    let crt_after_refs: Vec<&str> = setup.crt_after.iter().map(|s| s.as_str()).collect();
+
+    linker::link_builtin(
+        object_files,
+        output_path,
+        user_args,
+        &lib_path_refs,
+        &needed_lib_refs,
+        &crt_before_refs,
+        &crt_after_refs,
+    )
+}
+
+/// Link using the built-in native RISC-V ELF linker.
+///
+/// Parallel to `link_builtin_x86`: uses `DIRECT_LD_RISCV64` for CRT/library
+/// discovery, then delegates to the RISC-V native linker.
+pub(crate) fn link_builtin_riscv(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    is_nostdlib: bool,
+    is_static: bool,
+) -> Result<(), String> {
+    use crate::backend::riscv::linker;
+
+    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_RISCV64, user_args, is_nostdlib, is_static);
+
+    // RISC-V needs gcc_s in addition to the default libs for dynamic linking
+    if !is_nostdlib && !is_static {
+        // Insert gcc_s after gcc
+        if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
+            setup.needed_libs.insert(pos + 1, "gcc_s".to_string());
+        }
+    }
 
     let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
     let needed_lib_refs: Vec<&str> = setup.needed_libs.iter().map(|s| s.as_str()).collect();

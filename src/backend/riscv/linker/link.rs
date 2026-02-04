@@ -146,100 +146,73 @@ struct DynSym {
     shndx: u16,
 }
 
-/// Link object files into a RISC-V ELF executable.
+/// Link object files into a RISC-V ELF executable (pre-resolved CRT/library variant).
 ///
-/// `object_files`: paths to .o files, .a archives, and linker flags (-l, -L, etc.)
+/// This is the primary entry point, matching the pattern used by x86-64 and i686 linkers.
+/// CRT objects and library paths are resolved by common.rs before being passed in.
+///
+/// `object_files`: paths to user .o files and .a archives
 /// `output_path`: path for the output executable
 /// `user_args`: additional linker flags from the user
-pub fn link_to_executable(
+/// `lib_paths`: pre-resolved library search paths (user -L first, then system)
+/// `needed_libs`: pre-resolved default libraries (e.g., ["gcc", "gcc_s", "c", "m"])
+/// `crt_objects_before`: CRT objects to link before user objects (e.g., crt1.o, crti.o, crtbegin.o)
+/// `crt_objects_after`: CRT objects to link after user objects (e.g., crtend.o, crtn.o)
+#[allow(clippy::too_many_arguments)]
+pub fn link_builtin(
     object_files: &[&str],
     output_path: &str,
     user_args: &[String],
+    lib_paths: &[&str],
+    needed_libs: &[&str],
+    crt_objects_before: &[&str],
+    crt_objects_after: &[&str],
 ) -> Result<(), String> {
     let is_static = user_args.iter().any(|a| a == "-static");
-    let is_nostdlib = user_args.iter().any(|a| a == "-nostdlib");
 
-    // Collect all input files including CRT objects
+    // Collect all input files: CRT before + user objects + bare files from args + CRT after
     let mut all_inputs: Vec<String> = Vec::new();
-    let mut lib_search_paths: Vec<String> = Vec::new();
-    let mut needed_libs: Vec<String> = Vec::new();
-
-    // Find GCC and CRT directories
-    let gcc_dir = find_gcc_dir();
-    let crt_dir = find_crt_dir_rv();
-
-    if !is_nostdlib {
-        // Add CRT startup objects
-        if let Some(ref crt) = crt_dir {
-            all_inputs.push(format!("{}/crt1.o", crt));
-        }
-        if let Some(ref gcc) = gcc_dir {
-            all_inputs.push(format!("{}/crti.o", gcc));
-            all_inputs.push(format!("{}/crtbegin.o", gcc));
-        }
+    for crt in crt_objects_before {
+        all_inputs.push(crt.to_string());
     }
-
-    // Add user object files
     for obj in object_files {
         all_inputs.push(obj.to_string());
     }
-
-    // Parse user args for -L, -l, bare .o/.a files, and -Wl, flags
-    let mut i = 0;
-    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
-    while i < args.len() {
-        let arg = args[i];
-        if let Some(rest) = arg.strip_prefix("-L") {
-            if rest.is_empty() && i + 1 < args.len() {
-                i += 1;
-                lib_search_paths.push(args[i].to_string());
-            } else {
-                lib_search_paths.push(rest.to_string());
-            }
-        } else if let Some(rest) = arg.strip_prefix("-l") {
-            let libname = if rest.is_empty() && i + 1 < args.len() {
-                i += 1;
-                args[i]
-            } else {
-                rest
-            };
-            needed_libs.push(libname.to_string());
-        } else if let Some(wl) = arg.strip_prefix("-Wl,") {
-            // Parse -Wl, flags
-            for part in wl.split(',') {
-                if let Some(l) = part.strip_prefix("-L") {
-                    lib_search_paths.push(l.to_string());
-                }
-            }
-        } else if !arg.starts_with('-') && std::path::Path::new(arg).exists() {
-            // Bare file path: .o object file, .a static archive, or other input file
-            // These come from linker_ordered_items when the driver passes pre-existing .o/.a files
+    // Include bare file paths from user_args (e.g., .o or .a files passed via linker flags)
+    for arg in user_args {
+        if !arg.starts_with('-') && std::path::Path::new(arg.as_str()).exists() {
             all_inputs.push(arg.to_string());
         }
-        i += 1;
+    }
+    for crt in crt_objects_after {
+        all_inputs.push(crt.to_string());
     }
 
-    // Add system library search paths
-    if let Some(ref gcc) = gcc_dir {
-        lib_search_paths.push(gcc.clone());
-    }
-    if let Some(ref crt) = crt_dir {
-        lib_search_paths.push(crt.clone());
-    }
-    lib_search_paths.push("/usr/riscv64-linux-gnu/lib".into());
-    lib_search_paths.push("/usr/lib/riscv64-linux-gnu".into());
-    lib_search_paths.push("/lib/riscv64-linux-gnu".into());
-
-    // Add default libraries
-    if !is_nostdlib {
-        needed_libs.extend(["gcc", "gcc_s", "c", "m"].iter().map(|s| s.to_string()));
-    }
-
-    // Add CRT finalization objects
-    if !is_nostdlib {
-        if let Some(ref gcc) = gcc_dir {
-            all_inputs.push(format!("{}/crtend.o", gcc));
-            all_inputs.push(format!("{}/crtn.o", gcc));
+    // Use pre-resolved library search paths and needed libraries.
+    // Also parse user_args for any additional -l flags or -Wl,-l flags.
+    let lib_search_paths: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
+    let mut needed_libs: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
+    {
+        let mut i = 0;
+        let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
+        while i < args.len() {
+            let arg = args[i];
+            if let Some(rest) = arg.strip_prefix("-l") {
+                let libname = if rest.is_empty() && i + 1 < args.len() {
+                    i += 1;
+                    args[i]
+                } else {
+                    rest
+                };
+                needed_libs.push(libname.to_string());
+            } else if let Some(wl) = arg.strip_prefix("-Wl,") {
+                for part in wl.split(',') {
+                    if let Some(lib) = part.strip_prefix("-l") {
+                        needed_libs.push(lib.to_string());
+                    }
+                }
+            }
+            i += 1;
         }
     }
 
@@ -2682,39 +2655,6 @@ fn elf_hash_gnu(name: &[u8]) -> u32 {
         h = h.wrapping_mul(33).wrapping_add(b as u32);
     }
     h
-}
-
-/// Find the GCC cross-compiler library directory.
-fn find_gcc_dir() -> Option<String> {
-    let bases = [
-        "/usr/lib/gcc-cross/riscv64-linux-gnu",
-        "/usr/lib/gcc/riscv64-linux-gnu",
-    ];
-    let versions = ["14", "13", "12", "11", "10", "9", "8"];
-    for base in &bases {
-        for ver in &versions {
-            let dir = format!("{}/{}", base, ver);
-            if std::path::Path::new(&format!("{}/crtbegin.o", dir)).exists() {
-                return Some(dir);
-            }
-        }
-    }
-    None
-}
-
-/// Find the CRT directory for RISC-V.
-fn find_crt_dir_rv() -> Option<String> {
-    let candidates = [
-        "/usr/riscv64-linux-gnu/lib",
-        "/usr/lib/riscv64-linux-gnu",
-        "/lib/riscv64-linux-gnu",
-    ];
-    for dir in &candidates {
-        if std::path::Path::new(&format!("{}/crt1.o", dir)).exists() {
-            return Some(dir.to_string());
-        }
-    }
-    None
 }
 
 /// Resolve archive members: iteratively pull in members that define currently-undefined symbols.

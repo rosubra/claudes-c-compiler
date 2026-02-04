@@ -289,27 +289,11 @@ impl Target {
     /// and the target has a native linker implementation, uses the built-in
     /// linker instead of shelling out to an external tool.
     ///
-    /// Both x86-64 and i686 use the same dispatch pattern: CRT/library discovery
-    /// happens in common.rs via `DirectLdArchConfig`, then delegates to the
-    /// architecture-specific native linker.
+    /// All four architectures (x86-64, i686, AArch64, RISC-V) use the same
+    /// dispatch pattern: CRT/library discovery happens in common.rs via
+    /// `DirectLdArchConfig`, then delegates to the architecture-specific
+    /// native linker.
     pub(crate) fn link_with_args(&self, object_files: &[&str], output_path: &str, user_args: &[String]) -> Result<(), String> {
-        // RISC-V has its own builtin linker; other targets (x86-64, i686)
-        // handle MY_LD=builtin inside common::link_with_args.
-        if let Ok(ref val) = std::env::var("MY_LD") {
-            if val == "builtin" {
-                match self {
-                    Target::Riscv64 => {
-                        return riscv::linker::link_to_executable(object_files, output_path, user_args);
-                    }
-                    Target::Aarch64 => {
-                        return arm::linker::link(object_files, output_path, user_args);
-                    }
-                    _ => {
-                        // Other targets handle MY_LD=builtin in common::link_with_args
-                    }
-                }
-            }
-        }
         common::link_with_args(&self.linker_config(), object_files, output_path, user_args)
     }
 }
