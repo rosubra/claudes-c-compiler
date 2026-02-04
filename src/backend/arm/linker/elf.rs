@@ -14,13 +14,19 @@ pub use crate::backend::elf::{
     STB_GLOBAL, STB_WEAK,
     STT_OBJECT, STT_FUNC, STT_SECTION, STT_FILE, STT_TLS, STT_GNU_IFUNC,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
-    PT_LOAD, PT_TLS, PT_GNU_STACK,
+    PT_LOAD, PT_TLS, PT_GNU_STACK, PT_INTERP, PT_DYNAMIC, PT_PHDR,
     PF_X, PF_W, PF_R,
     read_u16, read_u32,
     w16, w32, w64, write_bytes,
     parse_archive_members, parse_thin_archive_members, is_thin_archive,
     parse_linker_script_entries, LinkerScriptEntry,
     LinkerSymbolAddresses, get_standard_linker_symbols,
+    DT_NEEDED, DT_SONAME, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT,
+    DT_DEBUG, DT_PLTGOT, DT_PLTRELSZ, DT_PLTREL, DT_JMPREL,
+    DT_RELA, DT_RELASZ, DT_RELAENT, DT_GNU_HASH,
+    DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ,
+    DT_NULL, DT_RELACOUNT,
+    DT_FLAGS, DF_BIND_NOW, DT_FLAGS_1, DF_1_NOW,
 };
 
 use crate::backend::linker_common;

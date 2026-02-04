@@ -1882,4 +1882,88 @@ vld4q_u8(unsigned char const *__p)
     return __ret;
 }
 
+/* ================================================================== */
+/*           HORIZONTAL REDUCTION OPERATIONS                           */
+/* ================================================================== */
+
+/* vmaxvq_u8: horizontal max of all uint8x16_t lanes -> scalar uint8_t */
+static __inline__ unsigned char __attribute__((__always_inline__))
+vmaxvq_u8(uint8x16_t __a)
+{
+    unsigned char __ret = __a.__val[0];
+    for (int __i = 1; __i < 16; __i++)
+        if (__a.__val[__i] > __ret) __ret = __a.__val[__i];
+    return __ret;
+}
+
+/* vminvq_u8: horizontal min of all uint8x16_t lanes -> scalar uint8_t */
+static __inline__ unsigned char __attribute__((__always_inline__))
+vminvq_u8(uint8x16_t __a)
+{
+    unsigned char __ret = __a.__val[0];
+    for (int __i = 1; __i < 16; __i++)
+        if (__a.__val[__i] < __ret) __ret = __a.__val[__i];
+    return __ret;
+}
+
+/* vmaxvq_u32: horizontal max of all uint32x4_t lanes -> scalar uint32_t */
+static __inline__ unsigned int __attribute__((__always_inline__))
+vmaxvq_u32(uint32x4_t __a)
+{
+    unsigned int __ret = __a.__val[0];
+    for (int __i = 1; __i < 4; __i++)
+        if (__a.__val[__i] > __ret) __ret = __a.__val[__i];
+    return __ret;
+}
+
+/* ================================================================== */
+/*           SATURATING ARITHMETIC                                     */
+/* ================================================================== */
+
+/* vqsubq_u8: saturating subtract uint8x16_t (clamp at 0) */
+static __inline__ uint8x16_t __attribute__((__always_inline__))
+vqsubq_u8(uint8x16_t __a, uint8x16_t __b)
+{
+    uint8x16_t __ret;
+    for (int __i = 0; __i < 16; __i++)
+        __ret.__val[__i] = __a.__val[__i] > __b.__val[__i] ? __a.__val[__i] - __b.__val[__i] : 0;
+    return __ret;
+}
+
+/* vqaddq_u8: saturating add uint8x16_t (clamp at 255) */
+static __inline__ uint8x16_t __attribute__((__always_inline__))
+vqaddq_u8(uint8x16_t __a, uint8x16_t __b)
+{
+    uint8x16_t __ret;
+    for (int __i = 0; __i < 16; __i++) {
+        unsigned int __sum = (unsigned int)__a.__val[__i] + (unsigned int)__b.__val[__i];
+        __ret.__val[__i] = __sum > 255 ? 255 : (unsigned char)__sum;
+    }
+    return __ret;
+}
+
+/* ================================================================== */
+/*           ADDITIONAL COMPARISON OPERATIONS                          */
+/* ================================================================== */
+
+/* vceqq_u32: element-wise equality compare uint32x4_t */
+static __inline__ uint32x4_t __attribute__((__always_inline__))
+vceqq_u32(uint32x4_t __a, uint32x4_t __b)
+{
+    uint32x4_t __ret;
+    for (int __i = 0; __i < 4; __i++)
+        __ret.__val[__i] = (__a.__val[__i] == __b.__val[__i]) ? 0xFFFFFFFF : 0x00000000;
+    return __ret;
+}
+
+/* vceqq_u16: element-wise equality compare uint16x8_t */
+static __inline__ uint16x8_t __attribute__((__always_inline__))
+vceqq_u16(uint16x8_t __a, uint16x8_t __b)
+{
+    uint16x8_t __ret;
+    for (int __i = 0; __i < 8; __i++)
+        __ret.__val[__i] = (__a.__val[__i] == __b.__val[__i]) ? 0xFFFF : 0x0000;
+    return __ret;
+}
+
 #endif /* _ARM_NEON_H_INCLUDED */

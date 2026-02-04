@@ -160,14 +160,16 @@ pub const DT_INIT_ARRAYSZ: i64 = 27;
 pub const DT_FINI_ARRAYSZ: i64 = 28;
 pub const DT_RUNPATH: i64 = 29;
 pub const DT_FLAGS: i64 = 30;
+pub const DF_BIND_NOW: i64 = 8;
 pub const DT_PREINIT_ARRAY: i64 = 32;
 pub const DT_PREINIT_ARRAYSZ: i64 = 33;
+pub const DT_RELACOUNT: i64 = 0x6fff_fff9;
 pub const DT_GNU_HASH: i64 = 0x6fff_fef5;
 pub const DT_VERSYM: i64 = 0x6fff_fff0;
 pub const DT_VERNEED: i64 = 0x6fff_fffe;
 pub const DT_VERNEEDNUM: i64 = 0x6fff_ffff;
-pub const DT_RELACOUNT: i64 = 0x6fff_fff9;
 pub const DT_FLAGS_1: i64 = 0x6fff_fffb;
+pub const DF_1_NOW: i64 = 1;
 
 // ── ELF sizes ────────────────────────────────────────────────────────────────
 

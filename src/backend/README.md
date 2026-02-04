@@ -1088,7 +1088,7 @@ All four linker implementations handle:
 |-------------|-----------|-----------------|-----------------|
 | x86-64 | Dynamic | R_X86_64_64, PC32, PLT32, GOTPCREL, GOTTPOFF, TPOFF32 | PLT/GOT, TLS (IE-to-LE relaxation), copy relocations |
 | i686 | Dynamic | R_386_32, PC32, PLT32, GOTPC, GOTOFF, GOT32X, GOT32 | 32-bit ELF, `.rel` (not `.rela`) |
-| AArch64 | Static | ADR_PREL_PG_HI21, ADD_ABS_LO12_NC, CALL26, JUMP26, LDST* | IFUNC/IPLT support, IRELATIVE relocations, TLS |
+| AArch64 | Dynamic | ADR_PREL_PG_HI21, ADD_ABS_LO12_NC, CALL26, JUMP26, LDST*, ADR_GOT_PAGE | PLT/GOT, shared library output, IFUNC/IPLT, GLOB_DAT, copy relocations, TLS |
 | RISC-V | Dynamic | HI20, LO12_I, LO12_S, CALL, PCREL_HI20, GOT_HI20, BRANCH | Linker relaxation markers |
 
 ### Linker Files

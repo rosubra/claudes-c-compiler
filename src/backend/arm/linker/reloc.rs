@@ -192,7 +192,7 @@ fn tprel(s: u64, a: i64, tls_info: &TlsInfo) -> i64 {
 }
 
 /// Apply a single AArch64 relocation.
-fn apply_one_reloc(
+pub fn apply_one_reloc(
     out: &mut [u8],
     fp: usize,
     rtype: u32,
@@ -497,7 +497,7 @@ fn apply_one_reloc(
 
 // ── Instruction encoding helpers ───────────────────────────────────────
 
-fn encode_adrp(out: &mut [u8], fp: usize, imm: i64) {
+pub(super) fn encode_adrp(out: &mut [u8], fp: usize, imm: i64) {
     if fp + 4 > out.len() { return; }
     let mut insn = read_u32(out, fp);
     let immlo = (imm as u32) & 0x3;
@@ -506,7 +506,7 @@ fn encode_adrp(out: &mut [u8], fp: usize, imm: i64) {
     w32(out, fp, insn);
 }
 
-fn encode_adr(out: &mut [u8], fp: usize, offset: i64) {
+pub(super) fn encode_adr(out: &mut [u8], fp: usize, offset: i64) {
     if fp + 4 > out.len() { return; }
     let mut insn = read_u32(out, fp);
     let imm = offset as u32;
@@ -516,14 +516,14 @@ fn encode_adr(out: &mut [u8], fp: usize, offset: i64) {
     w32(out, fp, insn);
 }
 
-fn encode_add_imm12(out: &mut [u8], fp: usize, imm12: u32) {
+pub(super) fn encode_add_imm12(out: &mut [u8], fp: usize, imm12: u32) {
     if fp + 4 > out.len() { return; }
     let mut insn = read_u32(out, fp);
     insn = (insn & 0xffc003ff) | ((imm12 & 0xfff) << 10);
     w32(out, fp, insn);
 }
 
-fn encode_ldst_imm12(out: &mut [u8], fp: usize, lo12: u32, shift: u32) {
+pub(super) fn encode_ldst_imm12(out: &mut [u8], fp: usize, lo12: u32, shift: u32) {
     if fp + 4 > out.len() { return; }
     let mut insn = read_u32(out, fp);
     let imm12 = (lo12 >> shift) & 0xfff;
@@ -531,9 +531,10 @@ fn encode_ldst_imm12(out: &mut [u8], fp: usize, lo12: u32, shift: u32) {
     w32(out, fp, insn);
 }
 
-fn encode_movw(out: &mut [u8], fp: usize, imm16: u32) {
+pub(super) fn encode_movw(out: &mut [u8], fp: usize, imm16: u32) {
     if fp + 4 > out.len() { return; }
     let mut insn = read_u32(out, fp);
     insn = (insn & 0xffe0001f) | ((imm16 & 0xffff) << 5);
     w32(out, fp, insn);
 }
+

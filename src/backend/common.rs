@@ -236,15 +236,15 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                     );
                 }
             }
+            if config.expected_elf_machine == 183 {
+                return link_builtin_aarch64(
+                    object_files, output_path, user_args,
+                    is_nostdlib, is_static, is_shared,
+                );
+            }
             if !is_shared {
                 if config.expected_elf_machine == 3 {
                     return link_builtin_i686(
-                        object_files, output_path, user_args,
-                        is_nostdlib, is_static,
-                    );
-                }
-                if config.expected_elf_machine == 183 {
-                    return link_builtin_aarch64(
                         object_files, output_path, user_args,
                         is_nostdlib, is_static,
                     );
@@ -254,7 +254,7 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
 
         if is_shared {
             return Err(format!(
-                "Shared library linking (-shared) is only supported for x86-64. \
+                "Shared library linking (-shared) is only supported for x86-64, AArch64, and RISC-V. \
                  Target '{}' requires the gcc_linker feature. \
                  Rebuild with: cargo build --features gcc_linker",
                 config.arch_name
@@ -749,24 +749,44 @@ pub(crate) fn link_builtin_i686(
 /// Link using the built-in native AArch64 ELF linker.
 ///
 /// Parallel to `link_builtin_x86`: uses `DIRECT_LD_AARCH64` for CRT/library
-/// discovery, then delegates to the AArch64 native static linker.
+/// discovery, then delegates to the AArch64 native linker.
+/// Supports static linking, dynamic linking, and shared library output (-shared).
 #[allow(dead_code)]
 pub(crate) fn link_builtin_aarch64(
     object_files: &[&str],
     output_path: &str,
     user_args: &[String],
     is_nostdlib: bool,
-    _is_static: bool, // AArch64 builtin linker always produces static output
+    is_static: bool,
+    is_shared: bool,
 ) -> Result<(), String> {
     use crate::backend::arm::linker;
 
-    // AArch64 builtin linker is always static, so force crtbeginT.o
-    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_AARCH64, user_args, is_nostdlib, true);
+    if is_shared {
+        // Shared libraries: no CRT objects, no default libs (like -nostdlib).
+        let setup = resolve_builtin_link_setup(&DIRECT_LD_AARCH64, user_args, true, false);
+        let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+        return linker::link_shared(
+            object_files,
+            output_path,
+            user_args,
+            &lib_path_refs,
+        );
+    }
 
-    // AArch64 static linking needs gcc_eh for exception handling (unwinding)
+    let mut setup = resolve_builtin_link_setup(&DIRECT_LD_AARCH64, user_args, is_nostdlib, is_static);
+
+    // AArch64 linking needs gcc_eh for exception handling (unwinding) when static,
+    // or gcc_s when dynamic
     if !is_nostdlib {
-        if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
-            setup.needed_libs.insert(pos + 1, "gcc_eh".to_string());
+        if is_static {
+            if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
+                setup.needed_libs.insert(pos + 1, "gcc_eh".to_string());
+            }
+        } else {
+            if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
+                setup.needed_libs.insert(pos + 1, "gcc_s".to_string());
+            }
         }
     }
 
@@ -783,6 +803,7 @@ pub(crate) fn link_builtin_aarch64(
         &needed_lib_refs,
         &crt_before_refs,
         &crt_after_refs,
+        is_static,
     )
 }
 

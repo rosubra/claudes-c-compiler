@@ -21,6 +21,7 @@ use crate::common::symbol_table::{Symbol, SymbolTable};
 use crate::common::type_builder;
 use crate::common::types::{AddressSpace, CType, FunctionType, StructLayout};
 use crate::frontend::parser::ast::{
+    BinOp,
     BlockItem,
     CompoundStmt,
     Declaration,
@@ -1312,9 +1313,14 @@ impl SemanticAnalyzer {
                     self.analyze_expr(arg);
                 }
             }
-            Expr::BinaryOp(_, lhs, rhs, _) => {
+            Expr::BinaryOp(op, lhs, rhs, span) => {
                 self.analyze_expr(lhs);
                 self.analyze_expr(rhs);
+                // Check pointer subtraction type compatibility (C11 6.5.6p3):
+                // both operands must point to compatible types.
+                if *op == BinOp::Sub {
+                    self.check_pointer_subtraction_compat(lhs, rhs, *span);
+                }
             }
             Expr::UnaryOp(_, operand, _) => {
                 self.analyze_expr(operand);
@@ -1507,6 +1513,73 @@ impl SemanticAnalyzer {
                 format!("'{}' has no member named '{}'", type_name, field_name),
                 span,
             );
+        }
+    }
+
+    /// Check that pointer subtraction operands have compatible pointee types.
+    /// C11 6.5.6p3: both operands must point to compatible types.
+    /// Emits an error if both operands are pointers to different struct/union types.
+    fn check_pointer_subtraction_compat(&self, lhs: &Expr, rhs: &Expr, span: Span) {
+        let checker = super::type_checker::ExprTypeChecker {
+            symbols: &self.symbol_table,
+            types: &self.result.type_context,
+            functions: &self.result.functions,
+            expr_types: Some(&self.result.expr_types),
+        };
+        let lct = match checker.infer_expr_ctype(lhs) {
+            Some(ct) => ct,
+            None => return,
+        };
+        let rct = match checker.infer_expr_ctype(rhs) {
+            Some(ct) => ct,
+            None => return,
+        };
+        // Extract pointee types; only check when both sides are pointers
+        let (l_inner, r_inner) = match (&lct, &rct) {
+            (CType::Pointer(li, _), CType::Pointer(ri, _)) => (li.as_ref(), ri.as_ref()),
+            (CType::Array(li, _), CType::Pointer(ri, _)) => (li.as_ref(), ri.as_ref()),
+            (CType::Pointer(li, _), CType::Array(ri, _)) => (li.as_ref(), ri.as_ref()),
+            _ => return, // Not both pointers; not a ptr-ptr subtraction
+        };
+        // void* is compatible with any pointer for subtraction purposes
+        if matches!(l_inner, CType::Void) || matches!(r_inner, CType::Void) {
+            return;
+        }
+        // Check if pointee types are compatible
+        if !Self::pointee_types_compatible(l_inner, r_inner) {
+            self.diagnostics.borrow_mut().error(
+                format!(
+                    "invalid operands to binary - (have '{}' and '{}')",
+                    lct, rct
+                ),
+                span,
+            );
+        }
+    }
+
+    /// Check if two pointee types are compatible for pointer arithmetic.
+    /// This is a simplified check: types are compatible if they are structurally
+    /// the same (ignoring qualifiers at the top level).
+    fn pointee_types_compatible(a: &CType, b: &CType) -> bool {
+        match (a, b) {
+            // Same struct/union name -> compatible
+            (CType::Struct(ka), CType::Struct(kb)) => ka == kb,
+            (CType::Union(ka), CType::Union(kb)) => ka == kb,
+            // Pointers: recurse on pointee types
+            (CType::Pointer(pa, _), CType::Pointer(pb, _)) => {
+                Self::pointee_types_compatible(pa, pb)
+            }
+            // Arrays: compare element types
+            (CType::Array(ea, _), CType::Array(eb, _)) => {
+                Self::pointee_types_compatible(ea, eb)
+            }
+            // Function types: just check broad compatibility
+            (CType::Function(_), CType::Function(_)) => {
+                // Simplification: treat all function pointers as compatible
+                true
+            }
+            // For basic types, use equality (ignoring qualifiers)
+            _ => a == b,
         }
     }
 

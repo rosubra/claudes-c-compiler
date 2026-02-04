@@ -3,17 +3,18 @@
 ## Overview
 
 The built-in AArch64 linker links ELF64 relocatable object files (`.o`) and
-static archives (`.a`) into statically-linked ELF64 executables for AArch64
-Linux.  It replaces the external `ld` dependency when
-the `gcc_linker` Cargo feature is not enabled (the default), making the
+static archives (`.a`) into ELF64 executables for AArch64 Linux, supporting
+both static and dynamic linking.  It can also produce shared libraries
+(`ET_DYN` / `.so` files) via `link_shared()`.  It replaces the external `ld`
+dependency when the `gcc_linker` Cargo feature is not enabled (the default), making the
 compiler fully self-hosting.
 
-The linker implements the complete static linking pipeline: ELF object parsing,
+The linker implements the complete linking pipeline: ELF object parsing,
 archive member extraction, symbol resolution, section merging, virtual address
-layout, GOT construction, TLS handling, IFUNC support, relocation application,
-and final ELF executable emission.
+layout, GOT/PLT construction, TLS handling, IFUNC support, relocation
+application, dynamic section emission, and final ELF output.
 
-The implementation spans roughly 2,060 lines of Rust across three files.
+The implementation spans roughly 4,000 lines of Rust across three files.
 
 ```
              AArch64 Built-in Linker
@@ -23,7 +24,7 @@ The implementation spans roughly 2,060 lines of Rust across three files.
        \           |           /
         v          v          v
   +------------------------------------------+
-  |           elf.rs  (~70 lines)            |
+  |           elf.rs  (~75 lines)            |
   |   Type aliases + thin wrappers to        |
   |   linker_common; AArch64 reloc consts    |
   +------------------------------------------+
@@ -31,16 +32,16 @@ The implementation spans roughly 2,060 lines of Rust across three files.
                |  Vec<ElfObject>, HashMap<String, GlobalSymbol>
                v
   +------------------------------------------+
-  |           mod.rs  (1,105 lines)          |
+  |           mod.rs  (~3,460 lines)         |
   |   Orchestrator: file loading, archive    |
   |   resolution, section merging, layout,   |
-  |   GOT/IPLT construction, ELF emission   |
+  |   GOT/PLT/IPLT, dynamic/shared emission |
   +------------------------------------------+
                |
                |  output buffer + section map
                v
   +------------------------------------------+
-  |           reloc.rs  (526 lines)          |
+  |           reloc.rs  (~540 lines)         |
   |   Relocation Application: 30+ reloc     |
   |   types, TLS relaxation, GOT refs       |
   +------------------------------------------+
@@ -515,12 +516,14 @@ The special `-l:filename` syntax searches for an exact filename.
 
 ## Design Decisions and Trade-offs
 
-### 1. Static Linking Only
+### 1. Static and Dynamic Linking
 
-The linker produces static executables (`ET_EXEC`) with no dynamic linking
-support.  This simplifies the implementation significantly -- no `.dynamic`
-section, no PLT/GOT lazy binding, no `DT_*` tags, no `.interp` section.
-Shared libraries (`.so` files) are silently skipped.
+The linker supports both static executables (`ET_EXEC`, the default with
+`-static`) and dynamically-linked executables with PLT/GOT, `.dynamic`
+section, `DT_*` tags, `.interp`, `.gnu.hash`, and copy relocations.  It
+also produces shared libraries (`ET_DYN`) with `R_AARCH64_RELATIVE`,
+`R_AARCH64_JUMP_SLOT`, and `R_AARCH64_GLOB_DAT` relocations, enabling
+full `dlopen()` support (e.g., PostgreSQL extension modules).
 
 ### 2. Two-Segment Layout
 
@@ -582,7 +585,7 @@ invaluable for debugging linking failures.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | 1,105 | Public API, file loading, archive handling, CRT discovery, section merging, address layout, GOT/IPLT construction, ELF executable emission |
-| `elf.rs` | ~70 | AArch64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing |
-| `reloc.rs` | 526 | Relocation application (30+ types), TLS relaxation, GOT/TLS-IE references, instruction field patching helpers |
-| **Total** | **~1,700** | |
+| `mod.rs` | ~3,460 | Public API, file loading, archive handling, CRT discovery, section merging, address layout, GOT/PLT/IPLT construction, static/dynamic executable emission, shared library emission |
+| `elf.rs` | ~75 | AArch64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing |
+| `reloc.rs` | ~540 | Relocation application (30+ types), TLS relaxation, GOT/TLS-IE references, instruction field patching helpers |
+| **Total** | **~4,075** | |

@@ -1,2 +1,0 @@
-Fixing lynx project to compile and pass tests with ccc compilers.
-Working on diagnosing and fixing any issues with the lynx web browser build.
