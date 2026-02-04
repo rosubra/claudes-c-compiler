@@ -56,20 +56,20 @@ All files live under `src/backend/riscv/codegen/`.
 | `emit.rs` | Core `RiscvCodegen` struct, register constants, operand load/store helpers (`operand_to_t0`, `store_t0_to`), 12-bit immediate check, large-offset helpers, `ArchCodegen` trait implementation, switch/jump-table emission. |
 | `prologue.rs` | Stack space calculation, register allocator invocation, prologue/epilogue emission (small-frame, large-frame, stack-probing paths), parameter classification and storage, variadic register save area setup. |
 | `calls.rs` | Outgoing call ABI: `CallAbiConfig` for LP64D, stack argument marshalling, GP/FP register argument staging (three-phase strategy using t3/t4/t5), F128 and i128 register-pair argument loading, call instruction emission, result retrieval. |
-| `memory.rs` | Load, store, and memcpy operations. Slot addressing (direct s0-relative, indirect through pointer, over-aligned alloca). GEP (get-element-pointer) with constant and variable offsets. |
-| `alu.rs` | Integer and floating-point arithmetic: binary operations (`add`/`addw`, `sub`/`subw`, `mul`/`mulw`, `div`/`divw`, shifts, bitwise), unary negation, bitwise NOT, i128 copy. Selects 32-bit `*w` instruction variants for I32/U32 types. |
-| `float_ops.rs` | Floating-point binary operations (`fadd`, `fsub`, `fmul`, `fdiv`) for F32 and F64, using `fmv.w.x`/`fmv.d.x` to move between GP and FP registers. F128 binary ops dispatch to soft-float libcalls. F128 negation (sign-bit flip). |
+| `memory.rs` | Load, store, and memcpy operations. Slot addressing (direct s0-relative, indirect through pointer, over-aligned alloca). GEP (get-element-pointer) with constant offsets (variable-offset GEP uses the shared trait default in `traits.rs`). Dynamic stack allocation helpers (`alloca` round-up, sp manipulation). |
+| `alu.rs` | Integer arithmetic: binary operations (`add`/`addw`, `sub`/`subw`, `mul`/`mulw`, `div`/`divw`/`divu`/`divuw`, `rem`/`remw`/`remu`/`remuw`, shifts, bitwise), unary negation, bitwise NOT, i128 copy. Selects 32-bit `*w` instruction variants for I32/U32 types. |
+| `float_ops.rs` | Floating-point binary operations (`fadd`, `fsub`, `fmul`, `fdiv`) for F32 and F64, using `fmv.w.x`/`fmv.d.x` (GP-to-FP) and `fmv.x.w`/`fmv.x.d` (FP-to-GP) to move between register files. F128 binary ops dispatch to soft-float libcalls. F128 negation (sign-bit flip). |
 | `comparison.rs` | Integer comparisons (via `slt`/`sltu`/`seqz`/`snez`), float comparisons (via `feq`/`flt`/`fle`), fused compare-and-branch (inverted branch + jump), select (`beqz`-based conditional move), F128 comparisons via libcalls. |
 | `cast_ops.rs` | Type conversions: integer widening/narrowing via `slli`/`srai`/`srli`/`andi`, float-to-int via `fcvt.l.d`/`fcvt.lu.d`, int-to-float via `fcvt.d.l`/`fcvt.s.l`, float-to-float via `fcvt.d.s`/`fcvt.s.d`, U32-to-I32 sign extension. |
 | `i128_ops.rs` | 128-bit integer arithmetic (add with carry, subtract with borrow, multiply, shifts with boundary cases), 128-bit comparisons (high-word-first cascade), div/rem via `__divti3`/`__modti3` libcalls, i128-to-float and float-to-i128 conversions via compiler-rt libcalls. |
 | `f128.rs` | `F128SoftFloat` trait implementation for RISC-V. Provides the arch-specific primitives (GP register pair `a0:a1` representation, `fmv.d.x`/`fmv.x.d` move instructions, s0-relative addressing) consumed by the shared F128 orchestration in `backend/f128_softfloat.rs`. |
 | `atomics.rs` | Atomic load, store, RMW, and CAS. Word/doubleword atomics via AMO instructions (`amoadd`, `amoswap`, `amoand`, etc.) and LR/SC loops (for NAND). Sub-word (8/16-bit) atomics via word-aligned LR.W/SC.W with bit masking. Software CLZ, CTZ, BSWAP, POPCOUNT. |
-| `intrinsics.rs` | Hardware intrinsics (`fsqrt`, `fabs`, `fence`, `fence.tso`), software CRC32C, `__builtin_frame_address`, `__builtin_return_address`, thread pointer (`tp`). Software SSE-equivalent 128-bit SIMD: byte compare, dword compare, saturating subtract, bitwise OR/AND/XOR, pmovmskb, byte/dword splat. |
+| `intrinsics.rs` | Hardware intrinsics (`fsqrt.{s,d}`, `fabs.{s,d}`, `fence`, `fence.tso`), software CRC32C, `__builtin_frame_address`, `__builtin_return_address`, thread pointer (`tp`). Software SSE-equivalent 128-bit SIMD: byte compare, dword compare, unsigned and signed saturating subtract, bitwise OR/AND/XOR, pmovmskb, byte/dword splat. |
 | `inline_asm.rs` | Constraint classification (`RvConstraintKind`), operand formatting for `%0`/`%[name]`/`%z` substitution, `%lo`/`%hi` modifier pass-through, template line substitution. |
 | `asm_emitter.rs` | `InlineAsmEmitter` trait implementation: scratch register allocation from t0-t6/a2-a7 (GP) and ft0-ft7 (FP), operand loading/storing with register-allocation awareness, memory operand resolution, RISC-V-specific immediate constraint validation (`I` = 12-bit signed, `K` = 5-bit CSR). |
 | `globals.rs` | Global symbol address loading: `lla` (PC-relative `auipc`+`addi`) for local symbols, `la` (GOT-indirect `auipc`+`ld`) for PIC externals, TLS Local Exec model (`lui`/`add tp`/`addi` with `%tprel_hi`/`%tprel_add`/`%tprel_lo`). |
 | `variadic.rs` | `va_arg` (load next 8-byte arg from va_list pointer, with 16-byte-aligned F128 handling), `va_start` (initialize va_list to point past named register args), `va_copy` (pointer copy). |
-| `returns.rs` | Return value marshalling: integer via `a0`, F32 via `fa0` (`fmv.w.x`), F64 via `fa0` (`fmv.d.x`), i128 via `a0:a1`, F128 via `a0:a1` (after `__extenddftf2`), struct second-field returns via `fa1`. |
+| `returns.rs` | Return value marshalling: integer via `a0`, F32 via `fa0` (`fmv.w.x`), F64 via `fa0` (`fmv.d.x`), i128 via `a0:a1`, F128 via `a0:a1` (full 128-bit loaded directly; the shared trait path uses `__extenddftf2`), struct second-field returns via `fa1`. |
 | `peephole.rs` | Multi-pass peephole optimizer operating on assembly text lines. |
 | `mod.rs` | Module declarations linking all codegen submodules. |
 
@@ -120,7 +120,7 @@ RV64GC hardware with double-precision float support.
 
 - Scalars in `a0` (integer) or `fa0` (float/double).
 - i128 in `a0:a1`.
-- F128 in `a0:a1` (GP register pair, same as argument passing).
+- F128 in `a0:a1` (GP register pair, full 128-bit precision loaded directly).
 - F32 return via `fmv.w.x fa0, t0`; F64 via `fmv.d.x fa0, t0`.
 - Struct returns with two float fields may use `fa0`:`fa1`.
 
@@ -138,6 +138,7 @@ CallAbiConfig {
     use_sysv_struct_classification: false,
     use_riscv_float_struct_classification: true,
     allow_struct_split_reg_stack: true,
+    align_struct_pairs: true,
 }
 ```
 
@@ -218,7 +219,8 @@ register allocation and enormous stack frames (4KB+), causing stack overflows.
 ### Value Selection
 
 Values assigned to registers skip stack slot allocation entirely. The
-`operand_to_t0` function checks `reg_assignments` first and emits a simple
+`operand_to_t0` function first checks `reg_cache` (to skip the load if `t0`
+already holds the value), then checks `reg_assignments` and emits a simple
 `mv t0, sN` when the value lives in a register, instead of a memory load.
 Similarly, `store_t0_to` writes back to the callee-saved register with
 `mv sN, t0`. Callee-saved registers used by the allocator are saved in the
@@ -315,10 +317,10 @@ to ensure the kernel grows the stack mapping. Without probing, a single large
 
 The prologue has three code paths depending on frame size:
 
-1. **Small frame** (total allocation fits in 12-bit signed immediate): single
-   `addi sp, sp, -N`, then `sd ra`/`sd s0`/`addi s0` all using immediate
-   offsets.
-2. **Large frame** (over 2047 but under 4096): `li t0, N; sub sp, sp, t0`,
+1. **Small frame** (total allocation fits in 12-bit signed immediate, i.e.
+   <= 2047): single `addi sp, sp, -N`, then `sd ra`/`sd s0`/`addi s0` all
+   using immediate offsets.
+2. **Large frame** (2048 through 4096 inclusive): `li t0, N; sub sp, sp, t0`,
    then compute `s0 = sp + frame_size` via `li`/`add`.
 3. **Very large frame** (over 4096): stack probing loop followed by the
    large-frame setup.
@@ -333,12 +335,16 @@ Allocas with alignment greater than 8 bytes get extra padding in their stack
 slot. The address is dynamically aligned at use sites:
 
 ```asm
-    addi dest, s0, <offset>
+    addi t5, s0, <offset>
     li   t6, <align - 1>
-    add  dest, dest, t6
+    add  t5, t5, t6
     li   t6, -<align>
-    and  dest, dest, t6     # dest = (s0 + offset + align-1) & -align
+    and  t5, t5, t6         # t5 = (s0 + offset + align-1) & -align
 ```
+
+A variant (`emit_alloca_aligned_addr_to_acc`) computes the result into `t0`
+instead of `t5`, for use when the aligned address is needed in the
+accumulator.
 
 ---
 
@@ -488,12 +494,13 @@ accumulator pair, and `t3:t4` / `t5:t6` for binary operation operands.
 
 ### Constant Shifts
 
-Shift amounts known at compile time are expanded to straight-line code
-without branches, handling three cases:
+Shift amounts known at compile time (masked to 0..127) are expanded to
+straight-line code without branches, handling four cases:
 
 - **amount = 0**: simple move.
 - **amount = 64**: move one half to the other, zero/sign-extend.
-- **1..63 or 65..127**: `slli`/`srli`/`srai` with complementary shift and
+- **amount > 64** (65..127): shift the single relevant half by `amount - 64`.
+- **amount 1..63**: `slli`/`srli`/`srai` with complementary shift and
   `or` to combine bits crossing the 64-bit boundary.
 
 ### Division and Conversion Libcalls
@@ -598,6 +605,16 @@ the SC source register (`t4`) per the RISC-V specification.
 | `pause` | `fence.tso` | Spin-wait hint |
 | `clflush` | `fence iorw, iorw` | Best-effort approximation (no direct equivalent) |
 
+Additionally, `atomics.rs` provides ordering-based fences for atomic
+operations (distinct from the x86-named intrinsics above):
+
+| Ordering | Instruction |
+|----------|-------------|
+| Relaxed | (none) |
+| Acquire | `fence r, rw` |
+| Release | `fence rw, w` |
+| AcqRel / SeqCst | `fence rw, rw` |
+
 ---
 
 ## Software SIMD Emulation
@@ -615,6 +632,7 @@ All 128-bit vectors are represented as pairs of 64-bit values in memory.
 | `_mm_cmpeq_epi8` | XOR corresponding halves, detect zero bytes using SWAR formula `(x - 0x0101...) & ~x & 0x8080...`, expand 0x80 to 0xFF via shift-or cascade. |
 | `_mm_cmpeq_epi32` | Extract and compare each 32-bit lane independently using `sub`/`snez`/`neg`/`not`, producing 0xFFFFFFFF (equal) or 0x00000000 (not equal). |
 | `_mm_subs_epu8` | Per-byte unsigned saturating subtract: extract each byte with `srli`/`andi`, compare with `bltu`, subtract, accumulate with `slli`/`or`. |
+| `_mm_subs_epi8` | Per-byte signed saturating subtract: extract each byte with sign-extension, subtract, clamp to [-128, 127], mask to 8 bits, accumulate. |
 | `_mm_movemask_epi8` | Extract bit 7 of each of 16 bytes into a 16-bit integer mask using shift-and-OR accumulation. |
 | `_mm_set1_epi8` | Byte splat: `val & 0xFF` multiplied by `0x0101010101010101`, stored to both halves. |
 | `_mm_set1_epi32` | Dword splat: `(val << 32) | val`, stored to both halves. |
@@ -634,7 +652,8 @@ are expected to be dead-code eliminated in cross-compiled code behind
 
 The backend provides software implementations of GCC/Clang builtins that
 have no corresponding RISC-V instructions in the base ISA (absent the Zbb
-extension):
+extension). These implementations live in `atomics.rs` alongside the atomic
+operations, while CRC32C lives in `intrinsics.rs`:
 
 ### CLZ (Count Leading Zeros)
 
@@ -682,9 +701,9 @@ The result is zero-extended to 32 bits.
 | `A` | `Address` | Address for AMO/LR/SC, formatted as `(reg)` |
 | `I` | `Immediate` | 12-bit signed immediate (-2048..2047) |
 | `i`, `n` | `Immediate` | Any integer constant |
-| `K` | `Immediate` | 5-bit unsigned CSR immediate (0..31) |
+| `K` | `GpReg` | 5-bit unsigned CSR immediate (0..31); classified as GpReg in `classify_rv_constraint`, with the 5-bit range check in `constant_fits_immediate` |
 | `J`, `rJ` | `ZeroOrReg` | `zero` register if value is 0, else GP register |
-| `{s3}`, `a0`, etc. | `Specific` | Named register |
+| `{s3}`, `a0`, etc. | `Specific` | Named register (brace syntax `{reg}` is parsed in `asm_emitter.rs`; bare register names like `a0` are handled in `inline_asm.rs`) |
 | `0`, `1`, etc. | `Tied` | Tied to output operand N |
 
 ### Template Substitution
@@ -779,6 +798,7 @@ LineKind
 | 6 | **Global store forwarding** | Tracks slot-to-register mappings within basic blocks. When a load reads a slot whose value is known to be in a register, the load is replaced with a register move (or eliminated if same register). Mappings are invalidated at calls, labels, and instructions that clobber the tracked register. |
 | 7 | **Register copy propagation** | After store forwarding creates moves, propagates `mv dst, src` into the next instruction's source operand fields. `lla`/`la` instructions are protected from propagation since symbol names may contain register-like substrings (e.g., `main.s1.0`). |
 | 8 | **Global dead store elimination** | Removes stores to stack slots that are never loaded anywhere in the function. Scans all lines for load instructions and builds a set of "live" offsets; stores to other offsets are deleted. |
+| 9 | **Dead register move elimination** | Removes `mv sN, t0` moves where the destination callee-saved register is never read before being overwritten. Applied in global and cleanup passes. |
 
 ---
 
@@ -868,10 +888,11 @@ the base ISA.
 ### 32-bit Instruction Variants
 
 For I32/U32 types, the backend selects the `*w` instruction variants
-(`addw`, `subw`, `mulw`, `divw`, `sllw`, `srlw`, `sraw`, etc.) that operate
-on the lower 32 bits and sign-extend the result to 64 bits. This matches
-the RISC-V convention that I32 values are always held sign-extended in 64-bit
-registers.
+(`addw`, `subw`, `mulw`, `divw`, `divuw`, `remw`, `remuw`, `sllw`, `srlw`,
+`sraw`) that operate on the lower 32 bits and sign-extend the result to 64
+bits. This matches the RISC-V convention that I32 values are always held
+sign-extended in 64-bit registers. Bitwise operations (`and`, `or`, `xor`)
+have no `*w` variants in the ISA and operate on the full 64 bits.
 
 ### Jump Tables with PC-relative Offsets
 
