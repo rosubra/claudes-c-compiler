@@ -245,10 +245,10 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         // Loads/stores - size determined from register width
         "ldr" => encode_ldr_str_auto(operands, true),
         "str" => encode_ldr_str_auto(operands, false),
-        "ldrb" => encode_ldr_str(operands, true, 0b00, false), // byte load
-        "strb" => encode_ldr_str(operands, false, 0b00, false),
-        "ldrh" => encode_ldr_str(operands, true, 0b01, false), // halfword load
-        "strh" => encode_ldr_str(operands, false, 0b01, false),
+        "ldrb" => encode_ldr_str(operands, true, 0b00, false, false), // byte load
+        "strb" => encode_ldr_str(operands, false, 0b00, false, false),
+        "ldrh" => encode_ldr_str(operands, true, 0b01, false, false), // halfword load
+        "strh" => encode_ldr_str(operands, false, 0b01, false, false),
         "ldrw" | "ldrsw" => encode_ldrsw(operands),
         "ldrsb" => encode_ldrs(operands, 0b00),
         "ldrsh" => encode_ldrs(operands, 0b01),
@@ -1428,15 +1428,16 @@ fn encode_ldr_str_auto(operands: &[Operand], is_load: bool) -> Result<EncodeResu
     } else if reg_name.starts_with('d') {
         0b11 // 64-bit float
     } else if reg_name.starts_with('q') {
-        0b00 // 128-bit (special encoding with V=1)
+        0b00 // 128-bit: size=00 with opc adjustment in encode_ldr_str
     } else {
         0b11 // default 64-bit
     };
 
-    encode_ldr_str(operands, is_load, size, false)
+    let is_128bit = reg_name.starts_with('q');
+    encode_ldr_str(operands, is_load, size, false, is_128bit)
 }
 
-fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: bool) -> Result<EncodeResult, String> {
+fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: bool, is_128bit: bool) -> Result<EncodeResult, String> {
     if operands.len() < 2 {
         return Err("ldr/str requires at least 2 operands".to_string());
     }
@@ -1456,8 +1457,11 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
 
             // Unsigned offset encoding
             // Size determines the shift for offset alignment
-            let shift = actual_size as u32;
-            let opc = if is_load {
+            // For 128-bit Q registers: shift=4, opc=11 (load) or 10 (store)
+            let shift = if is_128bit { 4 } else { actual_size as u32 };
+            let opc = if is_128bit {
+                if is_load { 0b11 } else { 0b10 }
+            } else if is_load {
                 if is_signed { 0b10 } else { 0b01 }
             } else {
                 0b00
@@ -1478,7 +1482,9 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
 
             // Unscaled offset (LDUR/STUR form)
             let imm9 = (*offset as i32) & 0x1FF;
-            let opc = if is_load {
+            let opc = if is_128bit {
+                if is_load { 0b11 } else { 0b10 }
+            } else if is_load {
                 if is_signed { 0b10 } else { 0b01 }
             } else {
                 0b00
@@ -1492,7 +1498,9 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
         Some(Operand::MemPreIndex { base, offset }) => {
             let rn = parse_reg_num(base).ok_or("invalid base reg")?;
             let imm9 = (*offset as i32) & 0x1FF;
-            let opc = if is_load { 0b01 } else { 0b00 };
+            let opc = if is_128bit {
+                if is_load { 0b11 } else { 0b10 }
+            } else if is_load { 0b01 } else { 0b00 };
             let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (0b00 << 24) | (opc << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b11 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
@@ -1502,7 +1510,9 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
         Some(Operand::MemPostIndex { base, offset }) => {
             let rn = parse_reg_num(base).ok_or("invalid base reg")?;
             let imm9 = (*offset as i32) & 0x1FF;
-            let opc = if is_load { 0b01 } else { 0b00 };
+            let opc = if is_128bit {
+                if is_load { 0b11 } else { 0b10 }
+            } else if is_load { 0b01 } else { 0b00 };
             let word = (actual_size << 30) | (0b111 << 27) | (v << 26) | (0b00 << 24) | (opc << 22)
                 | ((imm9 as u32 & 0x1FF) << 12) | (0b01 << 10) | (rn << 5) | rt;
             return Ok(EncodeResult::Word(word));
@@ -1529,16 +1539,22 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
                     (sym.to_string(), 0i64)
                 };
 
-                let opc = if is_load { 0b01 } else { 0b00 };
+                let opc = if is_128bit {
+                    if is_load { 0b11 } else { 0b10 }
+                } else if is_load { 0b01 } else { 0b00 };
 
                 let reloc_type = match kind {
                     "lo12" => {
-                        match actual_size {
-                            0b00 => RelocType::Ldst8AbsLo12,
-                            0b01 => RelocType::Ldst16AbsLo12,
-                            0b10 => RelocType::Ldst32AbsLo12,
-                            0b11 => RelocType::Ldst64AbsLo12,
-                            _ => RelocType::Ldst64AbsLo12,
+                        if is_128bit {
+                            RelocType::Ldst128AbsLo12
+                        } else {
+                            match actual_size {
+                                0b00 => RelocType::Ldst8AbsLo12,
+                                0b01 => RelocType::Ldst16AbsLo12,
+                                0b10 => RelocType::Ldst32AbsLo12,
+                                0b11 => RelocType::Ldst64AbsLo12,
+                                _ => RelocType::Ldst64AbsLo12,
+                            }
                         }
                     }
                     "got_lo12" => RelocType::Ld64GotLo12,
@@ -1559,7 +1575,9 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
 
             let rn = parse_reg_num(base).ok_or("invalid base reg")?;
             let rm = parse_reg_num(index).ok_or("invalid index reg")?;
-            let opc = if is_load { 0b01 } else { 0b00 };
+            let opc = if is_128bit {
+                if is_load { 0b11 } else { 0b10 }
+            } else if is_load { 0b01 } else { 0b00 };
             // Register offset: size 111 V opc 1 Rm option S 10 Rn Rt
             // Determine option and S from extend/shift specifiers
             let is_w_index = index.starts_with('w') || index.starts_with('W');
