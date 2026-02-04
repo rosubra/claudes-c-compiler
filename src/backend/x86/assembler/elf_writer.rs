@@ -48,6 +48,8 @@ struct OrgInfo {
     base_label: String,
     /// The offset from the base label (org target = label_pos + base_offset).
     base_offset: i64,
+    /// The number of fill bytes inserted during the initial pass.
+    original_padding: usize,
 }
 
 /// Tracks a section being built.
@@ -408,15 +410,16 @@ impl ElfWriter {
                         return Err(format!(".org: unknown symbol {}", sym));
                     };
                     // Record org region for post-relaxation fixup (always, even if no padding needed now)
+                    let padding = if target > current { (target - current) as usize } else { 0 };
                     if !sym.is_empty() {
                         self.sections[sec_idx].org_regions.push(OrgInfo {
                             data_offset: current as usize,
                             base_label: sym.clone(),
                             base_offset: *offset,
+                            original_padding: padding,
                         });
                     }
-                    if target > current {
-                        let padding = (target - current) as usize;
+                    if padding > 0 {
                         let fill = if self.sections[sec_idx].flags & SHF_EXECINSTR != 0 { 0x90u8 } else { 0u8 };
                         self.sections[sec_idx].data.extend(std::iter::repeat_n(fill, padding));
                     }
@@ -1291,12 +1294,19 @@ impl ElfWriter {
 
         // Process from first to last. When we insert/remove bytes for an
         // org region, it shifts all subsequent regions' positions. We update
-        // their data_offsets accordingly so the next iteration uses correct values.
+        // their data_offsets accordingly.
+        //
+        // data_offset is where the .org padding begins in the section data.
+        // original_padding is how many fill bytes were inserted during the initial pass.
+        // After jump relaxation, data_offset shifts (tracked by relax_jumps),
+        // and the base label may have moved, changing the needed padding.
+        // The actual fill bytes in the data still have their original_padding count.
         for org_idx in 0..org_count {
             let org = &self.sections[sec_idx].org_regions[org_idx];
             let base_label = org.base_label.clone();
             let base_offset = org.base_offset;
             let data_offset = org.data_offset;
+            let current_padding = org.original_padding;
 
             // Look up the (post-relaxation) position of the base label
             let label_pos = if let Some(&(lbl_sec, lbl_off)) = self.label_positions.get(base_label.as_str()) {
@@ -1310,50 +1320,45 @@ impl ElfWriter {
 
             let target = (label_pos as i64 + base_offset) as usize;
 
-            if data_offset == target {
-                // Already at the right position, no adjustment needed
-                continue;
-            }
-
             let is_exec = self.sections[sec_idx].flags & SHF_EXECINSTR != 0;
             let fill_byte: u8 = if is_exec { 0x90 } else { 0x00 };
 
-            if data_offset > target {
-                // Current position is past the target. We need to remove
-                // NOP padding bytes before this point to move it back.
-                let excess = data_offset - target;
-                let data = &self.sections[sec_idx].data;
+            // The needed padding is target - data_offset (if target > data_offset)
+            let needed_padding = if target > data_offset {
+                target - data_offset
+            } else {
+                0
+            };
 
-                // Count how many consecutive fill bytes precede data_offset
-                let mut nop_count = 0;
-                while nop_count < data_offset && data[data_offset - 1 - nop_count] == fill_byte {
-                    nop_count += 1;
-                }
+            if current_padding == needed_padding {
+                continue;
+            }
 
-                if nop_count >= excess {
-                    // Remove `excess` NOP bytes from right before data_offset
-                    let remove_start = data_offset - excess;
-                    self.sections[sec_idx].data.drain(remove_start..data_offset);
+            if current_padding > needed_padding {
+                // Too much padding - remove excess fill bytes
+                let excess = current_padding - needed_padding;
+                let remove_start = data_offset + needed_padding;
+                self.sections[sec_idx].data.drain(remove_start..remove_start + excess);
 
-                    // Adjust all offsets after the removed region
-                    Self::adjust_offsets_after_remove(
-                        &mut self.label_positions,
-                        &mut self.numeric_label_positions,
-                        &mut self.sections[sec_idx],
-                        sec_idx, remove_start, excess,
-                    );
-                    // Update later org regions
-                    for later_idx in (org_idx + 1)..org_count {
-                        if self.sections[sec_idx].org_regions[later_idx].data_offset > remove_start {
-                            self.sections[sec_idx].org_regions[later_idx].data_offset -= excess;
-                        }
+                // Adjust all offsets after the removed region
+                Self::adjust_offsets_after_remove(
+                    &mut self.label_positions,
+                    &mut self.numeric_label_positions,
+                    &mut self.sections[sec_idx],
+                    sec_idx, remove_start, excess,
+                );
+                // Update later org regions
+                for later_idx in (org_idx + 1)..org_count {
+                    let later = &mut self.sections[sec_idx].org_regions[later_idx];
+                    if later.data_offset > remove_start {
+                        later.data_offset -= excess;
                     }
-                    self.sections[sec_idx].org_regions[org_idx].data_offset = target;
                 }
             } else {
-                // Current position is before the target. Insert NOP padding.
-                let deficit = target - data_offset;
-                let insert_pos = data_offset;
+                // Not enough padding - insert additional fill bytes
+                let deficit = needed_padding - current_padding;
+                // Insert right after existing padding (at data_offset + current_padding)
+                let insert_pos = data_offset + current_padding;
                 self.sections[sec_idx].data.splice(
                     insert_pos..insert_pos,
                     std::iter::repeat_n(fill_byte, deficit),
@@ -1368,11 +1373,11 @@ impl ElfWriter {
                 );
                 // Update later org regions
                 for later_idx in (org_idx + 1)..org_count {
-                    if self.sections[sec_idx].org_regions[later_idx].data_offset >= insert_pos {
-                        self.sections[sec_idx].org_regions[later_idx].data_offset += deficit;
+                    let later = &mut self.sections[sec_idx].org_regions[later_idx];
+                    if later.data_offset >= insert_pos {
+                        later.data_offset += deficit;
                     }
                 }
-                self.sections[sec_idx].org_regions[org_idx].data_offset = target;
             }
         }
     }
