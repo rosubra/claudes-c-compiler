@@ -1287,8 +1287,11 @@ pub fn link_builtin(
     define_linker_sym("__preinit_array_start", preinit_start, STB_GLOBAL);
     define_linker_sym("__preinit_array_end", preinit_end, STB_GLOBAL);
 
-    // ELF header address
+    // ELF header / executable start addresses
     define_linker_sym("__ehdr_start", BASE_ADDR, STB_GLOBAL);
+    define_linker_sym("__executable_start", BASE_ADDR, STB_GLOBAL);
+    define_linker_sym("_etext", rx_segment_end_vaddr, STB_GLOBAL);
+    define_linker_sym("etext", rx_segment_end_vaddr, STB_GLOBAL);
 
     // Relocation boundaries (for IPLT, usually empty for non-PIE)
     define_linker_sym("__rela_iplt_start", 0, STB_GLOBAL);
