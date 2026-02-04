@@ -249,13 +249,28 @@ fn load_file(
         return load_thin_archive(&data, path, objects, globals, lib_paths);
     }
 
-    // Not ELF? Try linker script
+    // Not ELF? Try linker script (handles both GROUP and INPUT directives)
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
-            if let Some(paths) = parse_linker_script(text) {
-                for lib_path in &paths {
-                    if Path::new(lib_path).exists() {
-                        load_file(lib_path, objects, globals, lib_paths)?;
+            if let Some(entries) = parse_linker_script_entries(text) {
+                let script_dir = Path::new(path).parent().map(|p| p.to_string_lossy().to_string());
+                for entry in &entries {
+                    match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if Path::new(lib_path).exists() {
+                                load_file(lib_path, objects, globals, lib_paths)?;
+                            } else if let Some(ref dir) = script_dir {
+                                let resolved = format!("{}/{}", dir, lib_path);
+                                if Path::new(&resolved).exists() {
+                                    load_file(&resolved, objects, globals, lib_paths)?;
+                                }
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            if let Some(resolved) = resolve_lib(lib_name, lib_paths) {
+                                load_file(&resolved, objects, globals, lib_paths)?;
+                            }
+                        }
                     }
                 }
                 return Ok(());

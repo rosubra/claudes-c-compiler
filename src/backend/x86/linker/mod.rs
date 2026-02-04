@@ -1294,6 +1294,12 @@ fn emit_shared_library(
     Ok(())
 }
 
+/// Resolve a `-l` library name using library search paths (for use in linker script resolution).
+/// Prefers .so over .a since linker scripts typically reference shared libraries.
+fn resolve_lib_from_paths(name: &str, paths: &[String]) -> Option<String> {
+    crate::backend::linker_common::resolve_lib(name, paths, false)
+}
+
 fn load_file(
     path: &str, objects: &mut Vec<ElfObject>, globals: &mut HashMap<String, GlobalSymbol>,
     needed_sonames: &mut Vec<String>, lib_paths: &[String],
@@ -1310,10 +1316,29 @@ fn load_file(
 
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
-            if let Some(paths) = parse_linker_script(text) {
-                for lib_path in &paths {
-                    if Path::new(lib_path).exists() {
-                        load_file(lib_path, objects, globals, needed_sonames, lib_paths)?;
+            if let Some(entries) = parse_linker_script_entries(text) {
+                // Determine the directory containing this linker script for relative path resolution
+                let script_dir = Path::new(path).parent().map(|p| p.to_string_lossy().to_string());
+                for entry in &entries {
+                    match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if Path::new(lib_path).exists() {
+                                load_file(lib_path, objects, globals, needed_sonames, lib_paths)?;
+                            } else if let Some(ref dir) = script_dir {
+                                // Try resolving relative to the directory containing the linker script
+                                let resolved = format!("{}/{}", dir, lib_path);
+                                if Path::new(&resolved).exists() {
+                                    load_file(&resolved, objects, globals, needed_sonames, lib_paths)?;
+                                }
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            // Resolve -l flag using library search paths
+                            let resolved = resolve_lib_from_paths(lib_name, lib_paths);
+                            if let Some(resolved_path) = resolved {
+                                load_file(&resolved_path, objects, globals, needed_sonames, lib_paths)?;
+                            }
+                        }
                     }
                 }
                 return Ok(());
@@ -1325,7 +1350,7 @@ fn load_file(
     if data.len() >= 18 {
         let e_type = u16::from_le_bytes([data[16], data[17]]);
         if e_type == ET_DYN {
-            return load_shared_library(path, globals, needed_sonames);
+            return load_shared_library(path, globals, needed_sonames, lib_paths);
         }
     }
 
@@ -1478,19 +1503,36 @@ fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<Strin
 
 fn load_shared_library(
     path: &str, globals: &mut HashMap<String, GlobalSymbol>, needed_sonames: &mut Vec<String>,
+    lib_paths: &[String],
 ) -> Result<(), String> {
     let data = std::fs::read(path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
-            if let Some(paths) = parse_linker_script(text) {
-                for lib_path in &paths {
-                    if !Path::new(lib_path).exists() { continue; }
-                    let lib_data = std::fs::read(lib_path).map_err(|e| format!("failed to read '{}': {}", lib_path, e))?;
-                    if lib_data.len() >= 8 && &lib_data[0..8] == b"!<arch>\n" {
-                        // Archive files in linker scripts: extract any needed symbols
-                        load_archive_for_dynamic(&lib_data, lib_path, globals)?;
-                    } else {
-                        load_shared_library(lib_path, globals, needed_sonames)?;
+            if let Some(entries) = parse_linker_script_entries(text) {
+                let script_dir = Path::new(path).parent().map(|p| p.to_string_lossy().to_string());
+                for entry in &entries {
+                    let resolved_path = match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if Path::new(lib_path).exists() {
+                                Some(lib_path.clone())
+                            } else if let Some(ref dir) = script_dir {
+                                let p = format!("{}/{}", dir, lib_path);
+                                if Path::new(&p).exists() { Some(p) } else { None }
+                            } else {
+                                None
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            resolve_lib_from_paths(lib_name, lib_paths)
+                        }
+                    };
+                    if let Some(resolved) = resolved_path {
+                        let lib_data = std::fs::read(&resolved).map_err(|e| format!("failed to read '{}': {}", resolved, e))?;
+                        if lib_data.len() >= 8 && &lib_data[0..8] == b"!<arch>\n" {
+                            load_archive_for_dynamic(&lib_data, &resolved, globals)?;
+                        } else {
+                            load_shared_library(&resolved, globals, needed_sonames, lib_paths)?;
+                        }
                     }
                 }
                 return Ok(());

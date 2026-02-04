@@ -122,3 +122,14 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | protobuf-c | PASS | TODO | TODO | TODO | Passes x86 |
 | cdb     | PASS | TODO | TODO | TODO | Passes x86 |
 | FFmpeg  | PASS | TODO | PASS | TODO | Compiles all libraries + ffmpeg/ffprobe binaries; all 7331 checkasm tests pass on x86 and ARM (standalone asm+ld) |
+| nano    | PASS | TODO | TODO | TODO | Fixed: added INPUT() directive support to linker script parser (libncurses.so is a linker script) |
+| greatest | PASS | TODO | TODO | TODO | Passes x86 |
+| rax     | PASS | TODO | TODO | TODO | Passes x86 |
+| uthash  | PASS | TODO | TODO | TODO | Passes x86 |
+| pngcrush | PASS | TODO | TODO | TODO | Passes x86 |
+| less    | PASS | TODO | TODO | TODO | Passes x86 |
+| bc_GNU  | PASS | TODO | TODO | TODO | Passes x86 |
+| check   | PASS | TODO | TODO | TODO | Passes x86 |
+| pkgconf | PASS | TODO | TODO | TODO | Passes x86 |
+| toybox  | PASS | TODO | TODO | TODO | Passes x86 |
+| zopfli  | PASS | TODO | TODO | TODO | Passes x86 |

@@ -265,10 +265,29 @@ pub fn link_builtin(
                         Ok(d) => d,
                         Err(_) => continue,
                     };
-                    if data.starts_with(b"/* GNU ld script") || data.starts_with(b"OUTPUT_FORMAT") || data.starts_with(b"GROUP") {
+                    if data.starts_with(b"/* GNU ld script") || data.starts_with(b"OUTPUT_FORMAT") || data.starts_with(b"GROUP") || data.starts_with(b"INPUT") {
                         let text = String::from_utf8_lossy(&data);
                         for token in text.split_whitespace() {
                             let token = token.trim_matches(|c: char| c == '(' || c == ')' || c == ',');
+                            // Handle -l library references (e.g. -ltinfo)
+                            if let Some(lib_name) = token.strip_prefix("-l") {
+                                if !lib_name.is_empty() {
+                                    // Search for the shared library
+                                    let so_name = format!("lib{}.so", lib_name);
+                                    for search_dir in &lib_search_paths {
+                                        let candidate = format!("{}/{}", search_dir, so_name);
+                                        if std::path::Path::new(&candidate).exists() {
+                                            if let Ok(syms) = read_shared_lib_symbols(&candidate) {
+                                                for si in syms {
+                                                    shared_lib_syms.insert(si.name.clone(), si);
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             if token.contains(".so") && (token.starts_with('/') || token.starts_with("lib")) {
                                 let actual_path = if token.starts_with('/') {
                                     token.to_string()

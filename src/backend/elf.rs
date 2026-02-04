@@ -587,18 +587,60 @@ pub fn parse_archive_members(data: &[u8]) -> Result<Vec<(String, usize, usize)>,
 
 // ── Linker script parsing ────────────────────────────────────────────────────
 
-/// Parse a linker script looking for `GROUP ( ... )` directives.
-/// Returns the list of library paths referenced, or `None` if no GROUP found.
-///
-/// Filters out AS_NEEDED entries (these are optional shared libraries that
-/// the static linker does not need to handle).
-pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
-    let group_start = content.find("GROUP")?;
-    let paren_start = content[group_start..].find('(')?;
-    let paren_end = content[group_start..].find(')')?;
-    let inside = &content[group_start + paren_start + 1..group_start + paren_end];
+/// An entry found in a GNU linker script directive (GROUP or INPUT).
+#[derive(Debug, Clone)]
+pub enum LinkerScriptEntry {
+    /// An absolute or relative file path (e.g. `/lib/x86_64-linux-gnu/libc.so.6` or `libncurses.so.6`)
+    Path(String),
+    /// A `-l` library reference (e.g. `-ltinfo` becomes `tinfo`)
+    Lib(String),
+}
 
-    let mut paths = Vec::new();
+/// Parse a GNU linker script looking for `GROUP ( ... )` or `INPUT ( ... )` directives.
+/// Returns the list of entries referenced, or `None` if no directive found.
+///
+/// Handles:
+/// - `GROUP ( path1 path2 AS_NEEDED ( path3 ) )` - AS_NEEDED entries are skipped
+/// - `INPUT ( libfoo.so.6 -lbar )` - both paths and `-l` library references
+pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
+    let entries = parse_linker_script_entries(content)?;
+    let paths: Vec<String> = entries.into_iter().filter_map(|e| match e {
+        LinkerScriptEntry::Path(p) => Some(p),
+        LinkerScriptEntry::Lib(_) => None,
+    }).collect();
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+/// Parse a GNU linker script, returning all entries including `-l` library references.
+/// This is the full-featured version that callers with library search path access should use.
+pub fn parse_linker_script_entries(content: &str) -> Option<Vec<LinkerScriptEntry>> {
+    // Try GROUP first, then INPUT
+    let directive_start = content.find("GROUP")
+        .or_else(|| content.find("INPUT"))?;
+
+    let rest = &content[directive_start..];
+    let paren_start = rest.find('(')?;
+
+    // Find matching closing paren (handle nested parens for AS_NEEDED)
+    let mut depth = 0;
+    let mut paren_end = None;
+    for (i, ch) in rest[paren_start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    paren_end = Some(paren_start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let paren_end = paren_end?;
+    let inside = &rest[paren_start + 1..paren_end];
+
+    let mut entries = Vec::new();
     let mut in_as_needed = false;
     for token in inside.split_whitespace() {
         match token {
@@ -607,14 +649,22 @@ pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
             ")" => { in_as_needed = false; continue; }
             _ => {}
         }
-        if (token.starts_with('/') || token.ends_with(".so") || token.ends_with(".a") ||
-           token.contains(".so."))
-            && !in_as_needed {
-                paths.push(token.to_string());
+        if in_as_needed { continue; }
+
+        if let Some(lib_name) = token.strip_prefix("-l") {
+            // -ltinfo -> Lib("tinfo")
+            if !lib_name.is_empty() {
+                entries.push(LinkerScriptEntry::Lib(lib_name.to_string()));
             }
+        } else if token.starts_with('/') || token.ends_with(".so") || token.ends_with(".a")
+            || token.contains(".so.")
+            || token.starts_with("lib")
+        {
+            entries.push(LinkerScriptEntry::Path(token.to_string()));
+        }
     }
 
-    if paths.is_empty() { None } else { Some(paths) }
+    if entries.is_empty() { None } else { Some(entries) }
 }
 
 // ── Linker-defined symbols ────────────────────────────────────────────────────

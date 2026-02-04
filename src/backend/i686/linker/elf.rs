@@ -30,6 +30,7 @@ use crate::backend::elf::{
     // Read helpers
     read_u16, read_u32, read_cstr, read_i32,
     parse_archive_members, parse_thin_archive_members, is_thin_archive,
+    parse_linker_script_entries, LinkerScriptEntry,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
@@ -388,13 +389,75 @@ struct DynSymInfo {
 }
 
 /// Read dynamic symbol info from a shared library ELF file.
+/// Also handles GNU linker scripts (GROUP/INPUT directives) that reference the actual .so files.
 fn read_dynsyms(path: &str) -> Result<Vec<DynSymInfo>, String> {
+    read_dynsyms_with_search(path, &[])
+}
+
+/// Read dynamic symbol info, with library search paths for resolving linker script entries.
+fn read_dynsyms_with_search(path: &str, lib_search_paths: &[&str]) -> Result<Vec<DynSymInfo>, String> {
     const SHT_GNU_VERSYM: u32 = 0x6fffffff;
     const SHT_GNU_VERDEF: u32 = 0x6ffffffd;
 
     let data = std::fs::read(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     if data.len() < 52 || data[0..4] != ELF_MAGIC || data[4] != ELFCLASS32 {
+        // Check if this is a linker script (e.g. INPUT(libncurses.so.6 -ltinfo))
+        if let Ok(text) = std::str::from_utf8(&data) {
+            if let Some(entries) = parse_linker_script_entries(text) {
+                let script_dir = std::path::Path::new(path).parent()
+                    .map(|p| p.to_string_lossy().to_string());
+                let mut all_syms = Vec::new();
+                for entry in &entries {
+                    let resolved = match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if std::path::Path::new(lib_path).exists() {
+                                Some(lib_path.clone())
+                            } else if let Some(ref dir) = script_dir {
+                                let p = format!("{}/{}", dir, lib_path);
+                                if std::path::Path::new(&p).exists() {
+                                    Some(p)
+                                } else {
+                                    // Search lib paths for the relative path
+                                    let mut found = None;
+                                    for search_dir in lib_search_paths {
+                                        let p = format!("{}/{}", search_dir, lib_path);
+                                        if std::path::Path::new(&p).exists() {
+                                            found = Some(p);
+                                            break;
+                                        }
+                                    }
+                                    found
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            // Resolve -l flag using search paths
+                            let mut found = None;
+                            for dir in lib_search_paths {
+                                let so = format!("{}/lib{}.so", dir, lib_name);
+                                if std::path::Path::new(&so).exists() {
+                                    found = Some(so);
+                                    break;
+                                }
+                            }
+                            found
+                        }
+                    };
+                    if let Some(resolved_path) = resolved {
+                        if let Ok(syms) = read_dynsyms_with_search(&resolved_path, lib_search_paths) {
+                            all_syms.extend(syms);
+                        }
+                    }
+                }
+                if !all_syms.is_empty() {
+                    return Ok(all_syms);
+                }
+                return Err(format!("{}: linker script but no resolvable libraries found", path));
+            }
+        }
         return Err(format!("{}: not a valid ELF32 file", path));
     }
     let e_type = read_u16(&data, 16);
@@ -753,7 +816,7 @@ pub fn link_builtin(
                         let check_path = real_path.as_ref()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or(cand.clone());
-                        if let Ok(syms) = read_dynsyms(&check_path) {
+                        if let Ok(syms) = read_dynsyms_with_search(&check_path, &all_lib_refs) {
                             let lib_soname = if lib == "c" { "libc.so.6".to_string() }
                                 else if lib == "m" { "libm.so.6".to_string() }
                                 else { format!("lib{}.so", lib) };
@@ -826,7 +889,7 @@ pub fn link_builtin(
                             let check_path = real_path.as_ref()
                                 .map(|p| p.to_string_lossy().into_owned())
                                 .unwrap_or(path.clone());
-                            if let Ok(syms) = read_dynsyms(&check_path) {
+                            if let Ok(syms) = read_dynsyms_with_search(&check_path, &all_lib_refs) {
                                 let lib_soname = filename.clone();
                                 for sym in syms {
                                     let entry = dynlib_syms.entry(sym.name.clone());
