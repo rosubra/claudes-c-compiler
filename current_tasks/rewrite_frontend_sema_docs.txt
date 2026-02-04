@@ -1,8 +1,0 @@
-Task: Rewrite frontend and sema documentation
-
-Thoroughly audit and rewrite the following READMEs to match actual code:
-- src/frontend/README.md  
-- src/frontend/sema/README.md
-
-Verify every claim against the code, fix inaccuracies, and produce
-high-quality design-doc style documentation.

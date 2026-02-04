@@ -106,11 +106,27 @@ ID) for source location tracking.
 The token stream is a `Vec<Token>` where each `Token` is a struct with
 `kind: TokenKind` and `span: Span` fields. `TokenKind` covers:
 
-- **Literals**: integer (with suffix variants for `u`, `l`, `ll`), floating
-  point (double, float, long double, imaginary), string (narrow, wide, u8,
-  char16), and character literals.
+- **Integer literals**: six variants distinguished by suffix --
+  `IntLiteral`, `UIntLiteral`, `LongLiteral`, `ULongLiteral`,
+  `LongLongLiteral`, `ULongLongLiteral`.
+- **Floating-point literals**: `FloatLiteral` (double), `FloatLiteralF32`
+  (float with `f`/`F` suffix), `FloatLiteralLongDouble` (long double with
+  `l`/`L` suffix, carrying both an `f64` approximation and full IEEE 754
+  binary128 bytes).
+- **Imaginary literals** (GCC extension): `ImaginaryLiteral` (double imaginary),
+  `ImaginaryLiteralF32` (float imaginary), `ImaginaryLiteralLongDouble`
+  (long double imaginary).
+- **String literals**: `StringLiteral` (narrow), `WideStringLiteral` (`L"..."`),
+  `Char16StringLiteral` (`u"..."`). Character literals use `CharLiteral`.
 - **Identifiers and keywords**: all C11 keywords plus GNU/GCC extensions
-  (`__attribute__`, `__builtin_*`, `__extension__`, `__int128`, etc.).
+  (`__attribute__`, `__builtin_*`, `__extension__`, `__int128`, `__seg_gs`,
+  `__seg_fs`, `__auto_type`, `__label__`, etc.).
+- **Pragma tokens**: the preprocessor injects synthetic `TokenKind` variants
+  for pragma directives that affect parsing: `PragmaPackSet`, `PragmaPackPush`,
+  `PragmaPackPushOnly`, `PragmaPackPop`, `PragmaPackReset`,
+  `PragmaVisibilityPush`, and `PragmaVisibilityPop`. These appear inline in
+  the token stream and are consumed by the parser to adjust struct packing
+  and symbol visibility state.
 - **Operators and punctuation**: the full set of C operators, braces, and
   delimiters.
 
@@ -136,8 +152,10 @@ stream and produces a typed AST rooted at `TranslationUnit`.
 - **`Parser::new(tokens: Vec<Token>) -> Self`** -- takes ownership of the
   token stream. The `DiagnosticEngine` is configured after construction via
   a separate `set_diagnostics()` method. Typedef names are seeded from a
-  hardcoded `builtin_typedefs()` list of common C standard library types
-  (e.g., `size_t`, `int32_t`, `FILE`), not from the preprocessor's macro table.
+  hardcoded `builtin_typedefs()` list of approximately 80 common C standard
+  library and system types (`size_t`, `int32_t`, `FILE`, `pthread_t`, `va_list`,
+  etc.), not from the preprocessor's macro table. This is necessary because the
+  compiler does not always process real system headers.
 - **`Parser::parse(&mut self) -> TranslationUnit`** -- the main entry point.
   Parses the entire translation unit and returns the AST.
 
@@ -164,7 +182,8 @@ of which is one of:
   (as a `CompoundStmt`), and a packed `FunctionAttributes` bitfield carrying
   storage class, inline hints, and GCC `__attribute__` flags.
 - **`Declaration`** -- a variable, typedef, struct/union/enum definition, or
-  forward declaration. Uses a packed `flags: u16` bitfield for storage class and
+  forward declaration. `_Static_assert` is also handled within declaration
+  processing. Uses a packed `flags: u16` bitfield for storage class and
   qualifier booleans.
 - **`TopLevelAsm`** -- a top-level `asm("...")` directive passed through
   verbatim.
@@ -189,6 +208,12 @@ Sema walks the AST to collect type information, build a scoped symbol table,
 resolve typedefs and `typeof(expr)`, evaluate compile-time constants, and check
 for common errors. It does not transform the AST; instead, it produces a
 `SemaResult` structure that accompanies the AST into the IR lowering phase.
+
+`SemanticAnalyzer` implements the `TypeConvertContext` trait (defined in
+`common/type_builder`), which provides the shared `resolve_type_spec_to_ctype`
+method for converting AST `TypeSpecifier` nodes to `CType` values. The trait
+callbacks delegate typedef, struct/union/enum, and constant-expression
+resolution back into sema's own state.
 
 ### Public interface
 
@@ -264,11 +289,15 @@ The following diagram shows the concrete Rust types that flow between phases:
 
 Two points of cross-phase information flow deserve special mention:
 
-1. **Typedef names from preprocessor to parser.** The C grammar is ambiguous:
+1. **Typedef names in the parser.** The C grammar is ambiguous:
    `T * x;` is either a multiplication expression or a pointer declaration,
-   depending on whether `T` is a typedef name. The preprocessor's macro table
-   provides the set of `#define`d names, and the parser maintains its own set of
-   typedef names discovered during parsing, seeded from the preprocessor.
+   depending on whether `T` is a typedef name. The parser maintains its own set
+   of typedef names, seeded from a hardcoded `builtin_typedefs()` list of
+   approximately 80 common C standard library and system types (`size_t`,
+   `int32_t`, `FILE`, `pthread_t`, `va_list`, `__Float32x4_t`, etc.) and
+   extended during parsing as `typedef` declarations are encountered. No
+   preprocessor state flows to the parser -- only the expanded source text
+   (indirectly, through the lexer's token stream).
 
 2. **Expression identity from parser to sema.** Sema annotates expressions by
    keying on `ExprId`, which is derived from the identity (address) of each AST
@@ -314,9 +343,9 @@ syntactic domain.
 
 Attribute booleans on `FunctionAttributes`, `Declaration`, and related AST nodes
 are stored as packed bitfields (`u16` or `u32`) rather than individual `bool`
-fields. This collapses 10-13 boolean attributes from 10-13 bytes into 2 bytes,
-reducing AST memory footprint. Accessor methods (getter/setter pairs) provide
-the same ergonomic API as named struct fields.
+fields. `FunctionAttributes` packs 13 boolean flags into a `u16`;
+`Declaration` packs 9 boolean flags into a `u16`. Accessor methods
+(getter/setter pairs) provide the same ergonomic API as named struct fields.
 
 ### Sema as an information-gathering pass
 
@@ -380,6 +409,12 @@ time for header-heavy translation units.
 - **Incomplete type checking.** Sema does not yet perform full C type checking.
   Many type errors are caught during IR lowering rather than during semantic
   analysis. The `expr_types` map may not cover every expression node.
+
+- **Conservative `-Wreturn-type` analysis.** The control-flow analysis for
+  detecting non-void functions that may not return a value is intraprocedural
+  and conservative. It may produce false positives in complex control flow
+  patterns involving multiple gotos or computed jumps, and does not perform
+  value-range analysis on conditions.
 
 - **Preprocessor macro location loss.** The text-to-text design means that the
   preprocessor cannot provide a "macro expansion backtrace" showing which macro

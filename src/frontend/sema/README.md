@@ -9,20 +9,20 @@ with type errors (with a few exceptions noted below); instead, it populates the
 re-deriving type information from the AST.
 
 ```
-Parser AST ─────> SemanticAnalyzer.analyze(&ast)
-                         │
-                         ├── symbol table (scoped)
-                         ├── function signatures
-                         ├── TypeContext (typedefs, struct layouts, enum constants)
-                         ├── ExprTypeMap (expression → CType annotations)
-                         └── ConstMap (expression → compile-time IrConst values)
-                         │
-                  SemanticAnalyzer.into_result() ──> SemaResult
-                         │
-                  Lowerer::with_type_context(sema_result.type_context,
-                                             sema_result.functions,
-                                             sema_result.expr_types,
-                                             sema_result.const_values, ...)
+Parser AST ────> SemanticAnalyzer.analyze(&ast)
+                        |
+                        |-- symbol table (scoped)
+                        |-- function signatures
+                        |-- TypeContext (typedefs, struct layouts, enum constants)
+                        |-- ExprTypeMap (expression -> CType annotations)
+                        +-- ConstMap (expression -> compile-time IrConst values)
+                        |
+                 SemanticAnalyzer.into_result() --> SemaResult
+                        |
+                 Lowerer::with_type_context(sema_result.type_context,
+                                            sema_result.functions,
+                                            sema_result.expr_types,
+                                            sema_result.const_values, ...)
 ```
 
 ---
@@ -31,7 +31,7 @@ Parser AST ─────> SemanticAnalyzer.analyze(&ast)
 
 | File | Responsibility |
 |---|---|
-| `analysis.rs` | Main pass: AST walk, declaration/statement/expression analysis, `-Wreturn-type`, implicit declarations |
+| `analysis.rs` | Main pass: AST walk, declaration/statement/expression analysis, `-Wreturn-type`, implicit declarations, `TypeConvertContext` trait impl |
 | `type_context.rs` | `TypeContext` -- module-level type state (struct layouts, typedefs, enum constants, ctype cache) with undo-log scope management |
 | `type_checker.rs` | `ExprTypeChecker` -- expression-level CType inference using only sema-available state |
 | `const_eval.rs` | `SemaConstEval` -- compile-time constant evaluation returning `IrConst` values |
@@ -64,9 +64,39 @@ top-level declaration and function definition. Errors are emitted through the
 errors occurred, or `Err(n)` with the error count.
 
 **`into_result(self) -> SemaResult`** consumes the analyzer and returns the
-accumulated results. Before returning, it synchronizes the anonymous struct
-counter between sema and the `TypeContext` so the lowerer's generated keys
-do not collide with sema's.
+accumulated results. The method simply returns `self.result`. Both sema's
+declaration processing and expression type inference use
+`TypeContext::next_anon_struct_id()` (a single shared counter), so no separate
+counter synchronization is needed.
+
+### Analyzer State
+
+The `SemanticAnalyzer` struct holds the following fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `symbol_table` | `SymbolTable` | Scoped variable/function name resolution. |
+| `result` | `SemaResult` | Accumulated output for the lowerer. |
+| `enum_counter` | `i64` | Auto-incrementing counter for enum variant values. |
+| `diagnostics` | `RefCell<DiagnosticEngine>` | Structured error/warning reporting. Uses `RefCell` so `&self` methods (e.g., `eval_const_expr_as_usize`) can emit diagnostics. |
+| `defined_structs` | `RefCell<FxHashSet<String>>` | Set of struct/union keys that have full definitions (not just forward declarations). Used to distinguish `struct X { ... }` from `struct X;` for incomplete type checking. Uses `RefCell` since `resolve_struct_or_union` takes `&self`. |
+
+### `TypeConvertContext` Trait Implementation
+
+`SemanticAnalyzer` implements the `TypeConvertContext` trait from
+`common::type_builder`. This trait is the mechanism for shared type-building
+logic between sema and the lowerer. The trait provides a default
+`resolve_type_spec_to_ctype` method that handles all 22 primitive C types,
+pointers, arrays, and function pointers identically. `SemanticAnalyzer`
+supplies the four divergent methods:
+
+| Trait Method | Sema Behavior |
+|---|---|
+| `resolve_typedef(name)` | Looks up `type_context.typedefs`; falls back to `CType::Int`. |
+| `resolve_struct_or_union(...)` | Computes layout, inserts into `TypeContext`, tracks definitions in `defined_structs`. |
+| `resolve_enum(...)` | Returns `CType::Enum` preserving variant values for packed-size computation. |
+| `resolve_typeof_expr(expr)` | Delegates to `ExprTypeChecker::infer_expr_ctype`; falls back to `CType::Int`. |
+| `eval_const_expr_as_usize(expr)` | Evaluates via `SemaConstEval`; emits "size of array is negative" error for negative values. |
 
 ---
 
@@ -150,6 +180,23 @@ continues to extend it (e.g., adding struct layouts discovered during lowering).
 | `func_return_ctypes` | `FxHashMap<String, CType>` | Cached return types for known functions. |
 | `ctype_cache` | `RefCell<FxHashMap<String, CType>>` | Cache for named struct/union CType resolution. |
 | `scope_stack` | `RefCell<Vec<TypeScopeFrame>>` | Undo-log frames for scope management. |
+| `anon_ctype_counter` | `Cell<u32>` | Counter for generating unique anonymous struct/union keys. Uses `Cell` for interior mutability since `type_spec_to_ctype` takes `&self`. |
+
+### `FunctionTypedefInfo`
+
+```rust
+pub struct FunctionTypedefInfo {
+    pub return_type: TypeSpecifier,    // AST type, NOT resolved CType
+    pub params: Vec<ParamDecl>,        // AST declarations, NOT resolved types
+    pub variadic: bool,
+}
+```
+
+Note that `return_type` is a `TypeSpecifier` (an AST-level type representation)
+and `params` is a `Vec<ParamDecl>` (AST parameter declarations), not resolved
+`CType` values. This preserves the original AST syntax so the lowerer can
+perform its own resolution with full lowering context. This applies to both
+`function_typedefs` and `func_ptr_typedef_info` entries.
 
 ### Builtin Typedef Seeding
 
@@ -241,29 +288,46 @@ chains like `1+1+1+...+1` into O(N) with O(1) lookups.
 The checker handles all expression forms in the AST:
 
 - **Literals**: `IntLiteral` -> `CType::Int`, `FloatLiteral` -> `CType::Double`,
-  `StringLiteral` -> `CType::Pointer(Char)`, etc. Integer literal types are
+  `FloatLiteralF32` -> `CType::Float`, `FloatLiteralLongDouble` -> `CType::LongDouble`,
+  `StringLiteral` -> `Pointer(Char)`, `WideStringLiteral` -> `Pointer(Int)`,
+  `Char16StringLiteral` -> `Pointer(UShort)`. Integer literal types are
   target-aware: on ILP32, values exceeding `INT_MAX` promote to `LongLong`.
+  Imaginary literal variants produce their complex type:
+  `ImaginaryLiteral` -> `ComplexDouble`, `ImaginaryLiteralF32` -> `ComplexFloat`,
+  `ImaginaryLiteralLongDouble` -> `ComplexLongDouble`.
 - **Identifiers**: symbol table lookup, enum constant lookup (with GCC promotion
   rules: `int` -> `unsigned int` -> `long long` -> `unsigned long long`), function
   signature lookup.
 - **Unary operators**: `&` wraps in `Pointer`, `*` peels off `Pointer`/`Array`,
   arithmetic operators apply integer promotion, `!` produces `int`.
+  `__real__`/`__imag__` (`RealPart`/`ImagPart`) extract the component type of
+  a complex number (e.g., `ComplexDouble` -> `Double`).
 - **Binary operators**: comparison and logical operators produce `int`; shift
   operators produce the promoted type of the left operand; arithmetic operators
   apply the usual arithmetic conversions; pointer arithmetic preserves the pointer
-  type (or produces `ptrdiff_t` for pointer-pointer subtraction).
+  type (or produces `ptrdiff_t` for pointer-pointer subtraction). GCC vector
+  extensions are handled: if either operand is a vector type, the result is that
+  vector type.
 - **Casts**: resolves the target `TypeSpecifier` to `CType`.
 - **Function calls**: looks up the callee's return type from the function table,
   with special handling for `__builtin_choose_expr`.
-- **`sizeof`/`_Alignof`**: always `CType::ULong` (size_t).
+- **`sizeof`/`_Alignof`**: always `CType::ULong`. Note: on ILP32, `ULong` is a
+  4-byte type, which is the correct size for `size_t` on those platforms, even
+  though `seed_builtin_typedefs()` maps `size_t` to `CType::UInt` on ILP32.
+  Both are 4-byte unsigned types, so the practical impact is nil.
 - **Member access**: resolves the struct/union type of the base expression, then
   looks up the field type in the struct layout.
 - **Ternary conditional**: applies C11 6.5.15 composite type rules.
+- **`GnuConditional`** (Elvis operator `a ?: b`): applies the same composite
+  type rules between the condition and the else expression.
 - **Statement expressions** (`({ ... })`): type is the type of the last expression
   statement, with fallback resolution from declarations within the compound.
 - **`_Generic`**: resolves the controlling expression type and matches against
   the association list.
 - **Compound literals**: type from the type specifier.
+- **`VaArg`**: type from the target type specifier.
+- **`LabelAddr`** (`&&label`): always `Pointer(Void)`.
+- **`BuiltinTypesCompatibleP`**: always `CType::Int`.
 
 ---
 
@@ -295,11 +359,12 @@ pub struct SemaConstEval<'a> {
 | `_Alignof(type)` / `__alignof__(type)` | C11 standard vs. GCC preferred alignment |
 | `__alignof__(expr)` | Checks for explicit alignment on variable declarations |
 | Ternary `?:` | Evaluates condition, returns selected branch |
+| `GnuConditional` (Elvis `a ?: b`) | Evaluates condition; if nonzero returns condition value, otherwise evaluates else branch |
 | `__builtin_types_compatible_p` | Structural CType comparison |
 | `offsetof` patterns (`&((T*)0)->member`) | Resolves struct field offsets, handles nested access and array subscripts |
 | Enum constants | Direct `i64` lookup in `TypeContext.enum_constants` |
 | Builtin function calls | Delegates to shared `common::const_eval::eval_builtin_call` |
-| Logical `&&` / `||` | Short-circuit evaluation; handles always-nonzero expressions (string literals, function pointers) |
+| Logical `&&` / `||` | Short-circuit evaluation; handles always-nonzero expressions (string literals) |
 
 ### What It Does NOT Evaluate
 
@@ -331,12 +396,30 @@ and Intel `_mm_*` intrinsic names to their lowering behavior. Each entry is a
 | `Intrinsic(kind)` | Requires target-specific codegen | `__builtin_clz`, `__builtin_bswap32`, `_mm_set1_epi8`, AES-NI, CRC32, etc. |
 
 The `BuiltinIntrinsic` enum covers a wide range of operations:
+
 - **Bit manipulation**: clz, ctz, popcount, bswap, ffs, parity, clrsb
-- **Overflow arithmetic**: `__builtin_add_overflow`, `__builtin_sub_overflow`, `__builtin_mul_overflow` (and unsigned/predicate variants)
-- **Floating-point classification**: fpclassify, isnan, isinf, isfinite, isnormal, signbit
+- **Overflow arithmetic**: `__builtin_add_overflow`, `__builtin_sub_overflow`,
+  `__builtin_mul_overflow` (and unsigned/signed/predicate variants)
+- **Floating-point classification**: fpclassify, isnan, isinf, isfinite,
+  isnormal, signbit, isinf_sign
+- **Floating-point comparison**: `__builtin_isgreater`, `__builtin_isless`,
+  `__builtin_islessgreater`, `__builtin_isunordered`, etc.
 - **Atomics**: `__sync_synchronize` (fence)
 - **Complex numbers**: creal, cimag, conj, `__builtin_complex`
 - **Variadic arguments**: va_start, va_end, va_copy
+- **Alloca**: `__builtin_alloca`, `__builtin_alloca_with_align` (dynamic stack allocation)
+- **Return/frame address**: `__builtin_return_address`, `__builtin_frame_address`
+- **Thread pointer**: `__builtin_thread_pointer` (TLS base address)
+- **Compile-time queries**: `__builtin_constant_p`, `__builtin_object_size`,
+  `__builtin_classify_type`
+- **Fortification**: `__builtin___memcpy_chk`, `__builtin___strcpy_chk`,
+  `__builtin___sprintf_chk`, etc. (glibc `_FORTIFY_SOURCE` wrappers forwarded
+  to their `__*_chk` runtime functions)
+- **Variadic arg forwarding**: `__builtin_va_arg_pack`, `__builtin_va_arg_pack_len`
+  (used in always-inline fortification wrappers)
+- **CPU feature detection**: `__builtin_cpu_init` (no-op), `__builtin_cpu_supports`
+  (conservatively returns 0)
+- **Prefetch**: `__builtin_prefetch` (lowered as a no-op)
 - **x86 SSE/SSE2/SSE4.1/AES-NI/CLMUL**: complete 128-bit SIMD instruction coverage
 
 The `is_builtin()` function extends the static map with pattern-matched recognition
@@ -404,8 +487,17 @@ preventing exponential blowup on deep expression trees.
 
 Sema emits structured diagnostics through the `DiagnosticEngine`, which supports:
 
-- **Errors**: undeclared identifiers, incomplete struct types in variable
-  declarations, non-integer switch controlling expressions.
+- **Errors**:
+  - Undeclared identifiers
+  - Incomplete struct/union types in variable declarations
+    ("storage size of 'struct/union X' isn't known")
+  - Incomplete struct/union types in `sizeof` expressions
+    (`check_sizeof_incomplete_type`)
+  - Non-integer switch controlling expressions
+  - Invalid struct/union field access ("'type' has no member named 'field'",
+    via `check_member_exists`)
+  - Negative array sizes ("size of array is negative", emitted from
+    `eval_const_expr_as_usize`)
 - **Warnings**: `-Wimplicit-function-declaration` (C89-style implicit declarations),
   `-Wreturn-type` (non-void functions that may not return a value).
 
@@ -470,7 +562,8 @@ design philosophy is pragmatic: collect as much information as possible so the
 lowerer can do its job, rather than attempting full C type checking and risking
 rejection of valid programs that the type checker does not yet fully understand.
 The few hard errors sema does emit (undeclared identifiers, incomplete struct
-types in variable definitions) are cases where the lowerer would definitely fail.
+types in variable definitions, invalid member access, negative array sizes) are
+cases where the lowerer would definitely fail.
 
 ### Memoized Bottom-Up Walk
 
