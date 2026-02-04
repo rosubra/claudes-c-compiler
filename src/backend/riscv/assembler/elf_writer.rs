@@ -562,13 +562,13 @@ impl ElfWriter {
             }
 
             Directive::Asciz(s) => {
-                self.emit_bytes(s.as_bytes());
+                self.emit_bytes(s);
                 self.emit_bytes(&[0]); // null terminator
                 Ok(())
             }
 
             Directive::Ascii(s) => {
-                self.emit_bytes(s.as_bytes());
+                self.emit_bytes(s);
                 Ok(())
             }
 

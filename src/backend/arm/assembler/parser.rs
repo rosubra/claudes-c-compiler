@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+use crate::backend::elf;
+
 /// A parsed assembly operand.
 #[derive(Debug, Clone)]
 pub enum Operand {
@@ -381,13 +383,13 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
             AsmDirective::Zero(size, fill)
         }
         ".asciz" | ".string" => {
-            let s = parse_string_literal(args)?;
+            let s = elf::parse_string_literal(args)?;
             let mut bytes = s;
             bytes.push(0); // null terminator
             AsmDirective::Asciz(bytes)
         }
         ".ascii" => {
-            let s = parse_string_literal(args)?;
+            let s = elf::parse_string_literal(args)?;
             AsmDirective::Ascii(s)
         }
         ".comm" => parse_comm_directive(args)?,
@@ -1104,80 +1106,4 @@ fn parse_data_value(s: &str) -> Result<i64, String> {
     } else {
         Ok(val as i64)
     }
-}
-
-/// Parse a string literal (strip quotes, handle escapes).
-/// Returns raw bytes to support non-UTF-8 content from escape sequences.
-fn parse_string_literal(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim();
-    if !s.starts_with('"') || !s.ends_with('"') {
-        return Err(format!("expected string literal: {}", s));
-    }
-    let inner = &s[1..s.len() - 1];
-    let mut result = Vec::new();
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => result.push(b'\n'),
-                Some('t') => result.push(b'\t'),
-                Some('r') => result.push(b'\r'),
-                Some('\\') => result.push(b'\\'),
-                Some('"') => result.push(b'"'),
-                Some('a') => result.push(0x07),
-                Some('b') => result.push(0x08),
-                Some('f') => result.push(0x0c),
-                Some('v') => result.push(0x0b),
-                Some(c) if ('0'..='7').contains(&c) => {
-                    let mut octal = String::new();
-                    octal.push(c);
-                    while octal.len() < 3 {
-                        if let Some(&next) = chars.peek() {
-                            if ('0'..='7').contains(&next) {
-                                octal.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(val) = u8::from_str_radix(&octal, 8) {
-                        result.push(val);
-                    }
-                }
-                Some('x') => {
-                    let mut hex = String::new();
-                    while hex.len() < 2 {
-                        if let Some(&next) = chars.peek() {
-                            if next.is_ascii_hexdigit() {
-                                hex.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(val) = u8::from_str_radix(&hex, 16) {
-                        result.push(val);
-                    }
-                }
-                Some(c) => {
-                    result.push(b'\\');
-                    // Push character as UTF-8 bytes
-                    let mut buf = [0u8; 4];
-                    let encoded = c.encode_utf8(&mut buf);
-                    result.extend_from_slice(encoded.as_bytes());
-                }
-                None => result.push(b'\\'),
-            }
-        } else {
-            // Push character as UTF-8 bytes
-            let mut buf = [0u8; 4];
-            let encoded = c.encode_utf8(&mut buf);
-            result.extend_from_slice(encoded.as_bytes());
-        }
-    }
-    Ok(result)
 }

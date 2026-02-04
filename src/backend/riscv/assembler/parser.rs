@@ -10,6 +10,8 @@
 
 #![allow(dead_code)]
 
+use crate::backend::elf;
+
 /// A parsed assembly operand.
 #[derive(Debug, Clone)]
 pub enum Operand {
@@ -123,10 +125,10 @@ pub enum Directive {
     Quad(Vec<DataValue>),
     /// `.zero N[, fill]` / `.space N[, fill]`
     Zero { size: usize, fill: u8 },
-    /// `.asciz "str"` / `.string "str"` — null-terminated string
-    Asciz(String),
-    /// `.ascii "str"` — string without null terminator
-    Ascii(String),
+    /// `.asciz "str"` / `.string "str"` — null-terminated string (raw bytes)
+    Asciz(Vec<u8>),
+    /// `.ascii "str"` — string without null terminator (raw bytes)
+    Ascii(Vec<u8>),
     /// `.comm sym, size[, align]`
     Comm { sym: String, size: u64, align: u64 },
     /// `.local sym`
@@ -358,11 +360,11 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         }
 
         ".asciz" | ".string" => {
-            let s = parse_string_literal(args)?;
+            let s = elf::parse_string_literal(args)?;
             Directive::Asciz(s)
         }
         ".ascii" => {
-            let s = parse_string_literal(args)?;
+            let s = elf::parse_string_literal(args)?;
             Directive::Ascii(s)
         }
 
@@ -604,72 +606,6 @@ fn parse_symbol_addend(s: &str) -> (String, i64) {
     } else {
         (s.to_string(), 0)
     }
-}
-
-/// Parse a string literal: "..." with escape sequences.
-pub fn parse_string_literal(s: &str) -> Result<String, String> {
-    let s = s.trim();
-    if !s.starts_with('"') || !s.ends_with('"') {
-        return Err(format!("expected string literal: {}", s));
-    }
-    let inner = &s[1..s.len() - 1];
-    let mut result = String::new();
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => result.push('\n'),
-                Some('t') => result.push('\t'),
-                Some('r') => result.push('\r'),
-                Some('\\') => result.push('\\'),
-                Some('"') => result.push('"'),
-                Some(c) if c >= '0' && c <= '7' => {
-                    // Octal escape: \N, \NN, or \NNN (handles \0, \014, etc.)
-                    let mut octal = String::new();
-                    octal.push(c);
-                    while octal.len() < 3 {
-                        if let Some(&next) = chars.peek() {
-                            if next.is_ascii_digit() && next <= '7' {
-                                octal.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(val) = u8::from_str_radix(&octal, 8) {
-                        result.push(val as char);
-                    }
-                }
-                Some('x') => {
-                    let mut hex = String::new();
-                    while hex.len() < 2 {
-                        if let Some(&next) = chars.peek() {
-                            if next.is_ascii_hexdigit() {
-                                hex.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(val) = u8::from_str_radix(&hex, 16) {
-                        result.push(val as char);
-                    }
-                }
-                Some(c) => {
-                    result.push('\\');
-                    result.push(c);
-                }
-                None => result.push('\\'),
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    Ok(result)
 }
 
 fn parse_instruction(line: &str) -> Result<AsmStatement, String> {
