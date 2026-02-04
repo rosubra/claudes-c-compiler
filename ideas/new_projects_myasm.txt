@@ -93,3 +93,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | s7      | PASS | TODO | TODO | TODO | Passes x86 |
 | wolfssl | PASS | TODO | TODO | TODO | Passes x86 |
 | darkhttpd | PASS | PASS | PASS | PASS | Fixed i686: set_permissions on /dev/null was hard-erroring (now ignores errors like other backends) |
+| libconfig | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| libcsv  | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| nghttp2 | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| discount | PASS | PASS | PASS | PASS | Fixed x86 linker: local symbol collision (local STB_LOCAL symbols were resolved to global symbols with same name from other object files) |

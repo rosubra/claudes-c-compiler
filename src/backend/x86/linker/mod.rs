@@ -1411,7 +1411,7 @@ fn create_plt_got(
                 let si = rela.sym_idx as usize;
                 if si >= obj.symbols.len() { continue; }
                 let sym = &obj.symbols[si];
-                if sym.name.is_empty() { continue; }
+                if sym.name.is_empty() || sym.is_local() { continue; }
                 let gsym_info = globals.get(&sym.name).map(|g| (g.is_dynamic, g.info & 0xf));
 
                 match rela.rela_type {
@@ -2141,7 +2141,7 @@ fn emit_executable(
 
                 match rela.rela_type {
                     R_X86_64_64 => {
-                        let t = if !sym.name.is_empty() {
+                        let t = if !sym.name.is_empty() && !sym.is_local() {
                             if let Some(g) = globals_snap.get(&sym.name) {
                                 if g.is_dynamic && !g.copy_reloc {
                                     if let Some(pi) = g.plt_idx { plt_addr + 16 + pi as u64 * 16 } else { s }
@@ -2151,7 +2151,7 @@ fn emit_executable(
                         w64(&mut out, fp, (t as i64 + a) as u64);
                     }
                     R_X86_64_PC32 | R_X86_64_PLT32 => {
-                        let t = if !sym.name.is_empty() {
+                        let t = if !sym.name.is_empty() && !sym.is_local() {
                             if let Some(g) = globals_snap.get(&sym.name) {
                                 if let Some(pi) = g.plt_idx { plt_addr + 16 + pi as u64 * 16 } else { s }
                             } else { s }
@@ -2163,7 +2163,7 @@ fn emit_executable(
                     R_X86_64_GOTTPOFF => {
                         // Initial Exec TLS via GOT: GOT entry contains TPOFF value
                         let mut resolved = false;
-                        if !sym.name.is_empty() {
+                        if !sym.name.is_empty() && !sym.is_local() {
                             if let Some(g) = globals_snap.get(&sym.name) {
                                 if let Some(gi) = g.got_idx {
                                     let entry = &got_entries[gi];
@@ -2201,7 +2201,7 @@ fn emit_executable(
                         }
                     }
                     R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
-                        if !sym.name.is_empty() {
+                        if !sym.name.is_empty() && !sym.is_local() {
                             if let Some(g) = globals_snap.get(&sym.name) {
                                 if let Some(gi) = g.got_idx {
                                     let entry = &got_entries[gi];
@@ -2263,7 +2263,10 @@ fn resolve_sym(
         let si = sym.shndx as usize;
         return section_map.get(&(obj_idx, si)).map(|&(oi, so)| output_sections[oi].addr + so).unwrap_or(0);
     }
-    if !sym.name.is_empty() {
+    // Local (STB_LOCAL) symbols must NOT be resolved via globals, since a
+    // local symbol named e.g. "opts" must not be confused with a global "opts"
+    // from another object file.
+    if !sym.name.is_empty() && !sym.is_local() {
         if let Some(g) = globals.get(&sym.name) {
             if g.defined_in.is_some() { return g.value; }
             if g.is_dynamic {
