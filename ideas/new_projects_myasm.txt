@@ -103,7 +103,6 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | map     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | sort.h  | PASS | TODO | TODO | TODO | Passes x86 |
 | fastlz  | PASS | PASS | PASS | PASS | All architectures pass out of the box |
-| crush   | PASS | TODO | TODO | TODO | Passes x86 |
 | huf     | PASS | TODO | TODO | TODO | Passes x86 |
 | stb_ds  | PASS | TODO | TODO | TODO | Passes x86 |
 | microtar | PASS | TODO | TODO | TODO | Passes x86 |
@@ -118,35 +117,87 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | incbin  | PASS | PASS | PASS | PASS | Added .incbin directive to x86/i686/ARM assemblers; fixed .int directive recognition; fixed i686 SymbolDiff resolution |
 | uzlib   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | spng    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
-| zlib    | PASS | TODO | TODO | TODO | Passes x86 |
 | protobuf-c | PASS | TODO | TODO | TODO | Passes x86 |
 | cdb     | PASS | TODO | TODO | TODO | Passes x86 |
 | FFmpeg  | PASS | TODO | PASS | TODO | Compiles all libraries + ffmpeg/ffprobe binaries; all 7331 checkasm tests pass on x86 and ARM (standalone asm+ld) |
+| scc     | PASS | PASS | PASS | PASS | Fixed: typeof treated as keyword in -std=c99 mode; now only keyword in GNU mode |
 | nano    | PASS | TODO | TODO | TODO | Fixed: added INPUT() directive support to linker script parser (libncurses.so is a linker script) |
-| greatest | PASS | TODO | TODO | TODO | Passes x86 |
-| rax     | PASS | TODO | TODO | TODO | Passes x86 |
+| zlib    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| femtolisp | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| crush   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| ini     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| check   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| tree-sitter | TODO | PASS | TODO | TODO | i686 fixed by COMDAT groups + GOTPC + PIC codegen fixes |
+| miniaudio | PASS | PASS | FAIL (ARM NEON parse) | PASS | Fixed x86/i686 asm: added rsqrtss/rcpss instructions |
+| civetweb | PASS | TODO | TODO | TODO | Passes x86 |
+| lzw     | PASS | TODO | TODO | TODO | Passes x86 |
+| lzo     | PASS | TODO | TODO | TODO | Passes x86 |
+| lizard  | PASS | TODO | TODO | TODO | Passes x86 |
+| rans    | PASS | TODO | TODO | TODO | Passes x86 |
+| wflz    | PASS | TODO | TODO | TODO | Passes x86 |
+| stc     | PASS | TODO | TODO | TODO | Passes x86 |
+| stretchy_buffer | PASS | TODO | TODO | TODO | Passes x86 |
+| vec     | PASS | TODO | TODO | TODO | Passes x86 |
 | uthash  | PASS | TODO | TODO | TODO | Passes x86 |
+| rax     | PASS | TODO | TODO | TODO | Passes x86 |
+| par     | PASS | TODO | TODO | TODO | Passes x86 |
+| dr_libs | PASS | TODO | TODO | TODO | Passes x86 |
+| fenster | PASS | TODO | TODO | TODO | Passes x86 |
+| microui | PASS | TODO | TODO | TODO | Passes x86 |
+| nanovg  | PASS | TODO | TODO | TODO | Passes x86 |
+| tinybasic | PASS | TODO | TODO | TODO | Passes x86 |
+| tinyobjloader-c | PASS | TODO | TODO | TODO | Passes x86 |
+| minmea  | PASS | TODO | TODO | TODO | Passes x86 |
+| lwrb    | PASS | TODO | TODO | TODO | Passes x86 |
+| olive.c | PASS | TODO | TODO | TODO | Passes x86 |
+| 2048.c  | PASS | TODO | TODO | TODO | Passes x86 |
+| tinflate | PASS | TODO | TODO | TODO | Passes x86 |
+| minizip | PASS | TODO | TODO | TODO | Passes x86 |
+| himeno  | PASS | TODO | TODO | TODO | Passes x86 |
+| nbench  | PASS | TODO | TODO | TODO | Passes x86 |
+| sokol   | PASS | TODO | TODO | TODO | Passes x86 |
+| libjpeg_IJG_original | PASS | TODO | TODO | TODO | Passes x86 |
+| libiconv | PASS | TODO | TODO | TODO | Passes x86 |
+| kilo    | PASS | TODO | TODO | TODO | Passes x86 |
+| nanopb  | PASS | TODO | TODO | TODO | Passes x86 |
+| asn1c   | PASS | TODO | TODO | TODO | Passes x86 |
+| pkgconf | PASS | TODO | TODO | TODO | Passes x86 |
+| bison   | PASS | TODO | TODO | TODO | Passes x86 |
+| less    | PASS | TODO | TODO | TODO | Passes x86 |
+| joe     | PASS | TODO | TODO | TODO | Passes x86 |
+| picocom | PASS | TODO | TODO | TODO | Passes x86 |
+| mini_httpd | PASS | TODO | TODO | TODO | Passes x86 |
+| thttpd  | PASS | TODO | TODO | TODO | Passes x86 |
+| peg_leg | PASS | TODO | TODO | TODO | Passes x86 |
+| cfitsio | PASS | TODO | TODO | TODO | Passes x86 |
+| cgltf   | PASS | TODO | TODO | TODO | Passes x86 |
+| cello   | PASS | TODO | TODO | TODO | Passes x86 |
+| greatest | PASS | TODO | TODO | TODO | Passes x86 |
+| cNBT    | PASS | TODO | TODO | TODO | Passes x86 |
+| chipmunk2d | PASS | TODO | TODO | TODO | Passes x86 |
+| minunit | PASS | TODO | TODO | TODO | Passes x86 |
+| json-parser | PASS | TODO | TODO | TODO | Passes x86 |
+| gb_string | PASS | TODO | TODO | TODO | Passes x86 |
+| embedded-cli | PASS | TODO | TODO | TODO | Passes x86 |
+| FSE     | PASS | TODO | TODO | TODO | Passes x86 |
+| c-algorithms | PASS | TODO | TODO | TODO | Passes x86 |
+| c-ares  | PASS | TODO | TODO | TODO | Passes x86 |
+| box2d-lite | PASS | TODO | TODO | TODO | Passes x86 |
+| cproc   | PASS | TODO | TODO | TODO | Passes x86 |
+| lacc    | PASS | TODO | TODO | TODO | Passes x86 |
+| lcc     | PASS | TODO | TODO | TODO | Passes x86 |
+| pcc     | PASS | TODO | TODO | TODO | Passes x86 |
+| vbcc    | PASS | TODO | TODO | TODO | Passes x86 |
+| speex_speexdsp | PASS | TODO | TODO | TODO | Passes x86 |
+| lzfse   | PASS | TODO | TODO | TODO | Passes x86 |
+| getopt_standalone | PASS | TODO | TODO | TODO | Passes x86 |
+| finite-state-entropy | PASS | TODO | TODO | TODO | Passes x86 |
 | pngcrush | PASS | TODO | TODO | TODO | Passes x86 |
 | bc_GNU  | PASS | TODO | TODO | TODO | Passes x86 |
 | toybox  | PASS | TODO | TODO | TODO | Passes x86 |
 | zopfli  | PASS | TODO | TODO | TODO | Passes x86 |
-| tree-sitter | TODO | PASS | TODO | TODO | i686 fixed by COMDAT groups + GOTPC + PIC codegen fixes |
-| ini     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
-| check   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
-| minunit | PASS | TODO | TODO | TODO | Passes x86 |
-| vec     | PASS | TODO | TODO | TODO | Passes x86 |
 | optparse | PASS | TODO | TODO | TODO | Passes x86 |
-| c-algorithms | PASS | TODO | TODO | TODO | Passes x86 |
-| kilo    | PASS | TODO | TODO | TODO | Passes x86 |
-| miniaudio | PASS | PASS | FAIL (ARM NEON parse) | PASS | Fixed x86/i686 asm: added rsqrtss/rcpss instructions |
-| nanopb  | PASS | TODO | TODO | TODO | Passes x86 |
-| lzfse   | PASS | TODO | TODO | TODO | Passes x86 |
 | dnsmasq | PASS | TODO | TODO | TODO | Passes x86 |
-| pkgconf | PASS | TODO | TODO | TODO | Passes x86 |
-| picocom | PASS | TODO | TODO | TODO | Passes x86 |
-| less    | PASS | TODO | TODO | TODO | Passes x86 |
-| cfitsio | PASS | TODO | TODO | TODO | Passes x86 |
 | mandoc  | PASS | TODO | TODO | TODO | Passes x86 |
 | dropbear | PASS | TODO | TODO | TODO | Passes x86 |
 | pigz    | PASS | TODO | TODO | TODO | Passes x86 |
-| peg_leg | PASS | TODO | TODO | TODO | Passes x86 |
