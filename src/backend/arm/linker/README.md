@@ -212,7 +212,7 @@ link(object_files, output_path, user_args):
        - Undefined symbols: insert placeholder if not present
 
   4. UNRESOLVED SYMBOL CHECK
-     Warn about undefined non-weak symbols, excluding well-known
+     Error on undefined non-weak symbols, excluding well-known
      linker-defined names (__bss_start, _GLOBAL_OFFSET_TABLE_, etc.)
 
   5. SECTION MERGING (merge_sections)

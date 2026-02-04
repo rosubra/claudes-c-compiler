@@ -221,6 +221,34 @@ pub fn link_builtin(
     // Resolve remaining undefined symbols
     resolve_dynamic_symbols(&mut globals, &mut needed_sonames)?;
 
+    // Check for truly undefined (non-weak, non-dynamic, non-linker-defined) symbols
+    {
+        let linker_defined = [
+            "_GLOBAL_OFFSET_TABLE_", "__bss_start", "_edata", "_end", "__end",
+            "__ehdr_start", "__executable_start", "_etext", "etext",
+            "__dso_handle", "_DYNAMIC", "__data_start", "data_start",
+            "__init_array_start", "__init_array_end",
+            "__fini_array_start", "__fini_array_end",
+            "__preinit_array_start", "__preinit_array_end",
+            "__rela_iplt_start", "__rela_iplt_end",
+            "_init", "_fini",
+        ];
+        let mut truly_undefined: Vec<&String> = globals.iter()
+            .filter(|(name, sym)| {
+                sym.defined_in.is_none() && !sym.is_dynamic
+                    && (sym.info >> 4) != STB_WEAK
+                    && !linker_defined.contains(&name.as_str())
+            })
+            .map(|(name, _)| name)
+            .collect();
+        if !truly_undefined.is_empty() {
+            truly_undefined.sort();
+            truly_undefined.truncate(20);
+            return Err(format!("undefined symbols: {}",
+                truly_undefined.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+    }
+
     // Merge sections
     let mut output_sections: Vec<OutputSection> = Vec::new();
     let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();

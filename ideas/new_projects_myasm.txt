@@ -23,3 +23,12 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | Duktape | PASS | PASS | PASS | PASS | Passes all architectures out of the box |
 | Wren    | PASS | TODO | TODO | TODO | Passes x86 (minor flaky timing tests, pass on retry) |
 | json-c  | PASS | FAIL (asm issue) | PASS | PASS | Fixed i686 linker local symbol collision (GOTOFF relocations); i686 passes with GCC asm + builtin LD; builtin asm still has issues |
+| nanomsg | PASS | FAIL (i686 segfault) | PASS | PASS | Fixed: linker now rejects undefined symbols instead of silently resolving to 0 |
+| lmdb    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| unqlite | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| libev   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| vedis   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| hiredis | PASS | FAIL (i686 segfault) | PASS | PASS | x86/arm/riscv pass |
+| mongoose | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| freetype | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| nuklear | PASS | FAIL (i686) | PASS | PASS | x86/arm/riscv pass |

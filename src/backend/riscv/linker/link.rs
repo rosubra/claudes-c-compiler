@@ -726,6 +726,36 @@ pub fn link_builtin(
         }
     }
 
+    // Check for truly undefined symbols (not dynamic, not weak, not linker-defined)
+    {
+        let linker_defined = [
+            "_GLOBAL_OFFSET_TABLE_", "__global_pointer$", "__bss_start", "_edata", "_end",
+            "__BSS_END__", "__SDATA_BEGIN__", "__DATA_BEGIN__", "data_start", "__data_start",
+            "__dso_handle", "_DYNAMIC", "_IO_stdin_used",
+            "__init_array_start", "__init_array_end",
+            "__fini_array_start", "__fini_array_end",
+            "__preinit_array_start", "__preinit_array_end",
+            "__ehdr_start", "__executable_start", "_etext", "etext",
+            "__rela_iplt_start", "__rela_iplt_end",
+            "_ITM_registerTMCloneTable", "_ITM_deregisterTMCloneTable",
+            "_init", "_fini",
+        ];
+        let mut truly_undefined: Vec<&String> = global_syms.iter()
+            .filter(|(name, sym)| {
+                !sym.defined && !sym.needs_plt && sym.binding != STB_WEAK
+                    && !linker_defined.contains(&name.as_str())
+                    && !shared_lib_syms.contains_key(name.as_str())
+            })
+            .map(|(name, _)| name)
+            .collect();
+        if !truly_undefined.is_empty() {
+            truly_undefined.sort();
+            truly_undefined.truncate(20);
+            return Err(format!("undefined symbols: {}",
+                truly_undefined.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+    }
+
     // Also identify symbols that need GOT entries (referenced via GOT_HI20)
     let mut got_symbols: Vec<String> = Vec::new();
     let mut tls_got_symbols: HashSet<String> = HashSet::new();

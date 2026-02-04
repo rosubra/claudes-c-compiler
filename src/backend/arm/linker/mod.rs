@@ -184,7 +184,7 @@ pub fn link_builtin(
         }
     }
 
-    // Check for unresolved symbols (warnings only for weak)
+    // Reject truly undefined symbols (weak undefined are allowed)
     let mut unresolved = Vec::new();
     for (name, sym) in &globals {
         if sym.defined_in.is_none() && sym.section_idx == SHN_UNDEF {
@@ -210,7 +210,8 @@ pub fn link_builtin(
     if !unresolved.is_empty() {
         unresolved.sort();
         unresolved.truncate(20);
-        eprintln!("warning: unresolved symbols: {}", unresolved.join(", "));
+        return Err(format!("undefined symbols: {}",
+            unresolved.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
     }
 
     // Merge sections
