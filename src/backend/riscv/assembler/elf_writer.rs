@@ -5,9 +5,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use super::parser::{AsmStatement, Operand};
 use super::encoder::{encode_instruction, EncodeResult, RelocType};
+use super::compress;
 
 const EM_RISCV: u16 = 243;
 const ELFCLASS64: u8 = 2;
@@ -17,8 +18,7 @@ const ELFOSABI_NONE: u8 = 0;
 const ET_REL: u16 = 1;
 
 // ELF flags for RISC-V
-// EF_RISCV_RVC = 0x1 (compressed extensions)
-// EF_RISCV_FLOAT_ABI_DOUBLE = 0x4
+const EF_RISCV_RVC: u32 = 0x1;          // compressed extensions used
 const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
 
 // Section types
@@ -221,6 +221,7 @@ impl ElfWriter {
         for stmt in statements {
             self.process_statement(stmt)?;
         }
+        self.compress_executable_sections();
         self.resolve_local_branches()?;
         Ok(())
     }
@@ -605,6 +606,85 @@ impl ElfWriter {
         }
     }
 
+    /// Compress eligible 32-bit instructions in executable sections to 16-bit
+    /// RV64C equivalents. Updates all label offsets, pending reloc offsets, and
+    /// section reloc offsets to account for the reduced instruction sizes.
+    fn compress_executable_sections(&mut self) {
+        let exec_sections: Vec<String> = self.sections.iter()
+            .filter(|(_, s)| (s.sh_flags & SHF_EXECINSTR) != 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for sec_name in &exec_sections {
+            // Build set of offsets that have relocations (these must not be compressed)
+            let mut reloc_offsets = HashSet::new();
+
+            // Pending branch relocs
+            for pr in &self.pending_branch_relocs {
+                if pr.section == *sec_name {
+                    reloc_offsets.insert(pr.offset);
+                    // For CALL_PLT (auipc+jalr pair), also mark the jalr at offset+4
+                    if pr.reloc_type == 19 {
+                        reloc_offsets.insert(pr.offset + 4);
+                    }
+                }
+            }
+
+            // Section relocs (external symbols)
+            if let Some(section) = self.sections.get(sec_name) {
+                for r in &section.relocs {
+                    reloc_offsets.insert(r.offset);
+                    // For CALL_PLT (auipc+jalr pair), also mark the jalr at offset+4
+                    if r.reloc_type == 19 {
+                        reloc_offsets.insert(r.offset + 4);
+                    }
+                }
+            }
+
+            let section_data = match self.sections.get(sec_name) {
+                Some(s) => s.data.clone(),
+                None => continue,
+            };
+
+            let (new_data, offset_map) = compress::compress_section(&section_data, &reloc_offsets);
+
+            if new_data.len() == section_data.len() {
+                continue; // Nothing was compressed
+            }
+
+            // Update section data
+            if let Some(section) = self.sections.get_mut(sec_name) {
+                section.data = new_data;
+                // Update section alignment to 2 (halfword) for compressed code
+                // Actually, keep original alignment but update relocs
+                for r in &mut section.relocs {
+                    r.offset = compress::remap_offset(r.offset, &offset_map);
+                }
+            }
+
+            // Update pending branch relocs
+            for pr in &mut self.pending_branch_relocs {
+                if pr.section == *sec_name {
+                    pr.offset = compress::remap_offset(pr.offset, &offset_map);
+                }
+            }
+
+            // Update labels pointing into this section
+            for (_, (label_sec, label_offset)) in self.labels.iter_mut() {
+                if label_sec == sec_name {
+                    *label_offset = compress::remap_offset(*label_offset, &offset_map);
+                }
+            }
+
+            // Update symbol values pointing into this section
+            for sym in &mut self.symbols {
+                if sym.section_name == *sec_name {
+                    sym.value = compress::remap_offset(sym.value, &offset_map);
+                }
+            }
+        }
+    }
+
     /// Resolve local branch labels to PC-relative offsets.
     fn resolve_local_branches(&mut self) -> Result<(), String> {
         for reloc in &self.pending_branch_relocs {
@@ -903,7 +983,7 @@ impl ElfWriter {
         elf.extend_from_slice(&0u64.to_le_bytes()); // e_entry
         elf.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
         elf.extend_from_slice(&(shdr_offset as u64).to_le_bytes());
-        elf.extend_from_slice(&EF_RISCV_FLOAT_ABI_DOUBLE.to_le_bytes()); // e_flags
+        elf.extend_from_slice(&(EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC).to_le_bytes()); // e_flags
         elf.extend_from_slice(&(ehdr_size as u16).to_le_bytes());
         elf.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
         elf.extend_from_slice(&0u16.to_le_bytes()); // e_phnum

@@ -1367,8 +1367,10 @@ fn encode_li(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_mv(operands: &[Operand]) -> Result<EncodeResult, String> {
     let rd = get_reg(operands, 0)?;
-    let rs1 = get_reg(operands, 1)?;
-    Ok(EncodeResult::Word(encode_i(OP_OP_IMM, rd, 0, rs1, 0))) // addi rd, rs1, 0
+    let rs = get_reg(operands, 1)?;
+    // Use `add rd, x0, rs` instead of `addi rd, rs, 0` so the instruction
+    // is eligible for RV64C compression to C.MV (which requires the ADD form).
+    Ok(EncodeResult::Word(encode_r(OP_OP, rd, 0b000, 0, rs, 0b0000000))) // add rd, x0, rs
 }
 
 fn encode_not(operands: &[Operand]) -> Result<EncodeResult, String> {

@@ -1,9 +1,9 @@
 # RISC-V 64-bit Backend
 
 Code generator targeting **RV64GC** (the general-purpose profile: RV64IMAFDC)
-with the **LP64D** calling convention. The backend emits textual RISC-V
-assembly that is assembled by the system assembler (GNU as or LLVM integrated
-assembler).
+with the **LP64D** calling convention. The backend includes a native assembler
+(`MY_ASM=builtin`) with RV64C compressed instruction support, producing ELF
+object files directly without requiring an external assembler.
 
 ---
 

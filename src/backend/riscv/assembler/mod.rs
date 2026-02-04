@@ -7,10 +7,12 @@
 //! Architecture:
 //! - `parser.rs`     – Tokenize + parse assembly text into `AsmStatement` items
 //! - `encoder.rs`    – Encode RISC-V instructions into 32-bit machine words
+//! - `compress.rs`   – RV64C compressed instruction support (32-bit → 16-bit)
 //! - `elf_writer.rs` – Write ELF object files with sections, symbols, and relocations
 
 pub mod parser;
 pub mod encoder;
+pub mod compress;
 pub mod elf_writer;
 
 use parser::parse_asm;
