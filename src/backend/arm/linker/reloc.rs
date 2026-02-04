@@ -55,14 +55,15 @@ impl GotInfo {
 }
 
 /// Resolve a symbol's final address given the global symbol table and section map.
+///
+/// Linker-defined symbols (__bss_start, _edata, _end, __end, etc.) are resolved
+/// through the globals table where they are registered by get_standard_linker_symbols().
 pub fn resolve_sym(
     obj_idx: usize,
     sym: &Symbol,
     globals: &HashMap<String, GlobalSymbol>,
     section_map: &HashMap<(usize, usize), (usize, u64)>,
     output_sections: &[OutputSection],
-    bss_addr: u64,
-    bss_size: u64,
 ) -> u64 {
     if sym.sym_type() == STT_SECTION {
         let si = sym.shndx as usize;
@@ -71,11 +72,9 @@ pub fn resolve_sym(
             .unwrap_or(0);
     }
     if !sym.name.is_empty() {
-        match sym.name.as_str() {
-            "__bss_start" | "_edata" => return bss_addr,
-            "_end" | "__end" => return bss_addr + bss_size,
-            _ => {}
-        }
+        // All linker-defined symbols (including __bss_start, _edata, _end, __end)
+        // are registered in the globals table with defined_in = Some(usize::MAX),
+        // so they are resolved through the standard globals lookup below.
         if let Some(g) = globals.get(&sym.name) {
             if g.defined_in.is_some() { return g.value; }
         }
@@ -145,8 +144,6 @@ pub fn apply_relocations(
     output_sections: &[OutputSection],
     section_map: &HashMap<(usize, usize), (usize, u64)>,
     out: &mut [u8],
-    bss_addr: u64,
-    bss_size: u64,
     tls_info: &TlsInfo,
     got_info: &GotInfo,
 ) -> Result<(), String> {
@@ -168,8 +165,7 @@ pub fn apply_relocations(
                 let p = sa + sec_off + rela.offset;
                 let fp = (sfo + sec_off + rela.offset) as usize;
                 let a = rela.addend;
-                let s = resolve_sym(obj_idx, sym, globals, section_map, output_sections,
-                                    bss_addr, bss_size);
+                let s = resolve_sym(obj_idx, sym, globals, section_map, output_sections);
                 let gkey = got_key(obj_idx, sym);
 
                 apply_one_reloc(out, fp, rela.rela_type, s, a, p, &sym.name,

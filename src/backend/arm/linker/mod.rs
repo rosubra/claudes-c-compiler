@@ -853,31 +853,41 @@ fn emit_executable(
     let init_addr = output_sections.iter().find(|s| s.name == ".init").map(|s| s.addr).unwrap_or(0);
     let fini_addr = output_sections.iter().find(|s| s.name == ".fini").map(|s| s.addr).unwrap_or(0);
 
-    // Define linker-provided symbols (consistent with x86-64/i686/RISC-V)
+    // Define linker-provided symbols using shared infrastructure (consistent
+    // with x86-64/i686/RISC-V via get_standard_linker_symbols)
     let text_seg_end = BASE_ADDR + rx_filesz;
-    let linker_syms = [
-        ("__dso_handle", BASE_ADDR),
-        ("_DYNAMIC", 0),
-        ("_GLOBAL_OFFSET_TABLE_", got_addr),
-        ("__init_array_start", init_array_start),
-        ("__init_array_end", init_array_end),
-        ("__fini_array_start", fini_array_start),
-        ("__fini_array_end", fini_array_end),
-        ("__preinit_array_start", init_array_start),
-        ("__preinit_array_end", init_array_start),
-        ("__ehdr_start", BASE_ADDR),
-        ("__executable_start", BASE_ADDR),
+    let linker_addrs = LinkerSymbolAddresses {
+        base_addr: BASE_ADDR,
+        got_addr,
+        dynamic_addr: 0, // ARM uses static linking only (no .dynamic section)
+        bss_addr,
+        bss_size,
+        text_end: text_seg_end,
+        data_start: rw_page_addr,
+        init_array_start,
+        init_array_size: init_array_end - init_array_start,
+        fini_array_start,
+        fini_array_size: fini_array_end - fini_array_start,
+        preinit_array_start: 0,
+        preinit_array_size: 0,
+        rela_iplt_start: rela_iplt_addr,
+        rela_iplt_size,
+    };
+    for sym in &get_standard_linker_symbols(&linker_addrs) {
+        if globals.get(sym.name).map(|g| g.defined_in.is_none()).unwrap_or(true) {
+            globals.insert(sym.name.to_string(), GlobalSymbol {
+                value: sym.value, size: 0, info: (sym.binding << 4) | STT_OBJECT,
+                defined_in: Some(usize::MAX), section_idx: SHN_ABS,
+            });
+        }
+    }
+    // ARM-specific linker symbols not in the shared list
+    let arm_extra_syms: [(&str, u64); 3] = [
         ("__GNU_EH_FRAME_HDR", 0),
         ("_init", init_addr),
         ("_fini", fini_addr),
-        ("__rela_iplt_start", rela_iplt_addr),
-        ("__rela_iplt_end", rela_iplt_end_addr),
-        ("_etext", text_seg_end),
-        ("etext", text_seg_end),
-        ("__data_start", rw_page_addr),
-        ("data_start", rw_page_addr),
     ];
-    for (name, val) in &linker_syms {
+    for (name, val) in &arm_extra_syms {
         if globals.get(*name).map(|g| g.defined_in.is_none()).unwrap_or(true) {
             globals.insert(name.to_string(), GlobalSymbol {
                 value: *val, size: 0, info: (STB_GLOBAL << 4) | STT_OBJECT,
@@ -928,7 +938,7 @@ fn emit_executable(
                             got_resolved.entry(key).or_insert_with(|| {
                                 
                                 reloc::resolve_sym(obj_idx, sym, &globals_snap,
-                                                              section_map, output_sections, bss_addr, bss_size)
+                                                              section_map, output_sections)
                             });
                         }
                     }
@@ -1009,7 +1019,7 @@ fn emit_executable(
     // Apply relocations
     let tls_info = reloc::TlsInfo { tls_addr, tls_size: tls_mem_size };
     reloc::apply_relocations(objects, &globals_snap, output_sections, section_map,
-                             &mut out, bss_addr, bss_size, &tls_info, &got_info)?;
+                             &mut out, &tls_info, &got_info)?;
 
     // === ELF header ===
     out[0..4].copy_from_slice(&ELF_MAGIC);

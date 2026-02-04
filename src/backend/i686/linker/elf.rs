@@ -12,6 +12,7 @@ use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS32, ELFDATA2LSB,
     read_u16, read_u32, read_cstr, read_i32,
     parse_archive_members,
+    LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
 // ── ELF32 constants ──────────────────────────────────────────────────────────
@@ -2100,6 +2101,34 @@ pub fn link_builtin(
         sym.is_defined = true;
     }
 
+    // Build standard linker symbol addresses using shared infrastructure
+    // (consistent with x86-64/ARM/RISC-V via get_standard_linker_symbols)
+    let linker_addrs = LinkerSymbolAddresses {
+        base_addr: BASE_ADDR as u64,
+        got_addr: got_base as u64,
+        dynamic_addr: dynamic_vaddr as u64,
+        bss_addr: bss_vaddr as u64,
+        bss_size: (data_seg_vaddr_end - bss_vaddr) as u64,
+        text_end: text_seg_vaddr_end as u64,
+        data_start: data_seg_vaddr_start as u64,
+        init_array_start: init_array_vaddr as u64,
+        init_array_size: init_array_size as u64,
+        fini_array_start: fini_array_vaddr as u64,
+        fini_array_size: fini_array_size as u64,
+        preinit_array_start: 0,
+        preinit_array_size: 0,
+        // i686 uses __rel_iplt_* (REL format) instead of __rela_iplt_*
+        rela_iplt_start: rel_iplt_vaddr as u64,
+        rela_iplt_size: rel_iplt_size as u64,
+    };
+    let standard_syms = get_standard_linker_symbols(&linker_addrs);
+    // i686 uses __rel_iplt_* (REL format), not __rela_iplt_* (RELA format),
+    // so filter out the RELA variants from the shared list.
+    let linker_sym_map: HashMap<&str, u64> = standard_syms.iter()
+        .filter(|s| !s.name.starts_with("__rela_iplt"))
+        .map(|s| (s.name, s.value))
+        .collect();
+
     // Resolve symbol addresses
     for (name, sym) in global_symbols.iter_mut() {
         if sym.is_dynamic {
@@ -2112,25 +2141,17 @@ pub fn link_builtin(
         if sym.output_section < output_sections.len() {
             sym.address = output_sections[sym.output_section].addr + sym.section_offset;
         }
-        // Special symbols (linker-defined, consistent with x86-64/ARM/RISC-V)
+        // Standard linker-defined symbols from shared infrastructure
+        if let Some(&value) = linker_sym_map.get(name.as_str()) {
+            sym.address = value as u32;
+            if name == "__dso_handle" { sym.is_defined = true; }
+        }
+        // i686-specific aliases (not in the shared list)
         match name.as_str() {
-            "_GLOBAL_OFFSET_TABLE_" => sym.address = got_base,
-            "__bss_start" | "__bss_start__" => sym.address = bss_vaddr,
-            "_edata" | "edata" => sym.address = bss_vaddr,
-            "_end" | "end" | "__end__" => sym.address = data_seg_vaddr_end,
-            "_etext" | "etext" => sym.address = text_seg_vaddr_end,
-            "__executable_start" | "__ehdr_start" => sym.address = BASE_ADDR,
-            "__dso_handle" => {
-                sym.is_defined = true;
-                if sym.address == 0 { sym.address = data_seg_vaddr_start; }
-            }
-            "_DYNAMIC" => sym.address = dynamic_vaddr,
-            "__data_start" | "data_start" => sym.address = data_seg_vaddr_start,
-            "__init_array_start" => sym.address = init_array_vaddr,
-            "__init_array_end" => sym.address = init_array_vaddr + init_array_size,
-            "__fini_array_start" => sym.address = fini_array_vaddr,
-            "__fini_array_end" => sym.address = fini_array_vaddr + fini_array_size,
-            "__preinit_array_start" | "__preinit_array_end" => sym.address = 0,
+            "__bss_start__" => sym.address = bss_vaddr,
+            "edata" => sym.address = bss_vaddr,
+            "end" | "__end__" => sym.address = data_seg_vaddr_end,
+            // i686 uses REL (not RELA), so __rel_iplt_* instead of __rela_iplt_*
             "__rel_iplt_start" => sym.address = rel_iplt_vaddr,
             "__rel_iplt_end" => sym.address = rel_iplt_vaddr + rel_iplt_size,
             _ => {}

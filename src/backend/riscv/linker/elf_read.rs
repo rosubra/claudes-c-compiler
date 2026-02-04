@@ -14,6 +14,7 @@ pub use crate::backend::elf::{
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
     read_u16, read_u32, read_u64, read_cstr,
     parse_archive_members,
+    LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
 // RISC-V specific constants

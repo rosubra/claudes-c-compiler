@@ -1104,43 +1104,39 @@ fn emit_executable(
         }
     }
 
-    // Define linker-provided symbols (consistent with i686/ARM/RISC-V backends)
+    // Define linker-provided symbols using shared infrastructure (consistent
+    // with i686/ARM/RISC-V backends via get_standard_linker_symbols)
     let text_seg_end = text_page_addr + text_total_size;
     let data_seg_start = rw_page_addr;
-    let data_seg_end = bss_addr + bss_size;
-    let define_linker_sym = |globals: &mut HashMap<String, GlobalSymbol>, name: &str, value: u64| {
-        let entry = globals.entry(name.to_string()).or_insert(GlobalSymbol {
-            value: 0, size: 0, info: (STB_GLOBAL << 4),
+    let linker_addrs = LinkerSymbolAddresses {
+        base_addr: BASE_ADDR,
+        got_addr: got_plt_addr,
+        dynamic_addr,
+        bss_addr,
+        bss_size,
+        text_end: text_seg_end,
+        data_start: data_seg_start,
+        init_array_start: init_array_addr,
+        init_array_size,
+        fini_array_start: fini_array_addr,
+        fini_array_size,
+        preinit_array_start: 0,
+        preinit_array_size: 0,
+        rela_iplt_start: 0,
+        rela_iplt_size: 0,
+    };
+    for sym in &get_standard_linker_symbols(&linker_addrs) {
+        let entry = globals.entry(sym.name.to_string()).or_insert(GlobalSymbol {
+            value: 0, size: 0, info: (sym.binding << 4),
             defined_in: None, from_lib: None, plt_idx: None, got_idx: None,
             section_idx: SHN_ABS, is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
         });
         if entry.defined_in.is_none() && !entry.is_dynamic {
-            entry.value = value;
+            entry.value = sym.value;
             entry.defined_in = Some(usize::MAX); // sentinel: linker-defined
             entry.section_idx = SHN_ABS;
         }
-    };
-    define_linker_sym(globals, "_GLOBAL_OFFSET_TABLE_", got_plt_addr);
-    define_linker_sym(globals, "__bss_start", bss_addr);
-    define_linker_sym(globals, "_edata", bss_addr);
-    define_linker_sym(globals, "_end", data_seg_end);
-    define_linker_sym(globals, "__end", data_seg_end);
-    define_linker_sym(globals, "__ehdr_start", BASE_ADDR);
-    define_linker_sym(globals, "__executable_start", BASE_ADDR);
-    define_linker_sym(globals, "_etext", text_seg_end);
-    define_linker_sym(globals, "etext", text_seg_end);
-    define_linker_sym(globals, "__dso_handle", data_seg_start);
-    define_linker_sym(globals, "_DYNAMIC", dynamic_addr);
-    define_linker_sym(globals, "__data_start", data_seg_start);
-    define_linker_sym(globals, "data_start", data_seg_start);
-    define_linker_sym(globals, "__init_array_start", init_array_addr);
-    define_linker_sym(globals, "__init_array_end", init_array_addr + init_array_size);
-    define_linker_sym(globals, "__fini_array_start", fini_array_addr);
-    define_linker_sym(globals, "__fini_array_end", fini_array_addr + fini_array_size);
-    define_linker_sym(globals, "__preinit_array_start", 0);
-    define_linker_sym(globals, "__preinit_array_end", 0);
-    define_linker_sym(globals, "__rela_iplt_start", 0);
-    define_linker_sym(globals, "__rela_iplt_end", 0);
+    }
 
     let entry_addr = globals.get("_start").map(|s| s.value).unwrap_or(text_page_addr);
 

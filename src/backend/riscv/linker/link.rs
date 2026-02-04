@@ -1239,13 +1239,39 @@ pub fn link_builtin(
         }
     }
 
-    // Define linker-provided symbols
+    // Define linker-provided symbols using shared infrastructure (consistent
+    // with x86-64/i686/ARM via get_standard_linker_symbols)
     let sdata_vaddr = merged_map.get(".sdata").map(|&i| section_vaddrs[i]).unwrap_or(0);
     let data_vaddr = merged_map.get(".data").map(|&i| section_vaddrs[i]).unwrap_or(sdata_vaddr);
     let bss_vaddr = merged_map.get(".bss").map(|&i| section_vaddrs[i]).unwrap_or(0);
     let bss_end = merged_map.get(".bss")
         .map(|&i| section_vaddrs[i] + merged_sections[i].data.len() as u64)
         .unwrap_or(bss_vaddr);
+
+    let init_start = init_array_vaddrs.get(".init_array").map(|&(v, _)| v).unwrap_or(0);
+    let init_end = init_array_vaddrs.get(".init_array").map(|&(v, s)| v + s).unwrap_or(0);
+    let fini_start = init_array_vaddrs.get(".fini_array").map(|&(v, _)| v).unwrap_or(0);
+    let fini_end = init_array_vaddrs.get(".fini_array").map(|&(v, s)| v + s).unwrap_or(0);
+    let preinit_start = init_array_vaddrs.get(".preinit_array").map(|&(v, _)| v).unwrap_or(0);
+    let preinit_end = init_array_vaddrs.get(".preinit_array").map(|&(v, s)| v + s).unwrap_or(0);
+
+    let linker_addrs = LinkerSymbolAddresses {
+        base_addr: BASE_ADDR,
+        got_addr: got_plt_vaddr,
+        dynamic_addr: dynamic_vaddr,
+        bss_addr: bss_vaddr,
+        bss_size: bss_end - bss_vaddr,
+        text_end: rx_segment_end_vaddr,
+        data_start: data_vaddr,
+        init_array_start: init_start,
+        init_array_size: init_end - init_start,
+        fini_array_start: fini_start,
+        fini_array_size: fini_end - fini_start,
+        preinit_array_start: preinit_start,
+        preinit_array_size: preinit_end - preinit_start,
+        rela_iplt_start: 0,
+        rela_iplt_size: 0,
+    };
 
     let mut define_linker_sym = |name: &str, value: u64, binding: u8| {
         let entry = global_syms.entry(name.to_string()).or_insert_with(|| GlobalSym {
@@ -1260,61 +1286,23 @@ pub fn link_builtin(
         }
     };
 
-    // __global_pointer$ = .sdata + 0x800 (conventional GP for RISC-V small data)
+    // Standard linker-defined symbols from shared infrastructure
+    for sym in &get_standard_linker_symbols(&linker_addrs) {
+        define_linker_sym(sym.name, sym.value, sym.binding);
+    }
+
+    // RISC-V specific symbols not in the shared list
     let gp_value = if sdata_vaddr != 0 {
         sdata_vaddr + 0x800
     } else {
-        // If no .sdata, put GP after .data
         data_vaddr + 0x800
     };
     define_linker_sym("__global_pointer$", gp_value, STB_GLOBAL);
-
-    // GOT / dynamic
-    define_linker_sym("_GLOBAL_OFFSET_TABLE_", got_plt_vaddr, STB_GLOBAL);
-    define_linker_sym("_DYNAMIC", dynamic_vaddr, STB_GLOBAL);
-
-    // Data boundaries
-    let edata_val = if sdata_vaddr != 0 {
-        sdata_vaddr + merged_map.get(".sdata").map(|&i| merged_sections[i].data.len() as u64).unwrap_or(0)
-    } else {
-        data_vaddr + merged_map.get(".data").map(|&i| merged_sections[i].data.len() as u64).unwrap_or(0)
-    };
-    define_linker_sym("_edata", edata_val, STB_GLOBAL);
-    define_linker_sym("__bss_start", bss_vaddr, STB_GLOBAL);
-    define_linker_sym("_end", bss_end, STB_GLOBAL);
     define_linker_sym("__BSS_END__", bss_end, STB_GLOBAL);
     define_linker_sym("__SDATA_BEGIN__", sdata_vaddr, STB_GLOBAL);
     define_linker_sym("__DATA_BEGIN__", data_vaddr, STB_GLOBAL);
-    define_linker_sym("data_start", data_vaddr, STB_WEAK);
-    define_linker_sym("__data_start", data_vaddr, STB_GLOBAL);
-    define_linker_sym("__dso_handle", data_vaddr, STB_GLOBAL);
-    // _IO_stdin_used - conventionally in .rodata, a marker that libc uses
     let rodata_vaddr = merged_map.get(".rodata").map(|&i| section_vaddrs[i]).unwrap_or(0);
     define_linker_sym("_IO_stdin_used", rodata_vaddr, STB_GLOBAL);
-
-    // Array boundary symbols (init_array, fini_array, preinit_array)
-    let init_start = init_array_vaddrs.get(".init_array").map(|&(v, _)| v).unwrap_or(0);
-    let init_end = init_array_vaddrs.get(".init_array").map(|&(v, s)| v + s).unwrap_or(0);
-    let fini_start = init_array_vaddrs.get(".fini_array").map(|&(v, _)| v).unwrap_or(0);
-    let fini_end = init_array_vaddrs.get(".fini_array").map(|&(v, s)| v + s).unwrap_or(0);
-    let preinit_start = init_array_vaddrs.get(".preinit_array").map(|&(v, _)| v).unwrap_or(0);
-    let preinit_end = init_array_vaddrs.get(".preinit_array").map(|&(v, s)| v + s).unwrap_or(0);
-    define_linker_sym("__init_array_start", init_start, STB_GLOBAL);
-    define_linker_sym("__init_array_end", init_end, STB_GLOBAL);
-    define_linker_sym("__fini_array_start", fini_start, STB_GLOBAL);
-    define_linker_sym("__fini_array_end", fini_end, STB_GLOBAL);
-    define_linker_sym("__preinit_array_start", preinit_start, STB_GLOBAL);
-    define_linker_sym("__preinit_array_end", preinit_end, STB_GLOBAL);
-
-    // ELF header / executable start addresses
-    define_linker_sym("__ehdr_start", BASE_ADDR, STB_GLOBAL);
-    define_linker_sym("__executable_start", BASE_ADDR, STB_GLOBAL);
-    define_linker_sym("_etext", rx_segment_end_vaddr, STB_GLOBAL);
-    define_linker_sym("etext", rx_segment_end_vaddr, STB_GLOBAL);
-
-    // Relocation boundaries (for IPLT, usually empty for non-PIE)
-    define_linker_sym("__rela_iplt_start", 0, STB_GLOBAL);
-    define_linker_sym("__rela_iplt_end", 0, STB_GLOBAL);
 
     // Weak symbols for optional features
     define_linker_sym("_ITM_registerTMCloneTable", 0, STB_WEAK);

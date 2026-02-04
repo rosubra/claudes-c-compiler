@@ -19,6 +19,7 @@ pub use crate::backend::elf::{
     DT_JMPREL, DT_PLTREL, DT_GNU_HASH,
     read_u16, read_u32, read_u64, read_i64, read_cstr,
     parse_archive_members, parse_linker_script,
+    LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
 // x86-64 relocation types

@@ -21,6 +21,7 @@ pub use crate::backend::elf::{
     read_u16, read_u32, read_u64, read_i64, read_cstr,
     w16, w32, w64, write_bytes,
     parse_archive_members, parse_linker_script,
+    LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
 // ── AArch64 relocation types ───────────────────────────────────────────

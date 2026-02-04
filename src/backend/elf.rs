@@ -513,6 +513,105 @@ pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
     if paths.is_empty() { None } else { Some(paths) }
 }
 
+// ── Linker-defined symbols ────────────────────────────────────────────────────
+//
+// All four backend linkers (x86-64, i686, ARM, RISC-V) need to define a standard
+// set of symbols that programs expect the linker to provide. Previously each
+// backend had its own list with inconsistent names and values. This shared
+// infrastructure ensures all backends define the same symbols with consistent
+// semantics.
+
+/// Addresses that linker backends must provide for linker-defined symbol resolution.
+///
+/// Each backend computes these from its own layout, then passes them to
+/// `get_standard_linker_symbols()` to get the canonical symbol list.
+pub struct LinkerSymbolAddresses {
+    /// Base address of the ELF executable (e.g., 0x400000 for x86-64).
+    pub base_addr: u64,
+    /// Address of the GOT or GOT.PLT section.
+    pub got_addr: u64,
+    /// Address of the .dynamic section (0 if static-only linking).
+    pub dynamic_addr: u64,
+    /// Start address of the BSS section.
+    pub bss_addr: u64,
+    /// Size of the BSS section in memory.
+    pub bss_size: u64,
+    /// End of the text (RX) segment.
+    pub text_end: u64,
+    /// Start of the data (RW) segment.
+    pub data_start: u64,
+    /// Start address of .init_array section (0 if absent).
+    pub init_array_start: u64,
+    /// Size of .init_array section in bytes.
+    pub init_array_size: u64,
+    /// Start address of .fini_array section (0 if absent).
+    pub fini_array_start: u64,
+    /// Size of .fini_array section in bytes.
+    pub fini_array_size: u64,
+    /// Start address of .preinit_array section (0 if absent).
+    pub preinit_array_start: u64,
+    /// Size of .preinit_array section in bytes.
+    pub preinit_array_size: u64,
+    /// Start address of .rela.iplt / .rel.iplt section (0 if absent).
+    pub rela_iplt_start: u64,
+    /// Size of .rela.iplt / .rel.iplt section in bytes.
+    pub rela_iplt_size: u64,
+}
+
+/// A linker-defined symbol entry with name, value, and binding.
+pub struct LinkerDefinedSym {
+    pub name: &'static str,
+    pub value: u64,
+    pub binding: u8,
+}
+
+/// Return the standard set of linker-defined symbols that all backends should provide.
+///
+/// This ensures consistent symbol definitions across x86-64, i686, ARM, and RISC-V.
+/// Each backend may also define additional architecture-specific symbols (e.g.,
+/// `__global_pointer$` for RISC-V) after calling this function.
+///
+/// The returned list uses the same semantics as GNU ld:
+/// - `_edata` / `__bss_start` = start of BSS (end of initialized data)
+/// - `_end` / `__end` = end of BSS (end of all data)
+/// - `_etext` / `etext` = end of text segment
+/// - `__dso_handle` = start of data segment
+/// - `_DYNAMIC` = address of .dynamic section
+/// - `data_start` is weak (can be overridden by object files)
+pub fn get_standard_linker_symbols(addrs: &LinkerSymbolAddresses) -> Vec<LinkerDefinedSym> {
+    let end_addr = addrs.bss_addr + addrs.bss_size;
+    vec![
+        // GOT / dynamic
+        LinkerDefinedSym { name: "_GLOBAL_OFFSET_TABLE_", value: addrs.got_addr, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "_DYNAMIC", value: addrs.dynamic_addr, binding: STB_GLOBAL },
+        // BSS / data boundaries
+        LinkerDefinedSym { name: "__bss_start", value: addrs.bss_addr, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "_edata", value: addrs.bss_addr, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "_end", value: end_addr, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__end", value: end_addr, binding: STB_GLOBAL },
+        // Text boundaries
+        LinkerDefinedSym { name: "_etext", value: addrs.text_end, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "etext", value: addrs.text_end, binding: STB_GLOBAL },
+        // ELF header / executable start
+        LinkerDefinedSym { name: "__ehdr_start", value: addrs.base_addr, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__executable_start", value: addrs.base_addr, binding: STB_GLOBAL },
+        // Data segment
+        LinkerDefinedSym { name: "__dso_handle", value: addrs.data_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__data_start", value: addrs.data_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "data_start", value: addrs.data_start, binding: STB_WEAK },
+        // Init/fini/preinit arrays
+        LinkerDefinedSym { name: "__init_array_start", value: addrs.init_array_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__init_array_end", value: addrs.init_array_start + addrs.init_array_size, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__fini_array_start", value: addrs.fini_array_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__fini_array_end", value: addrs.fini_array_start + addrs.fini_array_size, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__preinit_array_start", value: addrs.preinit_array_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__preinit_array_end", value: addrs.preinit_array_start + addrs.preinit_array_size, binding: STB_GLOBAL },
+        // IPLT relocation boundaries
+        LinkerDefinedSym { name: "__rela_iplt_start", value: addrs.rela_iplt_start, binding: STB_GLOBAL },
+        LinkerDefinedSym { name: "__rela_iplt_end", value: addrs.rela_iplt_start + addrs.rela_iplt_size, binding: STB_GLOBAL },
+    ]
+}
+
 // ── Section name mapping ─────────────────────────────────────────────────────
 
 // ── Assembler helpers ────────────────────────────────────────────────────────
