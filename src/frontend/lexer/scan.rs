@@ -544,11 +544,27 @@ impl Lexer {
                 Token::new(TokenKind::ULongLiteral(value), span)
             }
         } else {
-            // Decimal: int -> long -> long long (unsigned only if > i64::MAX)
+            // Decimal with no suffix: C11 6.4.4.1 Table 6
+            // Type sequence: int -> long int -> long long int
             if value > i64::MAX as u64 {
+                // Doesn't fit in any signed type; implementation-defined, use unsigned long
                 Token::new(TokenKind::ULongLiteral(value), span)
+            } else if crate::common::types::target_is_32bit() {
+                // ILP32: int (32) -> long (32) -> long long (64)
+                if value <= i32::MAX as u64 {
+                    Token::new(TokenKind::IntLiteral(value as i64), span)
+                } else {
+                    // Doesn't fit in int or long (both 32-bit), promote to long long
+                    Token::new(TokenKind::LongLongLiteral(value as i64), span)
+                }
             } else {
-                Token::new(TokenKind::IntLiteral(value as i64), span)
+                // LP64: int (32) -> long (64)
+                if value <= i32::MAX as u64 {
+                    Token::new(TokenKind::IntLiteral(value as i64), span)
+                } else {
+                    // Doesn't fit in int, promote to long
+                    Token::new(TokenKind::LongLiteral(value as i64), span)
+                }
             }
         }
     }

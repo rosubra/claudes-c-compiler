@@ -239,6 +239,12 @@ impl Lowerer {
                 // bitfield values into it using read-modify-write.
                 let mut unit_bytes = vec![0u8; storage_unit_size];
 
+                // Track the highest bit used so we know exactly how many bytes
+                // the bitfields actually occupy (the storage unit type may be
+                // wider than the bits used, and the remaining bytes may belong
+                // to subsequent non-bitfield fields).
+                let mut max_bit_end: u32 = 0;
+
                 // Process all consecutive bitfield fields sharing this storage unit offset
                 while fi < layout.fields.len()
                     && layout.fields[fi].offset == storage_unit_offset
@@ -257,17 +263,28 @@ impl Lowerer {
 
                     // Pack this bitfield value into the storage unit buffer
                     self.write_bitfield_to_bytes(&mut unit_bytes, 0, &val, field_ir_ty, bit_offset, bit_width);
+                    if bit_offset + bit_width > max_bit_end {
+                        max_bit_end = bit_offset + bit_width;
+                    }
                     fi += 1;
                 }
+
+                // Compute the actual number of bytes occupied by bitfield data.
+                // The storage unit type (e.g. uint32_t = 4 bytes) may be wider
+                // than the bits actually used. Bytes beyond the last used bit
+                // may belong to subsequent non-bitfield fields and must not be
+                // overwritten with zeros from the storage unit buffer.
+                let actual_bytes_used = ((max_bit_end as usize) + 7) / 8;
+                let effective_size = actual_bytes_used.min(storage_unit_size);
 
                 // When the storage unit overlaps with already-written data
                 // (due to align_down placement), skip the overlapping bytes.
                 let skip = current_offset.saturating_sub(storage_unit_offset);
-                // Emit only the non-overlapping portion of the storage unit
-                if skip < unit_bytes.len() {
-                    push_bytes_as_elements(&mut elements, &unit_bytes[skip..]);
+                // Emit only the non-overlapping portion of the actually-used bytes
+                if skip < effective_size {
+                    push_bytes_as_elements(&mut elements, &unit_bytes[skip..effective_size]);
                 }
-                current_offset = storage_unit_offset + storage_unit_size;
+                current_offset = storage_unit_offset + effective_size;
                 continue;
             }
 

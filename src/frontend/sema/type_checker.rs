@@ -90,17 +90,17 @@ impl<'a> ExprTypeChecker<'a> {
         match expr {
             // Literals have well-defined types
             Expr::IntLiteral(val, _) => {
-                // On ILP32, values > INT_MAX need promotion: int -> long -> long long
-                // On LP64, values > INT_MAX fit in long (same as long long)
-                if crate::common::types::target_is_32bit() {
-                    if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
-                        Some(CType::Int)
-                    } else {
-                        // Doesn't fit in int or long (both 32-bit on ILP32), promote to long long
-                        Some(CType::LongLong)
-                    }
-                } else {
+                // After the lexer fix, IntLiteral should only contain values
+                // that fit in int. But defensively handle larger values too:
+                // C11 6.4.4.1: decimal without suffix: int -> long -> long long
+                if *val >= i32::MIN as i64 && *val <= i32::MAX as i64 {
                     Some(CType::Int)
+                } else if crate::common::types::target_is_32bit() {
+                    // ILP32: int and long are both 32-bit, promote to long long
+                    Some(CType::LongLong)
+                } else {
+                    // LP64: long is 64-bit
+                    Some(CType::Long)
                 }
             }
             Expr::CharLiteral(_, _) => Some(CType::Int),

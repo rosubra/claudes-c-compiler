@@ -1,2 +1,0 @@
-Fixing open62541 project to compile and pass tests with ccc-x86.
-Investigating build/test failures and fixing compiler bugs as needed.
