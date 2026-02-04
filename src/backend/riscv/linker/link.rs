@@ -244,8 +244,7 @@ pub fn link_to_executable(
 
     for path in &all_inputs {
         if !std::path::Path::new(path).exists() {
-            // Silently skip missing files for flexibility
-            continue;
+            return Err(format!("linker input file not found: {}", path));
         }
         let data = std::fs::read(path)
             .map_err(|e| format!("Cannot read {}: {}", path, e))?;
@@ -260,7 +259,7 @@ pub fn link_to_executable(
                 .map_err(|e| format!("{}: {}", path, e))?;
             input_objs.push((path.clone(), obj));
         }
-        // Skip other file types silently (linker scripts etc.)
+        // Skip non-ELF/non-archive files (e.g. linker scripts) - not an error
     }
 
     // ── Phase 1b: Resolve -l libraries ──────────────────────────────────
@@ -1695,8 +1694,11 @@ pub fn link_to_executable(
                         let offset_val = got_entry_vaddr as i64 + a - p as i64;
                         patch_u_type(data, off, offset_val as u32);
                     }
-                    _ => {
-                        // Unknown relocation type - skip silently
+                    other => {
+                        return Err(format!(
+                            "unsupported RISC-V relocation type {} for symbol '{}' in '{}'",
+                            other, sym.name, obj_name
+                        ));
                     }
                 }
             }

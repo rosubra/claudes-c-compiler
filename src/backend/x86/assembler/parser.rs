@@ -473,10 +473,18 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
         }
         ".code16gcc" => Ok(AsmItem::Empty), // i686 only, ignored
         ".option" => Ok(AsmItem::OptionDirective(args.to_string())),
+        // Additional CFI directives - not needed for code generation but valid syntax
+        ".cfi_restore" | ".cfi_remember_state" | ".cfi_restore_state"
+        | ".cfi_adjust_cfa_offset" | ".cfi_def_cfa" | ".cfi_sections"
+        | ".cfi_personality" | ".cfi_lsda" | ".cfi_rel_offset"
+        | ".cfi_register" | ".cfi_return_column" | ".cfi_undefined"
+        | ".cfi_same_value" | ".cfi_escape" => {
+            Ok(AsmItem::Cfi(CfiDirective::Other(line.to_string())))
+        }
+        // Debug/metadata directives that don't affect code generation
+        ".ident" | ".addrsig" | ".addrsig_sym" | ".local" => Ok(AsmItem::Empty),
         _ => {
-            // Unknown directive - just ignore it with a warning
-            // This handles .ident, .addrsig, etc. that GCC might emit
-            Ok(AsmItem::Empty)
+            Err(format!("unsupported x86 assembler directive: {} {}", directive, args))
         }
     }
 }

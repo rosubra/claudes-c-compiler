@@ -475,8 +475,10 @@ fn apply_one_reloc(
         }
 
         other => {
-            eprintln!("warning: unsupported AArch64 reloc type {} for '{}' in {}",
-                other, sym_name, source);
+            return Err(format!(
+                "unsupported AArch64 relocation type {} for '{}' in {}",
+                other, sym_name, source
+            ));
         }
     }
     Ok(())

@@ -639,9 +639,8 @@ impl ElfWriter {
 
             Directive::Cfi | Directive::Ignored => Ok(()),
 
-            Directive::Unknown { .. } => {
-                // Unknown directive - ignore
-                Ok(())
+            Directive::Unknown { name, args } => {
+                Err(format!("unsupported RISC-V assembler directive: {} {}", name, args))
             }
         }
     }

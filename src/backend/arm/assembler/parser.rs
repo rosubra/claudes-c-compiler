@@ -400,7 +400,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
                     parts[1].trim().to_string(),
                 )
             } else {
-                AsmDirective::Ignored
+                return Err(format!("malformed .set directive: expected 'name, value', got '{}'", args));
             }
         }
         // CFI directives
@@ -415,8 +415,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         ".file" | ".loc" | ".ident" | ".addrsig" | ".addrsig_sym"
         | ".build_attributes" | ".eabi_attribute" => AsmDirective::Ignored,
         _ => {
-            // Unknown directive - ignore
-            AsmDirective::Ignored
+            return Err(format!("unsupported AArch64 assembler directive: {} {}", name, args));
         }
     };
 
@@ -928,7 +927,7 @@ fn split_section_args(s: &str) -> Vec<String> {
 fn parse_type_directive(args: &str) -> Result<AsmDirective, String> {
     let parts: Vec<&str> = args.splitn(2, ',').collect();
     if parts.len() != 2 {
-        return Ok(AsmDirective::Ignored);
+        return Err(format!("malformed .type directive: expected 'name, type', got '{}'", args));
     }
     let sym = parts[0].trim().to_string();
     let kind_str = parts[1].trim();
@@ -945,7 +944,7 @@ fn parse_type_directive(args: &str) -> Result<AsmDirective, String> {
 fn parse_size_directive(args: &str) -> Result<AsmDirective, String> {
     let parts: Vec<&str> = args.splitn(2, ',').collect();
     if parts.len() != 2 {
-        return Ok(AsmDirective::Ignored);
+        return Err(format!("malformed .size directive: expected 'name, expr', got '{}'", args));
     }
     let sym = parts[0].trim().to_string();
     let expr_str = parts[1].trim();
@@ -955,6 +954,8 @@ fn parse_size_directive(args: &str) -> Result<AsmDirective, String> {
     } else if let Ok(size) = expr_str.parse::<u64>() {
         Ok(AsmDirective::Size(sym, SizeExpr::Constant(size)))
     } else {
+        // Size expressions we can't evaluate (e.g. complex expressions) are non-fatal;
+        // the symbol size is not critical for code correctness in static linking
         Ok(AsmDirective::Ignored)
     }
 }
@@ -963,7 +964,7 @@ fn parse_size_directive(args: &str) -> Result<AsmDirective, String> {
 fn parse_comm_directive(args: &str) -> Result<AsmDirective, String> {
     let parts: Vec<&str> = args.split(',').collect();
     if parts.len() < 2 {
-        return Ok(AsmDirective::Ignored);
+        return Err(format!("malformed .comm directive: expected 'name, size[, align]', got '{}'", args));
     }
     let sym = parts[0].trim().to_string();
     let size: u64 = parts[1].trim().parse().unwrap_or(0);

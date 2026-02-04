@@ -1142,10 +1142,10 @@ fn emit_executable(
                                 out[fp-1] = 0xc0 | reg;
                                 w32(&mut out, fp, (tpoff + a) as u32);
                             } else {
-                                // Can't relax non-movq pattern; write raw TPOFF displacement.
-                                // This may produce wrong code if the instruction expected a GOT-relative value.
-                                eprintln!("WARNING: GOTTPOFF IE-to-LE relaxation: unrecognized instruction pattern at offset 0x{:x} for symbol '{}', writing raw TPOFF", fp, sym.name);
-                                w32(&mut out, fp, (tpoff + a) as u32);
+                                return Err(format!(
+                                    "GOTTPOFF IE-to-LE relaxation failed: unrecognized instruction pattern at offset 0x{:x} for symbol '{}' (expected movq GOT(%rip), %reg)",
+                                    fp, sym.name
+                                ));
                             }
                         }
                     }
@@ -1184,8 +1184,10 @@ fn emit_executable(
                     }
                     R_X86_64_NONE => {}
                     other => {
-                        eprintln!("warning: unsupported reloc type {} for '{}' in {}",
-                            other, sym.name, objects[obj_idx].source_name);
+                        return Err(format!(
+                            "unsupported x86-64 relocation type {} for '{}' in {}",
+                            other, sym.name, objects[obj_idx].source_name
+                        ));
                     }
                 }
             }

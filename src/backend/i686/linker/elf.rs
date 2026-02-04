@@ -2199,10 +2199,11 @@ pub fn link_builtin(
                             (addend as i32 - got_base as i32) as u32
                         }
                     }
-                    _ => {
-                        eprintln!("warning: unsupported relocation type {} at {}:0x{:x}",
-                            rel_type, obj.filename, rel_offset);
-                        continue;
+                    other => {
+                        return Err(format!(
+                            "unsupported i686 relocation type {} at {}:0x{:x}",
+                            other, obj.filename, rel_offset
+                        ));
                     }
                 };
 
