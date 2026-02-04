@@ -406,6 +406,14 @@ fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<Strin
 }
 
 fn resolve_lib(name: &str, paths: &[String]) -> Option<String> {
+    // TODO: handle -l:filename exact search (colon prefix means exact filename)
+    if let Some(exact) = name.strip_prefix(':') {
+        for dir in paths {
+            let p = format!("{}/{}", dir, exact);
+            if Path::new(&p).exists() { return Some(p); }
+        }
+        return None;
+    }
     for dir in paths {
         // Prefer static archive for static linking
         let a = format!("{}/lib{}.a", dir, name);

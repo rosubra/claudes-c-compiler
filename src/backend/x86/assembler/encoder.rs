@@ -498,6 +498,11 @@ impl InstructionEncoder {
             "fld" => self.encode_fld_st(ops),
             "fstp" => self.encode_fstp_st(ops),
 
+            // Standalone prefix mnemonics (e.g. from "rep; nop" split on semicolon)
+            "rep" | "repe" | "repz" if ops.is_empty() => { self.bytes.push(0xF3); Ok(()) }
+            "repnz" | "repne" if ops.is_empty() => { self.bytes.push(0xF2); Ok(()) }
+            "lock" if ops.is_empty() => { self.bytes.push(0xF0); Ok(()) }
+
             _ => {
                 // TODO: many more instructions to handle
                 Err(format!("unhandled instruction: {} {:?}", mnemonic, ops))

@@ -278,8 +278,10 @@ impl InstructionEncoder {
             "rdmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x32]); Ok(()) }
             "wrmsr" => { self.bytes.extend_from_slice(&[0x0F, 0x30]); Ok(()) }
 
-            // lock prefix as standalone instruction (codegen emits it on its own line)
+            // Standalone prefix mnemonics (e.g. from "rep; nop" split on semicolon)
             "lock" if ops.is_empty() => { self.bytes.push(0xF0); Ok(()) }
+            "rep" | "repe" | "repz" if ops.is_empty() => { self.bytes.push(0xF3); Ok(()) }
+            "repnz" | "repne" if ops.is_empty() => { self.bytes.push(0xF2); Ok(()) }
 
             // String ops
             "movsb" => { self.bytes.push(0xA4); Ok(()) }

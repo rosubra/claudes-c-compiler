@@ -289,7 +289,12 @@ pub fn link_to_executable(
 
     if !is_static {
         for libname in &needed_libs {
-            let so_name = format!("lib{}.so", libname);
+            // -l:filename means search for exact filename
+            let so_name = if let Some(exact) = libname.strip_prefix(':') {
+                exact.to_string()
+            } else {
+                format!("lib{}.so", libname)
+            };
             for dir in &lib_search_paths {
                 let path = format!("{}/{}", dir, so_name);
                 if std::path::Path::new(&path).exists() {
@@ -360,7 +365,12 @@ pub fn link_to_executable(
 
     let mut resolved_archives: HashSet<String> = HashSet::new();
     for libname in &needed_libs {
-        let archive_name = format!("lib{}.a", libname);
+        // -l:filename means search for exact filename
+        let archive_name = if let Some(exact) = libname.strip_prefix(':') {
+            exact.to_string()
+        } else {
+            format!("lib{}.a", libname)
+        };
         for dir in &lib_search_paths {
             let path = format!("{}/{}", dir, archive_name);
             if resolved_archives.contains(&path) {

@@ -112,6 +112,14 @@ pub fn link_builtin(
     let lib_path_strings: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
 
     let resolve_lib = |name: &str, paths: &[String]| -> Option<String> {
+        // -l:filename means search for exact filename (no lib prefix or .so/.a suffix)
+        if let Some(exact) = name.strip_prefix(':') {
+            for dir in paths {
+                let p = format!("{}/{}", dir, exact);
+                if Path::new(&p).exists() { return Some(p); }
+            }
+            return None;
+        }
         for dir in paths {
             let so = format!("{}/lib{}.so", dir, name);
             if Path::new(&so).exists() { return Some(so); }
