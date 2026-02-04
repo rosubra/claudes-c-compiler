@@ -6,12 +6,14 @@
 use std::collections::HashMap;
 use crate::backend::x86::assembler::parser::*;
 use super::encoder::*;
-use crate::backend::elf::{
+use crate::backend::elf::{self as elf_mod,
     SHT_PROGBITS,
     STB_LOCAL, STB_GLOBAL, STB_WEAK,
     STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_TLS,
     STV_DEFAULT, STV_INTERNAL, STV_HIDDEN, STV_PROTECTED,
+    ELFCLASS32, EM_386,
     resolve_numeric_labels, parse_section_flags,
+    ElfConfig, ObjSection, ObjSymbol, ObjReloc, SymbolTableInput,
 };
 
 // i686 uses u32 section flags (ELF32) for local section structs.
@@ -534,99 +536,15 @@ impl ElfWriter {
         // Relax jumps first, before resolving sizes and updating symbol values
         self.relax_jumps();
 
-        // After relaxation, update all symbol values from the (now-correct) label_positions.
-        for (name, &(_sec_idx, offset)) in &self.label_positions {
-            if let Some(&sym_idx) = self.symbol_map.get(name) {
-                self.symbols[sym_idx].value = offset;
-            }
-        }
-
-        // Resolve sizes (after relaxation so sizes are correct)
-        for (name, expr) in &self.pending_sizes {
-            if let Some(&sym_idx) = self.symbol_map.get(name) {
-                let size = match expr {
-                    SizeExpr::Constant(v) => *v as u32,
-                    SizeExpr::CurrentMinusSymbol(start_sym) => {
-                        if let Some(&(sec_idx, start_off)) = self.label_positions.get(start_sym) {
-                            let end = self.sections[sec_idx].data.len() as u32;
-                            end - start_off
-                        } else {
-                            0
-                        }
-                    }
-                    SizeExpr::SymbolDiff(end_label, start_label) => {
-                        let end_off = self.label_positions.get(end_label).map(|p| p.1).unwrap_or(0);
-                        let start_off = self.label_positions.get(start_label).map(|p| p.1).unwrap_or(0);
-                        end_off.wrapping_sub(start_off)
-                    }
-                };
-                self.symbols[sym_idx].size = size;
-            }
-        }
-
         // Resolve internal relocations
         self.resolve_internal_relocations();
-
-        // Resolve .set aliases into proper symbols with correct binding/visibility.
-        for (alias, target) in &self.aliases {
-            let (section, value, size, target_sym_type) = if let Some(&sym_idx) = self.symbol_map.get(target.as_str()) {
-                let sym = &self.symbols[sym_idx];
-                (sym.section.clone(), sym.value, sym.size, sym.sym_type)
-            } else if let Some(&(sec_idx, offset)) = self.label_positions.get(target.as_str()) {
-                (Some(self.sections[sec_idx].name.clone()), offset, 0u32, STT_NOTYPE)
-            } else {
-                continue;
-            };
-
-            let binding = if self.pending_globals.contains(alias) {
-                STB_GLOBAL
-            } else if self.pending_weaks.contains(alias) {
-                STB_WEAK
-            } else {
-                STB_LOCAL
-            };
-
-            let sym_type = match self.pending_types.get(alias.as_str()) {
-                Some(SymbolKind::Function) => STT_FUNC,
-                Some(SymbolKind::Object) => STT_OBJECT,
-                Some(SymbolKind::TlsObject) => STT_TLS,
-                Some(SymbolKind::NoType) => STT_NOTYPE,
-                None => target_sym_type,
-            };
-
-            let visibility = if self.pending_hidden.contains(alias) {
-                STV_HIDDEN
-            } else if self.pending_protected.contains(alias) {
-                STV_PROTECTED
-            } else if self.pending_internal.contains(alias) {
-                STV_INTERNAL
-            } else {
-                STV_DEFAULT
-            };
-
-            let sym_idx = self.symbols.len();
-            self.symbols.push(SymbolInfo {
-                name: alias.clone(),
-                binding,
-                sym_type,
-                visibility,
-                section,
-                value,
-                size,
-                is_common: false,
-                common_align: 0,
-            });
-            self.symbol_map.insert(alias.clone(), sym_idx);
-        }
 
         // Convert to shared format and delegate to shared writer.
         // For i686 REL format, addends must be patched into section data
         // since REL entries don't carry an explicit addend field.
-        use crate::backend::elf::{self as elf_mod, ElfConfig, ObjSection, ObjSymbol, ObjReloc, ELFCLASS32, EM_386};
-
         let section_names: Vec<String> = self.sections.iter().map(|s| s.name.clone()).collect();
 
-        let mut shared_sections: std::collections::HashMap<String, ObjSection> = std::collections::HashMap::new();
+        let mut shared_sections: HashMap<String, ObjSection> = HashMap::new();
         for sec in &self.sections {
             // Clone section data so we can patch implicit addends into it
             let mut data = sec.data.clone();
@@ -669,79 +587,100 @@ impl ElfWriter {
             });
         }
 
-        // Convert symbols, filtering out .L* labels
-        let mut shared_symbols: Vec<ObjSymbol> = self.symbols.iter()
-            .filter(|sym| !sym.name.is_empty() && !sym.name.starts_with('.'))
-            .map(|sym| ObjSymbol {
-                name: sym.name.clone(),
-                value: if sym.is_common { sym.common_align as u64 } else { sym.value as u64 },
-                size: sym.size as u64,
-                binding: sym.binding,
-                sym_type: sym.sym_type,
-                visibility: sym.visibility,
-                section_name: if sym.is_common {
-                    "*COM*".to_string()
-                } else {
-                    sym.section.clone().unwrap_or_default()
-                },
-            }).collect();
-
-        // Add undefined symbols for external references (e.g., printf, strlen, etc.)
-        // that appear in relocations but have no definition in this object file.
-        // Without these, the linker can't resolve PC32 calls to external functions.
-        let defined_names: std::collections::HashSet<&str> = shared_symbols.iter()
-            .map(|s| s.name.as_str())
-            .collect();
-        let section_name_set: std::collections::HashSet<&str> = section_names.iter()
-            .map(|s| s.as_str())
+        // Convert label positions from (section_index, offset) to (section_name, offset)
+        // for the shared symbol table builder.
+        let labels: HashMap<String, (String, u64)> = self.label_positions.iter()
+            .map(|(name, &(sec_idx, offset))| {
+                (name.clone(), (section_names[sec_idx].clone(), offset as u64))
+            })
             .collect();
 
-        let mut undefined_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for sec in shared_sections.values() {
-            for reloc in &sec.relocs {
-                let name = &reloc.symbol_name;
-                if name.is_empty() || name.starts_with('.') {
-                    continue; // Skip empty and internal (.L*) labels / section symbols
-                }
-                if section_name_set.contains(name.as_str()) {
-                    continue; // Skip section names (already have section symbols)
-                }
-                if !defined_names.contains(name.as_str()) {
-                    undefined_names.insert(name.clone());
-                }
-            }
+        // Convert pending_globals/weaks from Vec<String> to HashMap<String, bool>
+        let global_symbols: HashMap<String, bool> = self.pending_globals.iter()
+            .map(|s| (s.clone(), true))
+            .collect();
+        let weak_symbols: HashMap<String, bool> = self.pending_weaks.iter()
+            .map(|s| (s.clone(), true))
+            .collect();
+
+        // Convert pending_types from HashMap<String, SymbolKind> to HashMap<String, u8>
+        let symbol_types: HashMap<String, u8> = self.pending_types.iter()
+            .map(|(name, kind)| {
+                let stt = match kind {
+                    SymbolKind::Function => STT_FUNC,
+                    SymbolKind::Object => STT_OBJECT,
+                    SymbolKind::TlsObject => STT_TLS,
+                    SymbolKind::NoType => STT_NOTYPE,
+                };
+                (name.clone(), stt)
+            })
+            .collect();
+
+        // Resolve pending_sizes to concrete u64 values (after relaxation)
+        let symbol_sizes: HashMap<String, u64> = self.pending_sizes.iter()
+            .map(|(name, expr)| {
+                let size = match expr {
+                    SizeExpr::Constant(v) => *v,
+                    SizeExpr::CurrentMinusSymbol(start_sym) => {
+                        if let Some(&(sec_idx, start_off)) = self.label_positions.get(start_sym) {
+                            let end = self.sections[sec_idx].data.len() as u64;
+                            end - start_off as u64
+                        } else {
+                            0
+                        }
+                    }
+                    SizeExpr::SymbolDiff(end_label, start_label) => {
+                        let end_off = self.label_positions.get(end_label).map(|p| p.1 as u64).unwrap_or(0);
+                        let start_off = self.label_positions.get(start_label).map(|p| p.1 as u64).unwrap_or(0);
+                        end_off.wrapping_sub(start_off)
+                    }
+                };
+                (name.clone(), size)
+            })
+            .collect();
+
+        // Convert pending_hidden/protected/internal from Vec<String> to HashMap<String, u8>
+        let mut symbol_visibility: HashMap<String, u8> = HashMap::new();
+        for name in &self.pending_hidden {
+            symbol_visibility.insert(name.clone(), STV_HIDDEN);
+        }
+        for name in &self.pending_protected {
+            symbol_visibility.insert(name.clone(), STV_PROTECTED);
+        }
+        for name in &self.pending_internal {
+            symbol_visibility.insert(name.clone(), STV_INTERNAL);
         }
 
-        for name in &undefined_names {
-            let binding = if self.pending_weaks.contains(name) {
-                STB_WEAK
-            } else {
-                STB_GLOBAL
-            };
-            let sym_type = match self.pending_types.get(name.as_str()) {
-                Some(SymbolKind::Function) => STT_FUNC,
-                Some(SymbolKind::Object) => STT_OBJECT,
-                Some(SymbolKind::TlsObject) => STT_TLS,
-                Some(SymbolKind::NoType) | None => STT_NOTYPE,
-            };
-            let visibility = if self.pending_hidden.contains(name) {
-                STV_HIDDEN
-            } else if self.pending_protected.contains(name) {
-                STV_PROTECTED
-            } else if self.pending_internal.contains(name) {
-                STV_INTERNAL
-            } else {
-                STV_DEFAULT
-            };
-            shared_symbols.push(ObjSymbol {
-                name: name.clone(),
-                value: 0,
-                size: 0,
-                binding,
-                sym_type,
-                visibility,
-                section_name: String::new(), // empty = SHN_UNDEF
-            });
+        // Use the shared symbol table builder (same as ARM and RISC-V assemblers).
+        // This handles defined labels, .set/.equ aliases, undefined symbols from
+        // relocations, and proper binding/type/visibility for all of them.
+        let symtab_input = SymbolTableInput {
+            labels: &labels,
+            global_symbols: &global_symbols,
+            weak_symbols: &weak_symbols,
+            symbol_types: &symbol_types,
+            symbol_sizes: &symbol_sizes,
+            symbol_visibility: &symbol_visibility,
+            aliases: &self.aliases,
+            sections: &shared_sections,
+            include_referenced_locals: false,
+        };
+
+        let mut shared_symbols = elf_mod::build_elf_symbol_table(&symtab_input);
+
+        // Add COMMON symbols separately (they don't have labels/label_positions)
+        for sym in &self.symbols {
+            if sym.is_common {
+                shared_symbols.push(ObjSymbol {
+                    name: sym.name.clone(),
+                    value: sym.common_align as u64,
+                    size: sym.size as u64,
+                    binding: sym.binding,
+                    sym_type: sym.sym_type,
+                    visibility: sym.visibility,
+                    section_name: "*COM*".to_string(),
+                });
+            }
         }
 
         let config = ElfConfig {

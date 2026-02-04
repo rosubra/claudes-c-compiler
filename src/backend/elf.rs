@@ -1561,16 +1561,15 @@ pub fn parse_section_flags(name: &str, flags_str: Option<&str>, type_str: Option
     (section_type, flags)
 }
 
-// ── Shared symbol table builder for ARM/RISC-V ELF writers ──────────────
+// ── Shared symbol table builder for all backend ELF writers ─────────────
 //
-// Both ARM and RISC-V ELF writers have nearly identical `build_symbol_table`
-// and `write_elf` logic. This shared infrastructure eliminates ~250 lines
-// of duplicated code between the two backends.
+// All four backend assemblers (x86-64, i686, ARM, RISC-V) use this shared
+// `build_elf_symbol_table` function to construct their symbol tables from
+// labels, aliases, and relocation references. This eliminates duplicated
+// symbol table construction logic across the backends.
 //
-// The ARM and RISC-V ELF writers both use identical internal data structures
-// (Section, ElfReloc, ElfSymbol) and the same symbol table building
-// algorithm. The only difference is RISC-V needs to include referenced
-// local labels (for pcrel_hi synthetic labels) in the symbol table.
+// The only architecture-specific difference is that RISC-V needs to include
+// referenced local labels (for pcrel_hi synthetic labels) in the symbol table.
 
 /// Parameters for the shared `build_elf_symbol_table` function.
 /// Collects the state needed to build the symbol table without requiring
