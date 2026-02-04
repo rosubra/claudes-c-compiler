@@ -78,6 +78,7 @@ fn mnemonic_size_suffix(mnemonic: &str) -> Option<u8> {
     match mnemonic {
         "cltd" | "cdq" | "ret" | "nop" | "ud2" | "pause"
         | "mfence" | "lfence" | "sfence" | "clflush"
+        | "ldmxcsr" | "stmxcsr"
         | "syscall" | "sysenter" | "cpuid" | "rdtsc" | "rdtscp" => return None,
         _ => {}
     }
@@ -266,6 +267,8 @@ impl InstructionEncoder {
             "lfence" => { self.bytes.extend_from_slice(&[0x0F, 0xAE, 0xE8]); Ok(()) }
             "sfence" => { self.bytes.extend_from_slice(&[0x0F, 0xAE, 0xF8]); Ok(()) }
             "clflush" => self.encode_clflush(ops),
+            "ldmxcsr" => self.encode_sse_mem_only(ops, 2),
+            "stmxcsr" => self.encode_sse_mem_only(ops, 3),
             "int" => self.encode_int(ops),
             "cpuid" => { self.bytes.extend_from_slice(&[0x0F, 0xA2]); Ok(()) }
             "rdtsc" => { self.bytes.extend_from_slice(&[0x0F, 0x31]); Ok(()) }
@@ -1840,6 +1843,21 @@ impl InstructionEncoder {
                 self.encode_modrm_mem(7, mem)
             }
             _ => Err("clflush requires memory operand".to_string()),
+        }
+    }
+
+    /// Encode SSE memory-only instructions (ldmxcsr, stmxcsr).
+    /// Format: 0F AE /ext mem
+    fn encode_sse_mem_only(&mut self, ops: &[Operand], ext: u8) -> Result<(), String> {
+        if ops.len() != 1 {
+            return Err("SSE mem-only op requires 1 operand".to_string());
+        }
+        match &ops[0] {
+            Operand::Memory(mem) => {
+                self.bytes.extend_from_slice(&[0x0F, 0xAE]);
+                self.encode_modrm_mem(ext, mem)
+            }
+            _ => Err("SSE mem-only op requires memory operand".to_string()),
         }
     }
 

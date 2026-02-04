@@ -53,3 +53,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | flatcc  | PASS | PASS | FAIL (arm segfault) | PASS | arm crashes at runtime in monster_test |
 | mbedtls | PASS | FAIL (i686) | PASS | PASS | x86/arm/riscv pass |
 | giflib  | PASS | FAIL (i686) | PASS | PASS | x86/arm/riscv pass |
+| arithcode | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| tweetnacl | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| kann    | PASS | PASS | FAIL (arm NEON) | PASS | Fixed: added MXCSR macros/functions to xmmintrin.h, added stmxcsr/ldmxcsr to i686 asm |
+| libucl  | PASS | PASS | FAIL (arm) | PASS | arm fails (separate issue) |

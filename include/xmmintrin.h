@@ -599,4 +599,104 @@ _mm_pause(void)
     __builtin_ia32_pause();
 }
 
+/* === MXCSR control/status register === */
+
+/* Read the MXCSR register */
+static __inline__ unsigned int __attribute__((__always_inline__))
+_mm_getcsr(void)
+{
+    unsigned int __csr;
+    __asm__ __volatile__("stmxcsr %0" : "=m" (__csr));
+    return __csr;
+}
+
+/* Write the MXCSR register */
+static __inline__ void __attribute__((__always_inline__))
+_mm_setcsr(unsigned int __csr)
+{
+    __asm__ __volatile__("ldmxcsr %0" : : "m" (__csr));
+}
+
+/* Exception state bits (bits 0-5 of MXCSR) */
+#define _MM_EXCEPT_INVALID    0x0001
+#define _MM_EXCEPT_DENORM     0x0002
+#define _MM_EXCEPT_DIV_ZERO   0x0004
+#define _MM_EXCEPT_OVERFLOW   0x0008
+#define _MM_EXCEPT_UNDERFLOW  0x0010
+#define _MM_EXCEPT_INEXACT    0x0020
+#define _MM_EXCEPT_MASK       0x003f
+
+/* Exception mask bits (bits 7-12 of MXCSR) */
+#define _MM_MASK_INVALID      0x0080
+#define _MM_MASK_DENORM       0x0100
+#define _MM_MASK_DIV_ZERO     0x0200
+#define _MM_MASK_OVERFLOW     0x0400
+#define _MM_MASK_UNDERFLOW    0x0800
+#define _MM_MASK_INEXACT      0x1000
+#define _MM_MASK_MASK         0x1f80
+
+/* Rounding mode bits (bits 13-14 of MXCSR) */
+#define _MM_ROUND_NEAREST     0x0000
+#define _MM_ROUND_DOWN        0x2000
+#define _MM_ROUND_UP          0x4000
+#define _MM_ROUND_TOWARD_ZERO 0x6000
+#define _MM_ROUND_MASK        0x6000
+
+/* Flush-to-zero bit (bit 15 of MXCSR) */
+#define _MM_FLUSH_ZERO_MASK   0x8000
+#define _MM_FLUSH_ZERO_ON     0x8000
+#define _MM_FLUSH_ZERO_OFF    0x0000
+
+/* Get/set exception state */
+static __inline__ unsigned int __attribute__((__always_inline__))
+_MM_GET_EXCEPTION_STATE(void)
+{
+    return _mm_getcsr() & _MM_EXCEPT_MASK;
+}
+
+static __inline__ void __attribute__((__always_inline__))
+_MM_SET_EXCEPTION_STATE(unsigned int __mask)
+{
+    _mm_setcsr((_mm_getcsr() & ~_MM_EXCEPT_MASK) | __mask);
+}
+
+/* Get/set exception mask */
+static __inline__ unsigned int __attribute__((__always_inline__))
+_MM_GET_EXCEPTION_MASK(void)
+{
+    return _mm_getcsr() & _MM_MASK_MASK;
+}
+
+static __inline__ void __attribute__((__always_inline__))
+_MM_SET_EXCEPTION_MASK(unsigned int __mask)
+{
+    _mm_setcsr((_mm_getcsr() & ~_MM_MASK_MASK) | __mask);
+}
+
+/* Get/set rounding mode */
+static __inline__ unsigned int __attribute__((__always_inline__))
+_MM_GET_ROUNDING_MODE(void)
+{
+    return _mm_getcsr() & _MM_ROUND_MASK;
+}
+
+static __inline__ void __attribute__((__always_inline__))
+_MM_SET_ROUNDING_MODE(unsigned int __mode)
+{
+    _mm_setcsr((_mm_getcsr() & ~_MM_ROUND_MASK) | __mode);
+}
+
+/* Get/set flush-to-zero mode */
+static __inline__ unsigned int __attribute__((__always_inline__))
+_MM_GET_FLUSH_ZERO_MODE(void)
+{
+    return _mm_getcsr() & _MM_FLUSH_ZERO_MASK;
+}
+
+static __inline__ void __attribute__((__always_inline__))
+_MM_SET_FLUSH_ZERO_MODE(unsigned int __mode)
+{
+    _mm_setcsr((_mm_getcsr() & ~_MM_FLUSH_ZERO_MASK) | __mode);
+}
+
 #endif /* _XMMINTRIN_H_INCLUDED */
