@@ -240,19 +240,31 @@ containing `VaStart`/`VaEnd`/`VaArg`, `DynAlloca`, `StackSave`/`StackRestore`,
 | Small / static inline | 20 | 3 | Always inlined if under caller budget |
 | Normal static | 30 | 4 | Inlined if under caller budget |
 | Normal eligible | 60 | 6 | Inlined if under caller budget |
-| `always_inline` | 500 | 500 | Separate 2000-instruction budget |
+| `always_inline` | 500 | 500 | Separate 200-instruction budget (main) + 400 (second pass) |
 
 Inlining respects per-caller budgets: normal inlining stops when the caller
 exceeds 200 instructions or 800 total inlined instructions, with a hard cap at
 500 instructions (1000 absolute cap). The `always_inline` attribute has its own
-2000-instruction budget that is independent of the normal budget. When the caller
-has a section attribute (e.g., `.init.text` in the Linux kernel), `always_inline`
+200-instruction budget in the main loop, kept low to prevent stack frame bloat
+(CCC allocates ~8 bytes per SSA value on the stack). When the caller has a
+section attribute (e.g., `.init.text` in the Linux kernel), `always_inline`
 callees bypass the budget entirely, ensuring kernel initialization code is always
 fully inlined.
 
 Each caller function is processed for up to 200 inlining rounds to handle chains
 of inlined calls (e.g., A calls B calls C, where B is inlined into A, exposing
 the call to C).
+
+After the main loop, a **second pass** processes any remaining `always_inline`
+call sites with an independent 400-instruction budget and up to 300 rounds. This
+handles correctness-critical cases where the main loop's budget or round limit
+was exhausted before resolving all always_inline chains (e.g., KVM nVHE functions
+referencing section-specific symbols, or `cpucap_is_possible()` chains that must
+be inlined to eliminate `__attribute__((error))` calls and undefined symbol
+references). The two budgets are independent, so the combined maximum is 200 +
+400 = 600 always_inline instructions per caller. The second pass does not enforce
+caller size caps (hard cap, absolute cap) because these are correctness-critical
+inlines that must proceed regardless of caller size.
 
 **Mechanics.** The inliner clones the callee's blocks with remapped value and
 block IDs, wires arguments by inserting stores into the callee's parameter

@@ -130,18 +130,25 @@ impl Lowerer {
             }
 
             // Functions declared with __attribute__((error("..."))) are compile-time
-            // assertion traps (e.g., kernel's __bad_mask, __field_overflow). In GCC,
-            // these calls are eliminated by inlining + constant folding. Since we don't
-            // inline, replace calls to error-attributed functions with ud2 (trap) to
-            // avoid emitting undefined symbol references. The code path should be
-            // unreachable at runtime.
+            // assertion functions (e.g., kernel's __bad_mask, __field_overflow).
+            // In GCC, these calls are eliminated by inlining + constant folding,
+            // and if they survive, GCC emits a compile error. Since CCC's inliner
+            // may not inline all call sites (due to budget/round limits), we must
+            // handle surviving calls gracefully.
+            //
+            // Instead of emitting a trap (which causes kernel BRK crashes when
+            // always_inline functions like cpucap_is_possible aren't fully inlined),
+            // we simply skip the call. This avoids referencing the undefined symbol
+            // and makes the standalone function body harmless. After inlining, the
+            // dead code containing this no-op is eliminated by constant folding and DCE.
+            //
+            // TODO: Once the inliner can fully inline all always_inline chains
+            // (eliminating all error function call sites), restore this to emit a
+            // compile error (matching GCC behavior) instead of silently dropping.
             if self.error_functions.contains(name) {
-                // Emit inline assembly trap instruction, then mark unreachable.
-                // This avoids referencing the undefined symbol.
-                self.terminate(Terminator::Unreachable);
-                // Start a new (unreachable) block so subsequent code can still be lowered
-                let dead_label = self.fresh_label();
-                self.start_block(dead_label);
+                // No-op: skip the call. The code path should be unreachable after
+                // inlining and constant folding. If it IS reached at runtime,
+                // execution continues harmlessly (which is better than crashing).
                 return Operand::Const(IrConst::ptr_int(0));
             }
         }

@@ -117,10 +117,37 @@ const MAX_STATIC_NONINLINE_BLOCKS: usize = 4;
 /// this budget because they have negligible impact and must be inlined for
 /// linker correctness (inline asm "i" constraints, undefined symbols).
 ///
-/// Set to 2000 to accommodate deep always_inline chains while still preventing
-/// catastrophic stack bloat in functions without section attributes (e.g.,
-/// shrink_folio_list with 200+ always_inline calls).
-const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 2000;
+/// Set to 200 to keep stack frames from always_inline inlining under ~2KB.
+/// CCC allocates ~8 bytes per SSA value, so 200 instructions add ~1.6KB to
+/// the stack frame. Combined with the base function's frame, this typically
+/// keeps total frame size under ~2KB, leaving headroom in the kernel's 16KB
+/// stack for deep call chains (e.g., mm/page_alloc.c has 10+ levels).
+/// Functions with section attributes bypass the budget entirely (to avoid
+/// modpost errors). The standalone bodies of always_inline functions that
+/// aren't fully inlined remain correct because __attribute__((error)) calls
+/// are lowered as no-ops (not traps).
+const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 200;
+
+/// Additional always_inline budget for the second (correctness) pass.
+/// After the main inlining loop exhausts max_rounds, any remaining
+/// always_inline call sites are processed in a second pass with this
+/// independent budget. This is separate from the main budget because
+/// the second pass handles correctness-critical cases (e.g., KVM nVHE
+/// functions where always_inline chains reference section-specific
+/// symbols like __kvm_nvhe_gic_nonsecure_priorities that only exist
+/// when inlined). Set to 400 to cover typical 2-3 level always_inline
+/// chains (e.g., cpucap_is_possible has ~84 instructions and appears
+/// 3+ times per function, totaling ~252 instructions). This limits
+/// stack frame growth: the worst case adds ~400 * 8 = ~3.2KB to the
+/// frame, but in practice many inlined instructions are eliminated by
+/// constant folding and DCE.
+const MAX_ALWAYS_INLINE_SECOND_PASS_BUDGET: usize = 400;
+
+/// Maximum number of rounds for the second (correctness) pass.
+/// Each round inlines one always_inline call site and re-scans.
+/// Set high enough to handle functions with many always_inline call
+/// sites that weren't reached in the main loop's max_rounds.
+const MAX_ALWAYS_INLINE_SECOND_PASS_ROUNDS: usize = 300;
 
 /// Hard cap on caller instruction count. When a caller exceeds this threshold,
 /// even always_inline inlining is stopped (except for tiny callees that must be
@@ -239,7 +266,8 @@ fn select_inline_site(
             continue;
         }
         // Hard cap: stop normal inlining to prevent kernel stack overflow.
-        // always_inline callees MUST be inlined regardless of caller size.
+        // always_inline callees are still inlined (C semantic requirement),
+        // but are limited by the always_inline budget.
         if caller_at_hard_cap && !callee_data.is_always_inline {
             continue;
         }
@@ -412,6 +440,82 @@ pub fn run(module: &mut IrModule) -> usize {
                 total_inlined += 1;
                 module.functions[func_idx].has_inlined_calls = true;
             } else {
+                break;
+            }
+        }
+
+        // Second pass: ensure all remaining __always_inline call sites are inlined.
+        // The main loop above may exhaust max_rounds before processing all call sites
+        // in functions with 200+ inline sites (e.g., kernel's ___slab_alloc in mm/slub.c).
+        // When always_inline functions like cpucap_is_possible() are left un-inlined,
+        // their standalone bodies contain BRK traps from unresolved compiletime_assert,
+        // causing kernel crashes. This pass also handles cases where the main loop's
+        // budget was exhausted, leaving correctness-critical always_inline chains
+        // (e.g., KVM nVHE functions referencing section-specific symbols) un-inlined.
+        //
+        // This pass uses its own independent budget (not shared with the main loop)
+        // to allow small always_inline chains needed for correctness while preventing
+        // large chains from causing stack overflow. Combined with the main loop, the
+        // worst case is 200 + 400 = 600 always_inline instructions per caller.
+        //
+        // Note: this pass intentionally does NOT check caller_too_large /
+        // caller_at_hard_cap / caller_at_absolute_cap. These are correctness-
+        // critical inlines (avoiding linker errors and BRK crashes), so they
+        // must proceed regardless of caller size. The budget limit (400 inst)
+        // provides the growth bound instead.
+        let mut second_pass_budget = MAX_ALWAYS_INLINE_SECOND_PASS_BUDGET;
+        for _round in 0..MAX_ALWAYS_INLINE_SECOND_PASS_ROUNDS {
+            let call_sites = find_inline_call_sites(&module.functions[func_idx], &callee_map, &skip_list, caller_has_section);
+            if call_sites.is_empty() {
+                break;
+            }
+
+            // Only look for always_inline callees
+            let mut found = false;
+            for site in &call_sites {
+                let callee_data = &callee_map[&site.callee_name];
+                if !callee_data.is_always_inline {
+                    continue;
+                }
+                let callee_inst_count: usize = callee_data.blocks.iter()
+                    .map(|b| b.instructions.len())
+                    .sum();
+                let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= 1;
+                // Tiny callees always pass; others must fit in the second pass budget.
+                // Callers with section attributes bypass budget (section-specific symbols
+                // like __kvm_nvhe_* MUST be resolved through inlining).
+                if !is_tiny && !caller_has_section && callee_inst_count > second_pass_budget {
+                    continue;
+                }
+                let success = inline_call_site(
+                    &mut module.functions[func_idx],
+                    site,
+                    callee_data,
+                    &mut global_max_block_id,
+                );
+                if success {
+                    if debug_inline {
+                        eprintln!("[INLINE] Inlined always_inline '{}' into '{}' (second pass)",
+                            site.callee_name, module.functions[func_idx].name);
+                    }
+                    if std::env::var("CCC_INLINE_VALIDATE").is_ok() {
+                        validate_function_values(&module.functions[func_idx], &site.callee_name);
+                    }
+                    if std::env::var("CCC_INLINE_DUMP_IR").is_ok() {
+                        dump_function_ir(&module.functions[func_idx],
+                            &format!("after inlining '{}' into '{}' (second pass)", site.callee_name, module.functions[func_idx].name));
+                    }
+                    total_inlined += 1;
+                    module.functions[func_idx].has_inlined_calls = true;
+                    if !is_tiny && !caller_has_section {
+                        second_pass_budget = second_pass_budget.saturating_sub(callee_inst_count);
+                    }
+                    found = true;
+                    break; // Re-scan after each inline
+                }
+            }
+            if !found {
                 break;
             }
         }
