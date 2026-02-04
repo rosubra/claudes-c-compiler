@@ -26,13 +26,13 @@ use std::path::Path;
 use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS64, ELFDATA2LSB,
     ET_REL, ET_DYN,
-    SHT_SYMTAB, SHT_RELA, SHT_DYNAMIC, SHT_NOBITS, SHT_DYNSYM,
+    SHT_SYMTAB, SHT_RELA, SHT_DYNAMIC, SHT_NOBITS, SHT_DYNSYM, SHT_GNU_VERSYM,
     STB_LOCAL, STB_GLOBAL, STB_WEAK,
     STT_SECTION, STT_FILE,
     SHN_UNDEF,
     PT_DYNAMIC,
     DT_NULL, DT_SONAME, DT_SYMTAB, DT_STRTAB, DT_STRSZ,
-    DT_GNU_HASH,
+    DT_GNU_HASH, DT_VERSYM,
     read_u16, read_u32, read_u64, read_i64, read_cstr,
     parse_archive_members,
 };
@@ -323,6 +323,17 @@ pub fn parse_shared_library_symbols(data: &[u8], lib_name: &str) -> Result<Vec<D
             ));
         }
 
+        // Find .gnu.version (SHT_GNU_VERSYM) section for filtering hidden symbols
+        let mut versym_off: usize = 0;
+        let mut versym_size: usize = 0;
+        for &(sh_type, offset, size, _link) in &sections {
+            if sh_type == SHT_GNU_VERSYM {
+                versym_off = offset as usize;
+                versym_size = size as usize;
+                break;
+            }
+        }
+
         // Find .dynsym and its string table
         for i in 0..sections.len() {
             let (sh_type, offset, size, link) = sections[i];
@@ -341,6 +352,10 @@ pub fn parse_shared_library_symbols(data: &[u8], lib_name: &str) -> Result<Vec<D
                 let sym_data = &data[sym_off..sym_off + sym_size];
                 let sym_count = sym_data.len() / 24;
 
+                // Read versym data if available
+                let have_versym = versym_off != 0 && versym_size >= sym_count * 2
+                    && versym_off + versym_size <= data.len();
+
                 let mut symbols = Vec::new();
                 for j in 1..sym_count {
                     let off = j * 24;
@@ -352,6 +367,22 @@ pub fn parse_shared_library_symbols(data: &[u8], lib_name: &str) -> Result<Vec<D
                     let size = read_u64(sym_data, off + 16);
 
                     if shndx == SHN_UNDEF { continue; }
+
+                    // Check .gnu.version: if the hidden bit (0x8000) is set and
+                    // the version index is >= 2, this is a non-default version
+                    // (symbol@VERSION, not symbol@@VERSION). Such symbols should
+                    // not be available for linking, matching GNU ld behavior.
+                    if have_versym {
+                        let ver_entry = versym_off + j * 2;
+                        let raw_ver = read_u16(data, ver_entry);
+                        let hidden = raw_ver & 0x8000 != 0;
+                        let ver_idx = raw_ver & 0x7fff;
+                        // ver_idx 0 = local, 1 = global (unversioned), >= 2 = versioned
+                        // Hidden + versioned means non-default version: skip it
+                        if hidden && ver_idx >= 2 {
+                            continue;
+                        }
+                    }
 
                     let name = read_cstr(strtab, name_idx);
                     if name.is_empty() { continue; }
@@ -404,11 +435,12 @@ fn parse_shared_library_symbols_from_phdrs(data: &[u8], lib_name: &str) -> Resul
         return Err(format!("{}: no PT_DYNAMIC segment found", lib_name));
     }
 
-    // Read dynamic entries to find DT_SYMTAB, DT_STRTAB, DT_STRSZ, DT_GNU_HASH
+    // Read dynamic entries to find DT_SYMTAB, DT_STRTAB, DT_STRSZ, DT_GNU_HASH, DT_VERSYM
     let mut symtab_addr: u64 = 0;
     let mut strtab_addr: u64 = 0;
     let mut strsz: u64 = 0;
     let mut gnu_hash_addr: u64 = 0;
+    let mut versym_addr: u64 = 0;
 
     let mut pos = dyn_offset;
     let dyn_end = dyn_offset + dyn_size;
@@ -421,6 +453,7 @@ fn parse_shared_library_symbols_from_phdrs(data: &[u8], lib_name: &str) -> Resul
             x if x == DT_STRTAB => strtab_addr = val,
             x if x == DT_STRSZ => strsz = val,
             x if x == DT_GNU_HASH => gnu_hash_addr = val,
+            x if x == DT_VERSYM => versym_addr = val,
             _ => {}
         }
         pos += 16;
@@ -462,6 +495,13 @@ fn parse_shared_library_symbols_from_phdrs(data: &[u8], lib_name: &str) -> Resul
         sym_size / 24
     };
 
+    // Resolve versym file offset if DT_VERSYM was found
+    let versym_file_offset = if versym_addr != 0 {
+        vaddr_to_file_offset(data, e_phoff, e_phentsize, e_phnum, versym_addr)
+    } else {
+        0
+    };
+
     let mut symbols = Vec::new();
     for j in 1..sym_count {
         let off = symtab_file_offset + j * 24;
@@ -473,6 +513,19 @@ fn parse_shared_library_symbols_from_phdrs(data: &[u8], lib_name: &str) -> Resul
         let size = read_u64(data, off + 16);
 
         if shndx == SHN_UNDEF { continue; }
+
+        // Check versym: skip non-default (hidden) versioned symbols
+        if versym_addr != 0 {
+            let ver_entry = versym_file_offset + j * 2;
+            if ver_entry + 2 <= data.len() {
+                let raw_ver = read_u16(data, ver_entry);
+                let hidden = raw_ver & 0x8000 != 0;
+                let ver_idx = raw_ver & 0x7fff;
+                if hidden && ver_idx >= 2 {
+                    continue;
+                }
+            }
+        }
 
         let name = read_cstr(strtab, name_idx);
         if name.is_empty() { continue; }

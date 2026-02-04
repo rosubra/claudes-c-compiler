@@ -704,10 +704,19 @@ Parses the `!<arch>\n` format:
 ### Shared Library Symbol Extraction (`parse_shared_library_symbols`)
 
 1. Validate as `ET_DYN` ELF file.
-2. Find the `SHT_DYNSYM` section.
+2. Find the `SHT_DYNSYM` section and the `SHT_GNU_VERSYM` section (if present).
 3. Parse each `Elf64_Sym` entry, resolving names from the linked string table.
 4. Include only defined symbols (`shndx != SHN_UNDEF`).
-5. Skip the null symbol at index 0.
+5. Filter out non-default versioned symbols using `.gnu.version`: if the hidden
+   bit (`0x8000`) is set and the version index is >= 2, the symbol is a non-default
+   version (`symbol@VERSION`, not `symbol@@VERSION`) and is skipped. This matches
+   GNU ld behavior and prevents linking against deprecated/hidden symbols like
+   `sysctl@GLIBC_2.2.5`.
+6. Skip the null symbol at index 0.
+
+When section headers are unavailable, falls back to `PT_DYNAMIC` program headers,
+reading `DT_SYMTAB`, `DT_STRTAB`, `DT_STRSZ`, `DT_GNU_HASH`, and `DT_VERSYM`
+to perform the same filtering.
 
 ### SONAME Extraction (`parse_soname`)
 

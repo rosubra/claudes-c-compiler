@@ -1103,9 +1103,8 @@ fn emit_shared_library(
             let gea = gpb + i as u64 * 8;
             // Find symbol index in dynsym
             let si = dyn_sym_names.iter().position(|n| n == name).map(|j| j+1).unwrap_or(0) as u64;
-            // R_X86_64_JUMP_SLOT = 7
             w64(&mut out, rp, gea);             // r_offset = GOT.PLT slot address
-            w64(&mut out, rp+8, (si << 32) | 7); // r_info = (sym << 32) | R_X86_64_JUMP_SLOT
+            w64(&mut out, rp+8, (si << 32) | R_X86_64_JUMP_SLOT as u64);
             w64(&mut out, rp+16, 0);            // r_addend = 0
             rp += 24;
         }
@@ -1251,7 +1250,7 @@ fn emit_shared_library(
     for (rel_offset, rel_value) in &rela_dyn_entries {
         if rd + 24 <= out.len() {
             w64(&mut out, rd, *rel_offset);     // r_offset
-            w64(&mut out, rd+8, 8);             // r_info = R_X86_64_RELATIVE (type 8, sym 0)
+            w64(&mut out, rd+8, R_X86_64_RELATIVE as u64); // r_info (sym 0)
             w64(&mut out, rd+16, *rel_value);   // r_addend = runtime value
             rd += 24;
         }
@@ -1261,7 +1260,7 @@ fn emit_shared_library(
         let si = dyn_sym_names.iter().position(|n| n == sym_name).map(|j| j + 1).unwrap_or(0) as u64;
         if rd + 24 <= out.len() {
             w64(&mut out, rd, *rel_offset);         // r_offset = GOT entry address
-            w64(&mut out, rd+8, (si << 32) | 6);    // r_info = (sym << 32) | R_X86_64_GLOB_DAT(6)
+            w64(&mut out, rd+8, (si << 32) | R_X86_64_GLOB_DAT as u64);
             w64(&mut out, rd+16, 0);                 // r_addend = 0
             rd += 24;
         }
@@ -1298,7 +1297,7 @@ fn emit_shared_library(
     if !plt_names.is_empty() {
         w64(&mut out, dd, DT_PLTGOT as u64); w64(&mut out, dd+8, got_plt_addr); dd += 16;
         w64(&mut out, dd, DT_PLTRELSZ as u64); w64(&mut out, dd+8, rela_plt_size); dd += 16;
-        w64(&mut out, dd, DT_PLTREL as u64); w64(&mut out, dd+8, 7); dd += 16; // DT_RELA=7
+        w64(&mut out, dd, DT_PLTREL as u64); w64(&mut out, dd+8, DT_RELA as u64); dd += 16;
         w64(&mut out, dd, DT_JMPREL as u64); w64(&mut out, dd+8, rela_plt_addr); dd += 16;
     }
     if let Some(ref rp) = rpath_string {
@@ -2440,7 +2439,7 @@ fn emit_executable(
         let is_dynamic = globals.get(name).map(|g| g.is_dynamic && !g.copy_reloc).unwrap_or(false);
         if is_dynamic {
             let si = dyn_sym_names.iter().position(|n| n == name).map(|i| i+1).unwrap_or(0) as u64;
-            w64(&mut out, rd, gd_a); w64(&mut out, rd+8, (si << 32) | 6); w64(&mut out, rd+16, 0);
+            w64(&mut out, rd, gd_a); w64(&mut out, rd+8, (si << 32) | R_X86_64_GLOB_DAT as u64); w64(&mut out, rd+16, 0);
             rd += 24;
         }
         gd_a += 8;
@@ -2461,7 +2460,7 @@ fn emit_executable(
     for (i, name) in plt_names.iter().enumerate() {
         let gea = gpb + i as u64 * 8;
         let si = dyn_sym_names.iter().position(|n| n == name).map(|j| j+1).unwrap_or(0) as u64;
-        w64(&mut out, rp, gea); w64(&mut out, rp+8, (si << 32) | 7); w64(&mut out, rp+16, 0);
+        w64(&mut out, rp, gea); w64(&mut out, rp+8, (si << 32) | R_X86_64_JUMP_SLOT as u64); w64(&mut out, rp+16, 0);
         rp += 24;
     }
 
@@ -2500,7 +2499,7 @@ fn emit_executable(
     for &(tag, val) in &[
         (DT_STRTAB, dynstr_addr), (DT_SYMTAB, dynsym_addr), (DT_STRSZ, dynstr_size),
         (DT_SYMENT, 24), (DT_DEBUG, 0), (DT_PLTGOT, got_plt_addr),
-        (DT_PLTRELSZ, rela_plt_size), (DT_PLTREL, 7u64), (DT_JMPREL, rela_plt_addr),
+        (DT_PLTRELSZ, rela_plt_size), (DT_PLTREL, DT_RELA as u64), (DT_JMPREL, rela_plt_addr),
         (DT_RELA, rela_dyn_addr), (DT_RELASZ, rela_dyn_size), (DT_RELAENT, 24),
         (DT_GNU_HASH, gnu_hash_addr),
     ] {
