@@ -2258,6 +2258,14 @@ impl ElfWriterBase {
         };
 
         let mut symbols = build_elf_symbol_table(&symtab_input);
+        // Remove UND entries for any symbols that are also in extra_symbols (e.g. COMMON).
+        // A symbol that is both referenced in relocations and declared as COMMON should
+        // only appear once (as COMMON), not as both UND and COMMON.
+        for extra in &self.extra_symbols {
+            if extra.section_name == "*COM*" {
+                symbols.retain(|s| !(s.name == extra.name && s.section_name == "*UND*"));
+            }
+        }
         symbols.append(&mut self.extra_symbols);
 
         let elf_bytes = write_relocatable_object(

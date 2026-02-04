@@ -754,9 +754,12 @@ impl ElfWriter {
 
         let mut shared_symbols = elf_mod::build_elf_symbol_table(&symtab_input);
 
-        // Add COMMON symbols separately (they don't have labels/label_positions)
+        // Add COMMON symbols separately (they don't have labels/label_positions).
+        // Remove any UND entries for the same symbol first, since a symbol that is
+        // both referenced and declared as COMMON should only appear once (as COMMON).
         for sym in &self.symbols {
             if sym.is_common {
+                shared_symbols.retain(|s| !(s.name == sym.name && s.section_name == "*UND*"));
                 shared_symbols.push(ObjSymbol {
                     name: sym.name.clone(),
                     value: sym.common_align as u64,
