@@ -105,6 +105,7 @@ architecture-specific subdirectories:
 src/backend/
   mod.rs              Target enum, CodegenOptions, top-level dispatch
   elf.rs              Shared ELF constants, StringTable, read/write helpers, archive parsing
+  linker_common.rs    Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash, lib resolution
   traits.rs           ArchCodegen trait (~185 methods, ~50 default impls)
   generation.rs       Module/function/instruction dispatch (arch-independent)
   state.rs            CodegenState, StackSlot, SlotAddr, RegCache

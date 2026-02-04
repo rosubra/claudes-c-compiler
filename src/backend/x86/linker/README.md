@@ -102,7 +102,7 @@ pub fn link_builtin(
 | File | Lines | Role |
 |------|-------|------|
 | `mod.rs` | ~1400 | Linker orchestration: loading, symbol resolution, section merging, PLT/GOT creation, layout, relocation application, output emission |
-| `elf.rs` | ~675 | ELF parsing: object file reader, archive reader, shared library symbol extractor, SONAME parser, linker script parser; all ELF constants |
+| `elf.rs` | ~75 | x86-64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction |
 
 
 ## Key Data Structures
@@ -217,9 +217,10 @@ struct InputSection {
 }
 ```
 
-### `DynStrTab` (mod.rs)
+### `DynStrTab` (linker_common.rs)
 
-A simple dynamic string table builder with deduplication, used for `.dynstr`:
+A simple dynamic string table builder with deduplication, used for `.dynstr`.
+Defined in the shared `linker_common` module and re-used by x86 and other backends:
 
 ```rust
 struct DynStrTab {
@@ -586,19 +587,21 @@ a dynamic symbol with `STT_OBJECT` type.
 | `R_X86_64_REX_GOTPCRELX` | 42 | Relaxable GOTPCREL with REX |
 
 
-## ELF Parsing Details (elf.rs)
+## ELF Parsing Details (linker_common.rs / elf.rs)
 
 ### Object File Parsing (`parse_object`)
 
-1. Validate ELF magic, class (ELFCLASS64), endianness (ELFDATA2LSB),
-   type (`ET_REL`), and machine (`EM_X86_64`).
-2. Parse section headers from `e_shoff`.
-3. Resolve section names from the `.shstrtab` section.
-4. Read section data into per-section byte vectors.
-5. Find `.symtab` and parse all `Elf64_Sym` entries (24 bytes each).
-   Resolve symbol names from the associated `.strtab`.
-6. Find all `.rela.*` sections and parse `Elf64_Rela` entries (24 bytes each).
-   Index relocations by their target section (`sh_info`).
+The x86 `elf.rs` delegates to `linker_common::parse_elf64_object()`, which:
+
+1. Validates ELF magic, class (ELFCLASS64), endianness (ELFDATA2LSB),
+   type (`ET_REL`), and machine (parameterized, `EM_X86_64` for x86).
+2. Parses section headers from `e_shoff`.
+3. Resolves section names from the `.shstrtab` section.
+4. Reads section data into per-section byte vectors.
+5. Finds `.symtab` and parses all `Elf64_Sym` entries (24 bytes each).
+   Resolves symbol names from the associated `.strtab`.
+6. Finds all `.rela.*` sections and parses `Elf64_Rela` entries (24 bytes each).
+   Indexes relocations by their target section (`sh_info`).
 
 ### Archive Parsing (`parse_archive_members`)
 

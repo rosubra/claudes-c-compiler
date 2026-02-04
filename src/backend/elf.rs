@@ -146,7 +146,18 @@ pub const DT_RELENT: i64 = 19;
 pub const DT_JMPREL: i64 = 23;
 pub const DT_PLTREL: i64 = 20;
 pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_DEBUG: i64 = 21;
+pub const DT_INIT_ARRAY: i64 = 25;
+pub const DT_FINI_ARRAY: i64 = 26;
+pub const DT_INIT_ARRAYSZ: i64 = 27;
+pub const DT_FINI_ARRAYSZ: i64 = 28;
+pub const DT_FLAGS: i64 = 30;
+pub const DT_PREINIT_ARRAY: i64 = 32;
+pub const DT_PREINIT_ARRAYSZ: i64 = 33;
 pub const DT_GNU_HASH: i64 = 0x6fff_fef5;
+pub const DT_VERSYM: i64 = 0x6fff_fff0;
+pub const DT_VERNEED: i64 = 0x6fff_fffe;
+pub const DT_VERNEEDNUM: i64 = 0x6fff_ffff;
 pub const DT_FLAGS_1: i64 = 0x6fff_fffb;
 
 // ── ELF sizes ────────────────────────────────────────────────────────────────

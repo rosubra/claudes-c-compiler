@@ -4,50 +4,22 @@ use std::collections::{HashMap, HashSet};
 use super::elf_read::*;
 
 // ── ELF executable constants ────────────────────────────────────────────────
+// Standard ELF constants imported from the shared module.
+use crate::backend::elf::{
+    ET_EXEC, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_TLS,
+    PT_GNU_STACK, PT_GNU_RELRO,
+    PF_X, PF_W, PF_R,
+    DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_STRTAB,
+    DT_SYMTAB, DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT,
+    DT_JMPREL, DT_PLTREL, DT_GNU_HASH, DT_DEBUG,
+    DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ,
+    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ,
+    DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
+};
 
-const ET_EXEC: u16 = 2;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-const PT_INTERP: u32 = 3;
-const PT_NOTE: u32 = 4;
-const PT_TLS: u32 = 7;
+// RISC-V specific
 const PT_GNU_EH_FRAME: u32 = 0x6474e550;
-const PT_GNU_STACK: u32 = 0x6474e551;
-const PT_GNU_RELRO: u32 = 0x6474e552;
 const PT_RISCV_ATTRIBUTES: u32 = 0x70000003;
-
-const PF_X: u32 = 1;
-const PF_W: u32 = 2;
-const PF_R: u32 = 4;
-
-const DT_NULL: i64 = 0;
-const DT_NEEDED: i64 = 1;
-const DT_PLTRELSZ: i64 = 2;
-const DT_PLTGOT: i64 = 3;
-#[allow(dead_code)]
-const DT_HASH: i64 = 4;
-const DT_STRTAB: i64 = 5;
-const DT_SYMTAB: i64 = 6;
-const DT_RELA: i64 = 7;
-const DT_RELASZ: i64 = 8;
-const DT_RELAENT: i64 = 9;
-const DT_STRSZ: i64 = 10;
-const DT_SYMENT: i64 = 11;
-const DT_DEBUG: i64 = 21;
-const DT_JMPREL: i64 = 23;
-const DT_PLTREL: i64 = 20;
-#[allow(dead_code)]
-const DT_FLAGS: i64 = 30;
-const DT_GNU_HASH: i64 = 0x6ffffef5;
-const DT_VERSYM: i64 = 0x6ffffff0;
-const DT_VERNEED: i64 = 0x6ffffffe;
-const DT_VERNEEDNUM: i64 = 0x6fffffff;
-const DT_INIT_ARRAY: i64 = 25;
-const DT_INIT_ARRAYSZ: i64 = 27;
-const DT_FINI_ARRAY: i64 = 26;
-const DT_FINI_ARRAYSZ: i64 = 28;
-const DT_PREINIT_ARRAY: i64 = 32;
-const DT_PREINIT_ARRAYSZ: i64 = 33;
 
 // RISC-V relocation types
 const R_RISCV_32: u32 = 1;
@@ -2770,14 +2742,10 @@ fn build_gnu_hash(nsyms: usize) -> Vec<u8> {
     data
 }
 
-/// ELF GNU hash function.
+/// ELF GNU hash function (delegates to shared implementation).
 #[allow(dead_code)]
 fn elf_hash_gnu(name: &[u8]) -> u32 {
-    let mut h: u32 = 5381;
-    for &b in name {
-        h = h.wrapping_mul(33).wrapping_add(b as u32);
-    }
-    h
+    crate::backend::linker_common::gnu_hash(name)
 }
 
 /// Resolve archive members: iteratively pull in members that define currently-undefined symbols.

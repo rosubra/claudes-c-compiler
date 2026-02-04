@@ -59,44 +59,13 @@ struct GlobalSymbol {
     lib_sym_value: u64,
 }
 
+use crate::backend::linker_common;
+
 fn map_section_name(name: &str) -> String {
-    if name.starts_with(".text.") || name == ".text" { return ".text".to_string(); }
-    if name.starts_with(".data.rel.ro") { return ".data.rel.ro".to_string(); }
-    if name.starts_with(".data.") || name == ".data" { return ".data".to_string(); }
-    if name.starts_with(".rodata.") || name == ".rodata" { return ".rodata".to_string(); }
-    if name.starts_with(".bss.") || name == ".bss" { return ".bss".to_string(); }
-    if name.starts_with(".init_array") { return ".init_array".to_string(); }
-    if name.starts_with(".fini_array") { return ".fini_array".to_string(); }
-    if name.starts_with(".tbss.") || name == ".tbss" { return ".tbss".to_string(); }
-    if name.starts_with(".tdata.") || name == ".tdata" { return ".tdata".to_string(); }
-    if name.starts_with(".gcc_except_table") { return ".gcc_except_table".to_string(); }
-    if name.starts_with(".eh_frame") { return ".eh_frame".to_string(); }
-    if name.starts_with(".note.") { return name.to_string(); }
-    name.to_string()
+    linker_common::map_section_name(name).to_string()
 }
 
-struct DynStrTab {
-    data: Vec<u8>,
-    offsets: HashMap<String, usize>,
-}
-
-impl DynStrTab {
-    fn new() -> Self { Self { data: vec![0], offsets: HashMap::new() } }
-
-    fn add(&mut self, s: &str) -> usize {
-        if s.is_empty() { return 0; }
-        if let Some(&off) = self.offsets.get(s) { return off; }
-        let off = self.data.len();
-        self.data.extend_from_slice(s.as_bytes());
-        self.data.push(0);
-        self.offsets.insert(s.to_string(), off);
-        off
-    }
-
-    fn get_offset(&self, s: &str) -> usize {
-        if s.is_empty() { 0 } else { self.offsets.get(s).copied().unwrap_or(0) }
-    }
-}
+use linker_common::DynStrTab;
 
 /// Public entry point for the built-in linker.
 pub fn link_builtin(
@@ -863,7 +832,7 @@ fn emit_executable(
 
     let dynsym_count = 1 + dyn_sym_names.len();
     let dynsym_size = dynsym_count as u64 * 24;
-    let dynstr_size = dynstr.data.len() as u64;
+    let dynstr_size = dynstr.as_bytes().len() as u64;
     let rela_plt_size = plt_names.len() as u64 * 24;
     let rela_dyn_glob_count = got_entries.iter().filter(|(n, p)| {
         !n.is_empty() && !*p && globals.get(n).map(|g| g.is_dynamic && !g.copy_reloc).unwrap_or(false)
@@ -872,15 +841,6 @@ fn emit_executable(
     let rela_dyn_size = rela_dyn_count as u64 * 24;
 
     // Build .gnu.hash table for hashed symbols (copy-reloc + exported)
-    // GNU hash function
-    fn gnu_hash(name: &[u8]) -> u32 {
-        let mut h: u32 = 5381;
-        for &b in name {
-            h = h.wrapping_mul(33).wrapping_add(b as u32);
-        }
-        h
-    }
-
     // Number of hashed symbols = total symbols after the non-hashed imports
     let num_hashed = dyn_sym_names.len() - (gnu_hash_symoffset - 1);
     let gnu_hash_nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
@@ -890,7 +850,7 @@ fn emit_executable(
     // Compute hashes for hashed symbols
     let hashed_sym_hashes: Vec<u32> = dyn_sym_names[gnu_hash_symoffset - 1..]
         .iter()
-        .map(|name| gnu_hash(name.as_bytes()))
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
         .collect();
 
     // Build bloom filter (single 64-bit word)
@@ -920,7 +880,7 @@ fn emit_executable(
     // Recompute hashes after sorting
     let hashed_sym_hashes: Vec<u32> = dyn_sym_names[gnu_hash_symoffset - 1..]
         .iter()
-        .map(|name| gnu_hash(name.as_bytes()))
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
         .collect();
 
     // Build buckets and chains
@@ -1285,7 +1245,7 @@ fn emit_executable(
     }
 
     // .dynstr
-    write_bytes(&mut out, dynstr_offset as usize, &dynstr.data);
+    write_bytes(&mut out, dynstr_offset as usize, dynstr.as_bytes());
 
     // .rela.dyn (GLOB_DAT for dynamic GOT symbols, R_X86_64_COPY for copy relocs)
     let mut rd = rela_dyn_offset as usize;

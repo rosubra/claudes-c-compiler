@@ -364,40 +364,13 @@ fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<Strin
 }
 
 fn resolve_lib(name: &str, paths: &[String]) -> Option<String> {
-    // TODO: handle -l:filename exact search (colon prefix means exact filename)
-    if let Some(exact) = name.strip_prefix(':') {
-        for dir in paths {
-            let p = format!("{}/{}", dir, exact);
-            if Path::new(&p).exists() { return Some(p); }
-        }
-        return None;
-    }
-    for dir in paths {
-        // Prefer static archive for static linking
-        let a = format!("{}/lib{}.a", dir, name);
-        if Path::new(&a).exists() { return Some(a); }
-        let so = format!("{}/lib{}.so", dir, name);
-        if Path::new(&so).exists() { return Some(so); }
-    }
-    None
+    crate::backend::linker_common::resolve_lib(name, paths, true)
 }
 
 // ── Section merging ────────────────────────────────────────────────────
 
 fn map_section_name(name: &str) -> String {
-    if name.starts_with(".text.") || name == ".text" { return ".text".to_string(); }
-    if name.starts_with(".data.rel.ro") { return ".data.rel.ro".to_string(); }
-    if name.starts_with(".data.") || name == ".data" { return ".data".to_string(); }
-    if name.starts_with(".rodata.") || name == ".rodata" { return ".rodata".to_string(); }
-    if name.starts_with(".bss.") || name == ".bss" { return ".bss".to_string(); }
-    if name.starts_with(".init_array") { return ".init_array".to_string(); }
-    if name.starts_with(".fini_array") { return ".fini_array".to_string(); }
-    if name.starts_with(".tbss.") || name == ".tbss" { return ".tbss".to_string(); }
-    if name.starts_with(".tdata.") || name == ".tdata" { return ".tdata".to_string(); }
-    if name.starts_with(".gcc_except_table") { return ".gcc_except_table".to_string(); }
-    if name.starts_with(".eh_frame") { return ".eh_frame".to_string(); }
-    if name.starts_with(".note.") { return name.to_string(); }
-    name.to_string()
+    crate::backend::linker_common::map_section_name(name).to_string()
 }
 
 fn merge_sections(

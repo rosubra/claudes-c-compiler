@@ -9,55 +9,41 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::backend::elf::{
-    ELF_MAGIC, ELFCLASS32, ELFDATA2LSB,
+    ELF_MAGIC, ELFCLASS32, ELFDATA2LSB, EV_CURRENT,
+    // Types: u16
+    ET_EXEC, ET_DYN, ET_REL, EM_386,
+    // Program header types: u32
+    PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_PHDR, PT_TLS,
+    PT_GNU_STACK,
+    // Section header types: u32
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
+    SHT_NOBITS, SHT_REL, SHT_DYNSYM, SHT_GROUP,
+    SHT_INIT_ARRAY, SHT_FINI_ARRAY,
+    // Symbol binding/type: u8
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_OBJECT, STT_FUNC, STT_SECTION, STT_FILE, STT_TLS, STT_GNU_IFUNC,
+    STV_DEFAULT,
+    // Special section indices: u16
+    SHN_UNDEF, SHN_ABS, SHN_COMMON,
+    // Segment flags: u32
+    PF_X, PF_W, PF_R,
+    // Read helpers
     read_u16, read_u32, read_cstr, read_i32,
     parse_archive_members,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };
 
-// ── ELF32 constants ──────────────────────────────────────────────────────────
-// Most constants remain local because the shared module uses ELF64 types
-// (u64 for SHF_*, i64 for DT_*) while this ELF32 linker uses u32/i32.
-// Only type-compatible helpers (read_u16, read_u32, etc.) are shared.
+// ── ELF32-specific constants ──────────────────────────────────────────────────
+// These either differ in type (i32 vs i64 for DT_*) or aren't in the shared module.
 
-const EV_CURRENT: u8 = 1;
-const ET_EXEC: u16 = 2;
-const ET_DYN: u16 = 3;
-const ET_REL: u16 = 1;
-const EM_386: u16 = 3;
-
-// Program header types
-const PT_NULL: u32 = 0;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-const PT_INTERP: u32 = 3;
-const PT_NOTE: u32 = 4;
-const PT_PHDR: u32 = 6;
-const PT_GNU_EH_FRAME: u32 = 0x6474e550;
-const PT_TLS: u32 = 7;
-const PT_GNU_STACK: u32 = 0x6474e551;
-const PT_GNU_RELRO: u32 = 0x6474e552;
-
-// Section header types
-const SHT_NULL: u32 = 0;
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
+// Section header types not in shared module
 const SHT_HASH: u32 = 5;
-const SHT_DYNAMIC: u32 = 6;
 const SHT_NOTE: u32 = 7;
-const SHT_NOBITS: u32 = 8;
-const SHT_REL: u32 = 9;
-const SHT_DYNSYM: u32 = 11;
-const SHT_INIT_ARRAY: u32 = 14;
-const SHT_FINI_ARRAY: u32 = 15;
 const SHT_GNU_HASH: u32 = 0x6ffffff6;
 const SHT_GNU_VERSYM: u32 = 0x6fffffff;
 const SHT_GNU_VERNEED: u32 = 0x6ffffffe;
-const SHT_GROUP: u32 = 17;
 
-// Section flags
+// Section flags (i686 uses u32 instead of shared module's u64)
 const SHF_WRITE: u32 = 0x1;
 const SHF_ALLOC: u32 = 0x2;
 const SHF_EXECINSTR: u32 = 0x4;
@@ -66,23 +52,6 @@ const SHF_STRINGS: u32 = 0x20;
 const SHF_INFO_LINK: u32 = 0x40;
 const SHF_GROUP: u32 = 0x200;
 const SHF_TLS: u32 = 0x400;
-
-// Symbol binding/type
-const STB_LOCAL: u8 = 0;
-const STB_GLOBAL: u8 = 1;
-const STB_WEAK: u8 = 2;
-const STT_NOTYPE: u8 = 0;
-const STT_OBJECT: u8 = 1;
-const STT_FUNC: u8 = 2;
-const STT_SECTION: u8 = 3;
-const STT_FILE: u8 = 4;
-const STT_TLS: u8 = 6;
-const STT_GNU_IFUNC: u8 = 10;
-const STV_DEFAULT: u8 = 0;
-const STV_HIDDEN: u8 = 2;
-const SHN_UNDEF: u16 = 0;
-const SHN_ABS: u16 = 0xfff1;
-const SHN_COMMON: u16 = 0xfff2;
 
 // i386 relocation types
 const R_386_NONE: u32 = 0;
@@ -129,10 +98,7 @@ const DT_VERNEED: i32 = 0x6ffffffe_u32 as i32;
 const DT_VERNEEDNUM: i32 = 0x6fffffff_u32 as i32;
 const DT_VERSYM: i32 = 0x6ffffff0_u32 as i32;
 
-// PF flags
-const PF_X: u32 = 1;
-const PF_W: u32 = 2;
-const PF_R: u32 = 4;
+// PF flags imported from shared module above.
 
 const PAGE_SIZE: u32 = 0x1000;
 const BASE_ADDR: u32 = 0x08048000;
@@ -2898,18 +2864,9 @@ impl DynStrTab {
     }
 }
 
-/// SysV hash function for ELF.
+/// SysV hash function for ELF (delegates to shared implementation).
 fn elf_hash(name: &[u8]) -> u32 {
-    let mut h: u32 = 0;
-    for &b in name {
-        h = (h << 4).wrapping_add(b as u32);
-        let g = h & 0xf0000000;
-        if g != 0 {
-            h ^= g >> 24;
-        }
-        h &= !g;
-    }
-    h
+    crate::backend::linker_common::sysv_hash(name)
 }
 
 fn elf_hash_str(name: &str) -> u32 {

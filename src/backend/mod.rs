@@ -1,6 +1,7 @@
 pub(crate) mod common;
 #[allow(dead_code)]
 pub(crate) mod elf;
+pub(crate) mod linker_common;
 
 // Shared codegen framework, split into focused modules:
 pub(crate) mod state;       // CodegenState, StackSlot, SlotAddr

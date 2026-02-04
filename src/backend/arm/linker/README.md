@@ -22,9 +22,9 @@ The implementation spans roughly 2,060 lines of Rust across three files.
        \           |           /
         v          v          v
   +------------------------------------------+
-  |           elf.rs  (431 lines)            |
-  |   ELF Parsing: objects, archives,        |
-  |   symbols, relocations, linker scripts   |
+  |           elf.rs  (~70 lines)            |
+  |   Type aliases + thin wrappers to        |
+  |   linker_common; AArch64 reloc consts    |
   +------------------------------------------+
                |
                |  Vec<ElfObject>, HashMap<String, GlobalSymbol>
@@ -65,84 +65,34 @@ pub fn link(
 
 ---
 
-## Stage 1: ELF Parsing (`elf.rs`)
+## Stage 1: ELF Parsing (`elf.rs` / `linker_common`)
 
 ### Purpose
 
 Read and decode ELF64 relocatable object files, static archives, and minimal
-linker scripts.  All binary parsing is centralized here; the rest of the
-linker works with high-level data structures.
+linker scripts.  The actual parsing logic lives in the shared `linker_common`
+module; `elf.rs` provides AArch64-specific relocation constants and re-exports
+shared types under local names via type aliases.
 
 ### Key Data Structures
 
-| Type | Role |
-|------|------|
-| `ElfObject` | A fully parsed object file: sections, symbols, raw section data, relocations indexed by section. |
-| `SectionHeader` | Parsed `Elf64_Shdr`: name, type, flags, offset, size, link, info, alignment, entsize. |
-| `Symbol` | Parsed `Elf64_Sym`: name, info (binding + type), other (visibility), shndx, value, size. |
-| `Rela` | Parsed `Elf64_Rela`: offset, sym_idx, rela_type, addend. |
+All ELF64 types are defined in `linker_common` and re-exported:
 
-The `Symbol` type provides convenience methods:
-
-```rust
-impl Symbol {
-    fn binding(&self) -> u8   // STB_LOCAL, STB_GLOBAL, STB_WEAK
-    fn sym_type(&self) -> u8  // STT_NOTYPE, STT_FUNC, STT_OBJECT, ...
-    fn is_undefined(&self) -> bool
-    fn is_global(&self) -> bool
-    fn is_weak(&self) -> bool
-    fn is_local(&self) -> bool
-}
-```
-
-### ELF Constants Defined
-
-The module defines all necessary ELF64 constants for AArch64:
-
-- **File types**: `ET_REL`, `ET_EXEC`, `ET_DYN`
-- **Section types**: `SHT_NULL` through `SHT_GROUP` (12 types)
-- **Section flags**: `SHF_WRITE`, `SHF_ALLOC`, `SHF_EXECINSTR`, `SHF_TLS`, `SHF_EXCLUDE`
-- **Symbol bindings**: `STB_LOCAL`, `STB_GLOBAL`, `STB_WEAK`
-- **Symbol types**: `STT_NOTYPE` through `STT_GNU_IFUNC` (8 types)
-- **Special indices**: `SHN_UNDEF`, `SHN_ABS`, `SHN_COMMON`
-- **Program headers**: `PT_LOAD`, `PT_NOTE`, `PT_TLS`, `PT_GNU_STACK`
-- **AArch64 relocations**: 20 relocation type constants (see Relocation section)
+| Type | Alias | Role |
+|------|-------|------|
+| `Elf64Object` | `ElfObject` | A fully parsed object file: sections, symbols, raw section data, relocations indexed by section. |
+| `Elf64Section` | `SectionHeader` | Parsed `Elf64_Shdr`: name, type, flags, offset, size, link, info, alignment, entsize. |
+| `Elf64Symbol` | `Symbol` | Parsed `Elf64_Sym`: name, info (binding + type), other (visibility), shndx, value, size. |
+| `Elf64Rela` | `Rela` | Parsed `Elf64_Rela`: offset, sym_idx, rela_type, addend. |
 
 ### Object Parsing (`parse_object`)
 
-```
-parse_object(data, source_name):
-  1. Validate ELF magic, class (64-bit), endianness (little), type (REL),
-     machine (AArch64=183)
-  2. Read section header table from e_shoff
-  3. Read section name string table (e_shstrndx) and name all sections
-  4. Read section data (or empty vec for SHT_NOBITS)
-  5. Find SHT_SYMTAB, read all Elf64_Sym entries, resolve names via
-     the symbol string table (sh_link of .symtab)
-  6. Find all SHT_RELA sections, parse Elf64_Rela entries, index by
-     their target section (sh_info)
-  7. Return ElfObject
-```
+Delegates to `linker_common::parse_elf64_object(data, source_name, EM_AARCH64)`.
 
-### Archive Parsing (`parse_archive_members`)
+### Archive and Linker Script Parsing
 
-Handles the `!<arch>\n` archive format:
-
-- Skips the symbol table (`/` and `/SYM64/` members)
-- Reads the extended name table (`//` member) for long filenames
-- Extracts each member as `(name, data_offset, size)`
-- Handles both short names (inline in header) and long names (`/offset` into
-  extended name table)
-
-### Linker Script Parsing
-
-Minimal support for text-format linker scripts containing `GROUP(...)` directives.
-This handles cases like `libc.so` being a linker script that points to the
-actual shared object:
-
-```
-GROUP ( /lib/aarch64-linux-gnu/libc.so.6 AS_NEEDED ( ... ) )
-```
+Archive parsing (`parse_archive_members`) and linker script parsing
+(`parse_linker_script`) are provided by the shared `crate::backend::elf` module.
 
 
 ---
@@ -632,6 +582,6 @@ invaluable for debugging linking failures.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `mod.rs` | 1,105 | Public API, file loading, archive handling, CRT discovery, section merging, address layout, GOT/IPLT construction, ELF executable emission |
-| `elf.rs` | 431 | ELF64 constants, data structures, object/archive/linker-script parsing, binary read/write helpers |
+| `elf.rs` | ~70 | AArch64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing |
 | `reloc.rs` | 526 | Relocation application (30+ types), TLS relaxation, GOT/TLS-IE references, instruction field patching helpers |
-| **Total** | **2,063** | |
+| **Total** | **~1,700** | |
