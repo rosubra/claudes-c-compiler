@@ -323,6 +323,32 @@ fn narrow_binops_without_cast(
                     continue;
                 }
 
+                // For AND, don't narrow when the constant operand would become
+                // all-ones for the target type. Such an AND acts as a zero-extension
+                // mask (e.g., `uint32_val & 0xFFFFFFFFUL` zero-extends to 64 bits).
+                // Narrowing would make the AND a no-op (x & all_ones = x) which the
+                // simplify pass removes, losing the zero-extension. On RISC-V, this
+                // causes sign-extended 32-bit values to leak into 64-bit results.
+                if *op == IrBinOp::And {
+                    let const_becomes_all_ones = |operand: &Operand| -> bool {
+                        if let Some(narrowed_const) = try_narrow_const_operand(operand, target_ty) {
+                            let val = match narrowed_const {
+                                IrConst::I64(v) => v,
+                                IrConst::I32(v) => v as i64,
+                                IrConst::I16(v) => v as i64,
+                                IrConst::I8(v) => v as i64,
+                                _ => return false,
+                            };
+                            target_ty.truncate_i64(val) == target_ty.truncate_i64(-1)
+                        } else {
+                            false
+                        }
+                    };
+                    if const_becomes_all_ones(lhs) || const_becomes_all_ones(rhs) {
+                        continue;
+                    }
+                }
+
                 let new_lhs = try_narrow_operand(lhs, target_ty, Some(&load_type_map), widen_map, narrowed_map);
                 let new_rhs = try_narrow_operand(rhs, target_ty, Some(&load_type_map), widen_map, narrowed_map);
                 if let (Some(nl), Some(nr)) = (new_lhs, new_rhs) {
@@ -714,6 +740,48 @@ mod tests {
                 assert!(matches!(rhs, Operand::Const(IrConst::I32(256))));
             }
             other => panic!("Expected narrowed Cmp Sge I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_narrow_and_all_ones_mask() {
+        // %1 = Cast %0, U32->I64       (widen)
+        // %2 = BinOp And %1, I64(0xFFFFFFFF), I64
+        // => Should NOT narrow because 0xFFFFFFFF becomes all-ones for U32,
+        //    which would eliminate the zero-extension mask.
+        let mut func = make_func_with_blocks(vec![BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Cast {
+                    dest: Value(1),
+                    src: Operand::Value(Value(0)),
+                    from_ty: IrType::U32,
+                    to_ty: IrType::I64,
+                },
+                Instruction::BinOp {
+                    dest: Value(2),
+                    op: IrBinOp::And,
+                    lhs: Operand::Value(Value(1)),
+                    rhs: Operand::Const(IrConst::I64(0xFFFFFFFF)),
+                    ty: IrType::I64,
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(2)))),
+            source_spans: Vec::new(),
+        }]);
+
+        let changes = narrow_function(&mut func);
+        // Phase 5 should NOT narrow this AND because the mask becomes all-ones
+        // for U32 -- the AND acts as a zero-extension, not a pure bitwise op.
+        let binop = &func.blocks[0].instructions[1];
+        match binop {
+            Instruction::BinOp { ty, .. } => {
+                assert!(
+                    *ty == IrType::I64 || *ty == IrType::U64,
+                    "AND with all-ones mask should NOT be narrowed, got {:?}", ty
+                );
+            }
+            _ => {} // Phase 4 might have transformed it differently
         }
     }
 

@@ -149,8 +149,10 @@ pub enum Directive {
     Ignored,
     /// `.pushsection name, "flags", @type` — push current section and switch
     PushSection(SectionInfo),
-    /// `.popsection` / `.previous` — pop section stack
+    /// `.popsection` — pop section stack
     PopSection,
+    /// `.previous` — swap to previous section
+    Previous,
     /// `.insn ...` — emit raw instruction encoding
     Insn(String),
     /// `.incbin "file"[, skip[, count]]` — include binary file contents
@@ -430,7 +432,8 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         ".pushsection" => {
             Directive::PushSection(parse_section_args(args))
         }
-        ".popsection" | ".previous" => Directive::PopSection,
+        ".popsection" => Directive::PopSection,
+        ".previous" => Directive::Previous,
 
         ".org" => {
             // .org expressions like ". - (X) + (Y)" are used as size assertions
@@ -472,7 +475,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
 /// Parse `.section name, "flags", @type` arguments.
 fn parse_section_args(args: &str) -> SectionInfo {
     let parts: Vec<&str> = args.split(',').collect();
-    let name = parts[0].trim().to_string();
+    let name = parts[0].trim().trim_matches('"').to_string();
     let flags_explicit = parts.len() > 1;
     let flags = if flags_explicit {
         parts[1].trim().trim_matches('"').to_string()

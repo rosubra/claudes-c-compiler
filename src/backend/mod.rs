@@ -361,7 +361,7 @@ impl Target {
             match self {
                 Target::Aarch64 => arm::assembler::assemble(asm_text, output_path),
                 Target::X86_64 => x86::assembler::assemble(asm_text, output_path),
-                Target::Riscv64 => riscv::assembler::assemble(asm_text, output_path),
+                Target::Riscv64 => riscv::assembler::assemble_with_args(asm_text, output_path, extra_args),
                 Target::I686 => i686::assembler::assemble(asm_text, output_path),
             }
         }

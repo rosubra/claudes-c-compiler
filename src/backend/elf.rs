@@ -2022,6 +2022,8 @@ pub struct ElfWriterBase {
     pub aliases: HashMap<String, String>,
     /// Section stack for .pushsection/.popsection
     section_stack: Vec<String>,
+    /// Previous section for .section/.previous swapping
+    previous_section: String,
     /// NOP instruction bytes for code section alignment padding.
     /// ARM: `[0x1f, 0x20, 0x03, 0xd5]` (d503201f), RISC-V: `[0x13, 0x00, 0x00, 0x00]` (00000013)
     nop_bytes: [u8; 4],
@@ -2044,6 +2046,7 @@ impl ElfWriterBase {
             symbol_visibility: HashMap::new(),
             aliases: HashMap::new(),
             section_stack: Vec::new(),
+            previous_section: String::new(),
             nop_bytes,
             text_align,
         }
@@ -2178,14 +2181,22 @@ impl ElfWriterBase {
 
         let align = if sh_flags & SHF_EXECINSTR != 0 { self.text_align } else { 1 };
         self.ensure_section(sec_name, sh_type, sh_flags, align);
-        self.current_section = sec_name.to_string();
+        self.previous_section = std::mem::replace(&mut self.current_section, sec_name.to_string());
     }
 
     /// Switch to a named standard section (.text, .data, .bss, .rodata).
     pub fn switch_to_standard_section(&mut self, name: &str, sh_type: u32, sh_flags: u64) {
         let align = if sh_flags & SHF_EXECINSTR != 0 { self.text_align } else { 1 };
         self.ensure_section(name, sh_type, sh_flags, align);
-        self.current_section = name.to_string();
+        self.previous_section = std::mem::replace(&mut self.current_section, name.to_string());
+    }
+
+    /// Restore the previous section (for `.previous` directive).
+    /// Swaps current and previous sections, so repeated `.previous` toggles between two sections.
+    pub fn restore_previous_section(&mut self) {
+        if !self.previous_section.is_empty() {
+            std::mem::swap(&mut self.current_section, &mut self.previous_section);
+        }
     }
 
     /// Push current section onto the stack and switch to a new section.
@@ -2306,11 +2317,48 @@ impl ElfWriterBase {
                     i += 1;
                 }
                 let sym = &expr[start..i];
+                // Standalone '.' means current position
+                if sym == "." {
+                    result.push_str(&cur_offset.to_string());
                 // Check if this is a .Ldot_N label (current position)
-                if sym.starts_with(".Ldot_") {
+                } else if sym.starts_with(".Ldot_") {
                     result.push_str(&cur_offset.to_string());
                 } else if let Some((sec, off)) = self.labels.get(sym) {
                     if sec == cur_section {
+                        result.push_str(&off.to_string());
+                    } else {
+                        result.push_str(sym);
+                    }
+                } else {
+                    result.push_str(sym);
+                }
+            } else {
+                result.push(c as char);
+                i += 1;
+            }
+        }
+        result
+    }
+
+    /// Resolve ALL label names in an expression to their numeric offsets,
+    /// using the specified section as context. Unlike `resolve_expr_labels`,
+    /// this also resolves `.Ldot_N` labels from their stored definitions
+    /// (not the current offset), making it suitable for deferred resolution.
+    pub fn resolve_expr_all_labels(&self, expr: &str, section: &str) -> String {
+        let mut result = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'.' || c == b'_' || c.is_ascii_alphabetic() {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i] == b'.' || bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                    i += 1;
+                }
+                let sym = &expr[start..i];
+                if let Some((sec, off)) = self.labels.get(sym) {
+                    if sec == section {
                         result.push_str(&off.to_string());
                     } else {
                         result.push_str(sym);
@@ -2392,7 +2440,9 @@ impl ElfWriterBase {
     /// `include_referenced_locals`: whether to include .L* labels referenced
     /// by relocations (needed by RISC-V for pcrel_hi/pcrel_lo pairs)
     pub fn write_elf(&mut self, output_path: &str, config: &ElfConfig, include_referenced_locals: bool) -> Result<(), String> {
-        self.resolve_local_data_relocs();
+        if !include_referenced_locals {
+            self.resolve_local_data_relocs();
+        }
 
         let symtab_input = SymbolTableInput {
             labels: &self.labels,

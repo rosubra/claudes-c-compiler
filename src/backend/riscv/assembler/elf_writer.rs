@@ -26,7 +26,10 @@ use crate::backend::elf::{
 
 // ELF flags for RISC-V
 const EF_RISCV_RVC: u32 = 0x1;
+const EF_RISCV_FLOAT_ABI_SOFT: u32 = 0x0;
+const EF_RISCV_FLOAT_ABI_SINGLE: u32 = 0x2;
 const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
+const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x6;
 
 /// RISC-V NOP instruction: `addi x0, x0, 0` = 0x00000013 in little-endian
 const RISCV_NOP: [u8; 4] = [0x13, 0x00, 0x00, 0x00];
@@ -45,6 +48,21 @@ pub struct ElfWriter {
     pcrel_hi_counter: u32,
     /// GNU numeric labels: e.g., "1" -> [(section, offset), ...] in definition order.
     numeric_labels: HashMap<String, Vec<(String, u64)>>,
+    /// Deferred data expressions that reference forward labels (resolved after all statements).
+    deferred_exprs: Vec<DeferredExpr>,
+    /// ELF e_flags to use (default: RVC + double-float ABI)
+    elf_flags: u32,
+    /// When true, don't emit R_RISCV_RELAX relocations (set by `.option norelax`).
+    no_relax: bool,
+}
+
+/// A data expression that couldn't be evaluated immediately (e.g., forward label reference)
+/// and must be resolved after all statements are processed.
+struct DeferredExpr {
+    section: String,
+    offset: u64,
+    size: usize,
+    expr: String,
 }
 
 struct PendingReloc {
@@ -372,14 +390,24 @@ impl ElfWriter {
             pending_branch_relocs: Vec::new(),
             pcrel_hi_counter: 0,
             numeric_labels: HashMap::new(),
+            deferred_exprs: Vec::new(),
+            elf_flags: EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC,
+            no_relax: false,
         }
     }
 
-    // NOTE: R_RISCV_RELAX relocations are intentionally not emitted.
-    // Our assembler resolves local branches by patching immediates directly
-    // (in resolve_local_branches). If R_RISCV_RELAX were emitted, the linker
-    // could perform relaxation (e.g., shortening auipc+jalr to jal), which
-    // changes code layout and invalidates our locally-resolved branch offsets.
+    /// Set the ELF e_flags (e.g., to change float ABI from the default double-float).
+    pub fn set_elf_flags(&mut self, flags: u32) {
+        self.elf_flags = flags;
+    }
+
+    // R_RISCV_RELAX relocations are emitted alongside CALL_PLT, BRANCH, and
+    // JAL relocations so the linker can perform relaxation (shortening
+    // auipc+jalr to jal, etc.). This is required because linker relaxation
+    // changes code layout, which would invalidate any locally-resolved offsets.
+
+    /// R_RISCV_RELAX ELF relocation type
+    const R_RISCV_RELAX: u32 = 51;
 
     /// Process all parsed assembly statements.
     pub fn process_statements(&mut self, statements: &[AsmStatement]) -> Result<(), String> {
@@ -387,7 +415,11 @@ impl ElfWriter {
         for stmt in &statements {
             self.process_statement(stmt)?;
         }
-        self.compress_executable_sections();
+        self.resolve_deferred_exprs()?;
+        // Compression is disabled: the linker handles relaxation via
+        // R_RISCV_RELAX. Running our own compression would change code
+        // layout in ways the linker's relaxation pass doesn't expect.
+        // self.compress_executable_sections();
         self.resolve_local_branches()?;
         Ok(())
     }
@@ -435,6 +467,10 @@ impl ElfWriter {
                 self.base.pop_section();
                 return Ok(());
             }
+            Directive::Previous => {
+                self.base.restore_previous_section();
+                return Ok(());
+            }
             Directive::Section(info) => {
                 self.base.process_section_directive(
                     &info.name,
@@ -462,8 +498,20 @@ impl ElfWriter {
                 Ok(())
             }
 
-            Directive::Globl(sym) => { self.base.set_global(sym); Ok(()) }
-            Directive::Weak(sym) => { self.base.set_weak(sym); Ok(()) }
+            Directive::Globl(sym) => {
+                for s in sym.split(',') {
+                    let s = s.trim();
+                    if !s.is_empty() { self.base.set_global(s); }
+                }
+                Ok(())
+            }
+            Directive::Weak(sym) => {
+                for s in sym.split(',') {
+                    let s = s.trim();
+                    if !s.is_empty() { self.base.set_weak(s); }
+                }
+                Ok(())
+            }
 
             Directive::SymVisibility(sym, vis) => {
                 let v = match vis {
@@ -590,7 +638,13 @@ impl ElfWriter {
                 Ok(())
             }
 
-            Directive::ArchOption(_) => {
+            Directive::ArchOption(opt) => {
+                let opt = opt.trim();
+                if opt == "norelax" {
+                    self.no_relax = true;
+                } else if opt == "relax" {
+                    self.no_relax = false;
+                }
                 // TODO: implement .option rvc/norvc/push/pop for compression control
                 Ok(())
             }
@@ -674,8 +728,49 @@ impl ElfWriter {
                 resolved = self.base.resolve_expr_labels(&resolved);
                 match crate::backend::asm_expr::parse_integer_expr(&resolved) {
                     Ok(v) => self.base.emit_data_integer(v, size),
-                    Err(e) => return Err(format!("failed to evaluate expression '{}': {}", expr, e)),
+                    Err(_) => {
+                        // Expression contains unresolved symbols (e.g., forward references).
+                        // Defer resolution until all labels are known.
+                        let section = self.base.current_section.clone();
+                        let offset = self.base.current_offset();
+                        self.deferred_exprs.push(DeferredExpr {
+                            section,
+                            offset,
+                            size,
+                            expr: expr.clone(),
+                        });
+                        // Emit placeholder bytes that will be patched later
+                        self.base.emit_placeholder(size);
+                    }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve deferred data expressions now that all labels are known.
+    fn resolve_deferred_exprs(&mut self) -> Result<(), String> {
+        let deferred = std::mem::take(&mut self.deferred_exprs);
+        for def in &deferred {
+            // Re-resolve with all labels now available (using stored label offsets)
+            let resolved = self.base.resolve_expr_aliases(&def.expr);
+            let resolved = self.base.resolve_expr_all_labels(&resolved, &def.section);
+            match crate::backend::asm_expr::parse_integer_expr(&resolved) {
+                Ok(v) => {
+                    if let Some(section) = self.base.sections.get_mut(&def.section) {
+                        let off = def.offset as usize;
+                        if def.size == 4 && off + 4 <= section.data.len() {
+                            section.data[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
+                        } else if def.size == 8 && off + 8 <= section.data.len() {
+                            section.data[off..off + 8].copy_from_slice(&(v as i64).to_le_bytes());
+                        } else if def.size == 2 && off + 2 <= section.data.len() {
+                            section.data[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes());
+                        } else if def.size == 1 && off < section.data.len() {
+                            section.data[off] = v as u8;
+                        }
+                    }
+                }
+                Err(e) => return Err(format!("failed to evaluate expression '{}': {}", def.expr, e)),
             }
         }
         Ok(())
@@ -705,23 +800,40 @@ impl ElfWriter {
                     self.base.labels.insert(label, (section, offset));
                 }
 
-                let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
-                            || parse_numeric_label_ref(&reloc.symbol).is_some();
+                // For BRANCH (16), JAL (17): always emit as external relocations
+                // so the linker resolves offsets correctly after relaxation.
+                // For CALL_PLT (19): emit with paired R_RISCV_RELAX.
+                let is_branch_or_jal = elf_type == 16 || elf_type == 17;
+                let is_call_plt = elf_type == 19;
 
-                if is_local {
-                    let offset = self.base.current_offset();
-                    self.pending_branch_relocs.push(PendingReloc {
-                        section: self.base.current_section.clone(),
-                        offset,
-                        reloc_type: elf_type,
-                        symbol: reloc.symbol.clone(),
-                        addend: reloc.addend,
-                        pcrel_hi_offset: None,
-                    });
+                if is_call_plt {
+                    self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                    if !self.no_relax {
+                        self.base.add_reloc(Self::R_RISCV_RELAX, String::new(), 0);
+                    }
+                    self.base.emit_u32_le(word);
+                } else if is_branch_or_jal {
+                    self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
                     self.base.emit_u32_le(word);
                 } else {
-                    self.base.add_reloc(elf_type, reloc.symbol, reloc.addend);
-                    self.base.emit_u32_le(word);
+                    let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
+                                || parse_numeric_label_ref(&reloc.symbol).is_some();
+
+                    if is_local {
+                        let offset = self.base.current_offset();
+                        self.pending_branch_relocs.push(PendingReloc {
+                            section: self.base.current_section.clone(),
+                            offset,
+                            reloc_type: elf_type,
+                            symbol: reloc.symbol.clone(),
+                            addend: reloc.addend,
+                            pcrel_hi_offset: None,
+                        });
+                        self.base.emit_u32_le(word);
+                    } else {
+                        self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                        self.base.emit_u32_le(word);
+                    }
                 }
                 Ok(())
             }
@@ -751,6 +863,9 @@ impl ElfWriter {
                             pcrel_hi_label = Some(label);
 
                             self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                            if !self.no_relax {
+                        self.base.add_reloc(Self::R_RISCV_RELAX, String::new(), 0);
+                    }
                             self.base.emit_u32_le(*word);
                             continue;
                         }
@@ -761,24 +876,40 @@ impl ElfWriter {
                         if let Some(hi_label) = pcrel_hi_label.as_ref().filter(|_| is_pcrel_lo12_i || is_pcrel_lo12_s) {
                             let hi_label = hi_label.clone();
                             self.base.add_reloc(elf_type, hi_label, 0);
+                            if !self.no_relax {
+                        self.base.add_reloc(Self::R_RISCV_RELAX, String::new(), 0);
+                    }
                             self.base.emit_u32_le(*word);
                             continue;
                         }
 
-                        let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
-                            || parse_numeric_label_ref(&reloc.symbol).is_some();
-                        if is_local {
-                            let offset = self.base.current_offset();
-                            self.pending_branch_relocs.push(PendingReloc {
-                                section: self.base.current_section.clone(),
-                                offset,
-                                reloc_type: elf_type,
-                                symbol: reloc.symbol.clone(),
-                                addend: reloc.addend,
-                                pcrel_hi_offset: None,
-                            });
-                        } else {
+                        // For BRANCH (16), JAL (17): always emit as external
+                        // relocations. For CALL_PLT (19): emit with R_RISCV_RELAX.
+                        let is_branch_or_jal = elf_type == 16 || elf_type == 17;
+                        let is_call_plt = elf_type == 19;
+                        if is_call_plt {
                             self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                            if !self.no_relax {
+                        self.base.add_reloc(Self::R_RISCV_RELAX, String::new(), 0);
+                    }
+                        } else if is_branch_or_jal {
+                            self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                        } else {
+                            let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
+                                || parse_numeric_label_ref(&reloc.symbol).is_some();
+                            if is_local {
+                                let offset = self.base.current_offset();
+                                self.pending_branch_relocs.push(PendingReloc {
+                                    section: self.base.current_section.clone(),
+                                    offset,
+                                    reloc_type: elf_type,
+                                    symbol: reloc.symbol.clone(),
+                                    addend: reloc.addend,
+                                    pcrel_hi_offset: None,
+                                });
+                            } else {
+                                self.base.add_reloc(elf_type, reloc.symbol.clone(), reloc.addend);
+                            }
                         }
                     }
                     self.base.emit_u32_le(*word);
@@ -1071,7 +1202,7 @@ impl ElfWriter {
     pub fn write_elf(&mut self, output_path: &str) -> Result<(), String> {
         let config = elf::ElfConfig {
             e_machine: EM_RISCV,
-            e_flags: EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC,
+            e_flags: self.elf_flags,
             elf_class: ELFCLASS64,
         };
         // RISC-V needs include_referenced_locals=true for pcrel_hi synthetic labels
