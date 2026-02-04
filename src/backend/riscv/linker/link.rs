@@ -343,36 +343,53 @@ pub fn link_builtin(
     }
 
     // ── Phase 1c: Resolve remaining undefined symbols from .a archives ──
+    // Group-loading: iterate all archives until no new symbols are resolved,
+    // handling circular dependencies (e.g., libm -> libgcc -> libc -> libgcc).
 
-    let mut resolved_archives: HashSet<String> = HashSet::new();
-    for libname in &needed_libs {
-        // -l:filename means search for exact filename
-        let archive_name = if let Some(exact) = libname.strip_prefix(':') {
-            exact.to_string()
-        } else {
-            format!("lib{}.a", libname)
-        };
-        for dir in &lib_search_paths {
-            let path = format!("{}/{}", dir, archive_name);
-            if resolved_archives.contains(&path) {
-                continue;
-            }
-            if std::path::Path::new(&path).exists() {
-                let data = match std::fs::read(&path) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
-                if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-                    if let Ok(members) = parse_archive(&data) {
-                        resolve_archive_members(
-                            members, &mut input_objs,
-                            &mut defined_syms, &mut undefined_syms,
-                        );
+    // First, resolve all archive paths
+    let mut archive_paths: Vec<String> = Vec::new();
+    {
+        let mut seen: HashSet<String> = HashSet::new();
+        for libname in &needed_libs {
+            let archive_name = if let Some(exact) = libname.strip_prefix(':') {
+                exact.to_string()
+            } else {
+                format!("lib{}.a", libname)
+            };
+            for dir in &lib_search_paths {
+                let path = format!("{}/{}", dir, archive_name);
+                if std::path::Path::new(&path).exists() {
+                    if !seen.contains(&path) {
+                        seen.insert(path.clone());
+                        archive_paths.push(path);
                     }
-                    resolved_archives.insert(path);
+                    break;
                 }
-                break;
             }
+        }
+    }
+
+    // Iterate all archives in a group until stable (no new objects added)
+    let mut group_changed = true;
+    while group_changed {
+        group_changed = false;
+        let prev_count = input_objs.len();
+        for path in &archive_paths {
+            let data = match std::fs::read(path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
+                if let Ok(members) = parse_archive(&data) {
+                    resolve_archive_members(
+                        members, &mut input_objs,
+                        &mut defined_syms, &mut undefined_syms,
+                    );
+                }
+            }
+        }
+        if input_objs.len() != prev_count {
+            group_changed = true;
         }
     }
 
