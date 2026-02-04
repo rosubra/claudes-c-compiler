@@ -134,6 +134,7 @@ impl ElfWriter {
             AsmStatement::Empty => Ok(()),
 
             AsmStatement::Label(name) => {
+                self.base.ensure_text_section();
                 let section = self.base.current_section.clone();
                 let offset = self.base.current_offset();
                 self.base.labels.insert(name.clone(), (section, offset));
