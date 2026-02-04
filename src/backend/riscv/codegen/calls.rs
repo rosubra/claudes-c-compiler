@@ -17,6 +17,7 @@ impl RiscvCodegen {
             use_sysv_struct_classification: false,
             use_riscv_float_struct_classification: true,
             allow_struct_split_reg_stack: true,
+            align_struct_pairs: true,
         }
     }
 

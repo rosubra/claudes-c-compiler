@@ -245,6 +245,11 @@ pub struct CallAbiConfig {
     /// RISC-V psABI: if a 2×XLEN struct has only 1 GP register left, the first XLEN bytes
     /// go in that register and the rest go on the stack. ARM AAPCS64 does NOT split.
     pub allow_struct_split_reg_stack: bool,
+    /// Whether 2-register structs with >XLEN alignment must start at an even register.
+    /// RISC-V psABI: true (2×XLEN-aligned composites require even-aligned register pairs).
+    /// ARM AAPCS64: false (composite types never require even-aligned pairs; only
+    /// fundamental types like __int128 do, which is handled by align_i128_pairs).
+    pub align_struct_pairs: bool,
 }
 
 /// Result of SysV per-eightbyte struct classification.
@@ -462,7 +467,8 @@ fn classify_args_core(
                 if !classified {
                     let regs_needed = if size <= slot_size { 1 } else { size.div_ceil(slot_size) };
                     // RISC-V psABI: 2×XLEN-aligned structs must start at even register.
-                    if regs_needed == 2 && config.align_i128_pairs {
+                    // Note: ARM AAPCS64 does NOT require even-aligned pairs for composites.
+                    if regs_needed == 2 && config.align_struct_pairs {
                         let struct_align = info.struct_align.unwrap_or(slot_size);
                         if struct_align > slot_size && !int_idx.is_multiple_of(2) {
                             int_idx += 1; // skip to even register
