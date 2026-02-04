@@ -422,9 +422,6 @@ impl InstructionEncoder {
                 self.encode_jcc(ops, mnemonic)
             }
 
-            // Leave (restore frame pointer: mov %rbp,%rsp; pop %rbp)
-            "leave" | "leaveq" => { self.bytes.push(0xC9); Ok(()) }
-
             // Call/return (callq/retq are common AT&T aliases on x86-64)
             "call" | "callq" => self.encode_call(ops),
             "ret" | "retq" => {
@@ -612,6 +609,8 @@ impl InstructionEncoder {
             "movdqa" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x6F], &[0x66, 0x0F, 0x7F]),
             "movlpd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x12], &[0x66, 0x0F, 0x13]),
             "movhpd" => self.encode_sse_rr_rm(ops, &[0x66, 0x0F, 0x16], &[0x66, 0x0F, 0x17]),
+            "movlps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x12], &[0x0F, 0x13]),
+            "movhps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x16], &[0x0F, 0x17]),
 
             // SSE shifts with immediate
             "psllw" => self.encode_sse_shift(ops, &[0x66, 0x0F, 0xF1], 6, &[0x66, 0x0F, 0x71]),
@@ -855,8 +854,6 @@ impl InstructionEncoder {
             "packsswb" => self.encode_sse_op(ops, &[0x66, 0x0F, 0x63]),
             "movhlps" => self.encode_sse_op(ops, &[0x0F, 0x12]),
             "movlhps" => self.encode_sse_op(ops, &[0x0F, 0x16]),
-            "movlps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x12], &[0x0F, 0x13]),
-            "movhps" => self.encode_sse_rr_rm(ops, &[0x0F, 0x16], &[0x0F, 0x17]),
             "movddup" => self.encode_sse_op(ops, &[0xF2, 0x0F, 0x12]),
             "movshdup" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x16]),
             "movsldup" => self.encode_sse_op(ops, &[0xF3, 0x0F, 0x12]),
@@ -911,6 +908,9 @@ impl InstructionEncoder {
             "vpcmpeqd" => self.encode_avx_3op(ops, 0x76, true),
             "vpcmpeqb" => self.encode_avx_3op(ops, 0x74, true),
             "vpcmpeqw" => self.encode_avx_3op(ops, 0x75, true),
+            "vpcmpgtb" => self.encode_avx_3op(ops, 0x64, true),
+            "vpcmpgtw" => self.encode_avx_3op(ops, 0x65, true),
+            "vpcmpgtd" => self.encode_avx_3op(ops, 0x66, true),
             "vpaddb" => self.encode_avx_3op(ops, 0xFC, true),
             "vpaddw" => self.encode_avx_3op(ops, 0xFD, true),
             "vpsubb" => self.encode_avx_3op(ops, 0xF8, true),
@@ -936,6 +936,11 @@ impl InstructionEncoder {
             "vpalignr" => self.encode_avx_3op_3a_imm8(ops, 0x0F, true),
             "vblendps" => self.encode_avx_3op_3a_imm8(ops, 0x0C, true),
             "vblendpd" => self.encode_avx_3op_3a_imm8(ops, 0x0D, true),
+            "vinserti128" => self.encode_avx_3op_3a_imm8(ops, 0x38, true),
+            "vextracti128" => self.encode_avx_extract_imm8(ops, 0x39, true),
+            "vpabsb" => self.encode_avx_2op_38(ops, 0x1C, true),
+            "vpabsw" => self.encode_avx_2op_38(ops, 0x1D, true),
+            "vpabsd" => self.encode_avx_2op_38(ops, 0x1E, true),
             "vpmovmskb" => self.encode_avx_extract_gp(ops, 0xD7, true),
             "vmovd" => self.encode_avx_movd(ops),
             "vmovq" => self.encode_avx_movq(ops),
@@ -959,11 +964,8 @@ impl InstructionEncoder {
             "vpsraw" => self.encode_avx_shift(ops, 0xE1, 4, 0x71, true),
             "vpsrad" => self.encode_avx_shift(ops, 0xE2, 4, 0x72, true),
 
-            // AVX2 integer comparisons
+            // AVX2 integer comparisons (additional)
             "vpcmpeqq" => self.encode_avx_3op_38(ops, 0x29, true),
-            "vpcmpgtb" => self.encode_avx_3op(ops, 0x64, true),
-            "vpcmpgtw" => self.encode_avx_3op(ops, 0x65, true),
-            "vpcmpgtd" => self.encode_avx_3op(ops, 0x66, true),
             "vpcmpgtq" => self.encode_avx_3op_38(ops, 0x37, true),
 
             // AVX2 broadcast
@@ -972,26 +974,17 @@ impl InstructionEncoder {
             "vpbroadcastd" => self.encode_avx_broadcast(ops, &[0x58]),
             "vpbroadcastq" => self.encode_avx_broadcast(ops, &[0x59]),
 
-            // AVX2 permute/insert/extract
-            "vinserti128" => self.encode_avx_3op_3a_imm8(ops, 0x38, true),
-            "vextracti128" => self.encode_avx_extract_imm8(ops, 0x39, true),
+            // AVX2 permute
             "vperm2i128" => self.encode_avx_3op_3a_imm8(ops, 0x46, true),
             "vperm2f128" => self.encode_avx_3op_3a_imm8(ops, 0x06, true),
             "vpermd" => self.encode_avx_3op_38(ops, 0x36, true),
             "vpermq" => self.encode_avx_shuffle_3a_w1(ops, 0x00, true),
 
-            // AVX blend
-            "vblendps" => self.encode_avx_3op_3a_imm8(ops, 0x0C, true),
-            "vblendpd" => self.encode_avx_3op_3a_imm8(ops, 0x0D, true),
+            // AVX blend (additional)
             "vpblendd" => self.encode_avx_3op_3a_imm8(ops, 0x02, true),
             "vblendvps" => self.encode_avx_4op_3a(ops, 0x4A, true),
             "vblendvpd" => self.encode_avx_4op_3a(ops, 0x4B, true),
             "vpblendvb" => self.encode_avx_4op_3a(ops, 0x4C, true),
-
-            // AVX2 absolute value (2-operand, no vvvv)
-            "vpabsb" => self.encode_avx_2op_38(ops, 0x1C, true),
-            "vpabsw" => self.encode_avx_2op_38(ops, 0x1D, true),
-            "vpabsd" => self.encode_avx_2op_38(ops, 0x1E, true),
 
             // AVX2 broadcast from 128-bit memory
             "vbroadcasti128" => self.encode_avx_broadcast(ops, &[0x5A]),
@@ -1055,6 +1048,14 @@ impl InstructionEncoder {
             "vpextrb" => self.encode_avx_extract_byte(ops, 0x14, true),
             "vpextrd" => self.encode_avx_extract_byte(ops, 0x16, true),
             "vpextrw" => self.encode_avx_extract_byte(ops, 0x15, true),
+
+            // ---- AVX-512 (EVEX-encoded) ----
+            "vpxord" => self.encode_evex_3op(ops, 0xEF, 1, 0),  // EVEX.NDS.{128,256,512}.66.0F.W0 EF /r
+            "vpxorq" => self.encode_evex_3op(ops, 0xEF, 1, 1),  // EVEX.NDS.{128,256,512}.66.0F.W1 EF /r
+            "vpandd" => self.encode_evex_3op(ops, 0xDB, 1, 0),  // EVEX.NDS.66.0F.W0 DB /r
+            "vpandq" => self.encode_evex_3op(ops, 0xDB, 1, 1),  // EVEX.NDS.66.0F.W1 DB /r
+            "vpord" => self.encode_evex_3op(ops, 0xEB, 1, 0),   // EVEX.NDS.66.0F.W0 EB /r
+            "vporq" => self.encode_evex_3op(ops, 0xEB, 1, 1),   // EVEX.NDS.66.0F.W1 EB /r
 
             // ---- BMI2 instructions (VEX-encoded, GPR) ----
             "shrxq" => self.encode_bmi2_shift(ops, 0xF7, 3, 1), // F2.0F38.W1
@@ -2576,6 +2577,12 @@ impl InstructionEncoder {
                 self.bytes.push(self.modrm(3, dst_num, src_num));
                 Ok(())
             }
+            (Operand::Memory(mem), Operand::Register(dst)) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                self.emit_rex_rm(size, &dst.name, mem);
+                self.bytes.extend_from_slice(&[0x0F, 0x40 + cc]);
+                self.encode_modrm_mem(dst_num, mem)
+            }
             _ => Err("unsupported cmov operands".to_string()),
         }
     }
@@ -3723,6 +3730,81 @@ impl InstructionEncoder {
         }
     }
 
+    /// Emit EVEX 4-byte prefix.
+    /// Parameters match VEX but with additional EVEX-specific fields.
+    /// ll: 00=128, 01=256, 10=512
+    /// TODO: z (merge-masking) and aaa (opmask register k1-k7) are not yet used.
+    /// TODO: r_prime and v_prime are passed as false; zmm16-zmm31 won't encode correctly.
+    fn emit_evex(&mut self, r: bool, x: bool, b: bool, r_prime: bool, mm: u8, w: u8, vvvv: u8, v_prime: bool, pp: u8, ll: u8, _z: bool, _aaa: u8) {
+        let r_bit = if r { 0u8 } else { 1 };
+        let x_bit = if x { 0u8 } else { 1 };
+        let b_bit = if b { 0u8 } else { 1 };
+        let r_prime_bit = if r_prime { 0u8 } else { 1 };
+        let vvvv_inv = (!vvvv) & 0xF;
+        let v_prime_bit = if v_prime { 0u8 } else { 1 };
+
+        self.bytes.push(0x62); // EVEX prefix indicator
+
+        // Byte 1: R X B R' 0 0 mm
+        let byte1 = (r_bit << 7) | (x_bit << 6) | (b_bit << 5) | (r_prime_bit << 4) | mm;
+        self.bytes.push(byte1);
+
+        // Byte 2: W vvvv 1 pp
+        let byte2 = (w << 7) | (vvvv_inv << 3) | (1 << 2) | pp;
+        self.bytes.push(byte2);
+
+        // Byte 3: z L'L b V' aaa
+        let byte3 = (ll << 5) | (v_prime_bit << 3);
+        self.bytes.push(byte3);
+    }
+
+    /// Determine EVEX L'L from operands: 00=128(xmm), 01=256(ymm), 10=512(zmm)
+    fn evex_ll_from_ops(&self, ops: &[Operand]) -> u8 {
+        for op in ops {
+            if let Operand::Register(r) = op {
+                let name = r.name.to_lowercase();
+                if name.starts_with("zmm") { return 0b10; }
+                if name.starts_with("ymm") { return 0b01; }
+            }
+        }
+        0b00 // default to 128-bit
+    }
+
+    /// Encode EVEX 3-operand instruction (e.g., vpxord, vpandd, etc.)
+    /// Operands in AT&T order: src, vvvv, dst
+    fn encode_evex_3op(&mut self, ops: &[Operand], opcode: u8, pp: u8, w: u8) -> Result<(), String> {
+        if ops.len() != 3 { return Err("EVEX 3-op requires 3 operands".to_string()); }
+        let ll = self.evex_ll_from_ops(ops);
+
+        match (&ops[0], &ops[1], &ops[2]) {
+            (Operand::Register(src), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                // mm=1 (0F map)
+                self.emit_evex(r, false, b, false, 1, w, vvvv_enc, false, pp, ll, false, 0);
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            (Operand::Memory(mem), Operand::Register(vvvv), Operand::Register(dst)) => {
+                let vvvv_num = reg_num(&vvvv.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
+                self.emit_evex(r, x, b_ext, false, 1, w, vvvv_enc, false, pp, ll, false, 0);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            _ => Err("unsupported EVEX 3-op operands".to_string()),
+        }
+    }
+
     /// Determine VEX L (vector length) from operand: 0=128(xmm), 1=256(ymm)
     fn vex_l_from_ops(&self, ops: &[Operand]) -> u8 {
         for op in ops {
@@ -3924,6 +4006,36 @@ impl InstructionEncoder {
                 Ok(())
             }
             _ => Err("unsupported AVX 3-op+imm8 operands".to_string()),
+        }
+    }
+
+    /// Encode AVX 2-operand in 0F38 map (e.g., vpabsb src, dst with vvvv=0)
+    fn encode_avx_2op_38(&mut self, ops: &[Operand], opcode: u8, has_66: bool) -> Result<(), String> {
+        if ops.len() != 2 { return Err("AVX 2-op requires 2 operands".to_string()); }
+        let l = self.vex_l_from_ops(ops);
+        let pp = if has_66 { 1 } else { 0 };
+
+        match (&ops[0], &ops[1]) {
+            (Operand::Register(src), Operand::Register(dst)) if is_xmm_or_ymm(&src.name) && is_xmm_or_ymm(&dst.name) => {
+                let src_num = reg_num(&src.name).ok_or("bad register")?;
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b = needs_vex_ext(&src.name);
+                self.emit_vex(r, false, b, 2, 0, 0, l, pp);  // vvvv=0 for 2-operand
+                self.bytes.push(opcode);
+                self.bytes.push(self.modrm(3, dst_num, src_num));
+                Ok(())
+            }
+            (Operand::Memory(mem), Operand::Register(dst)) if is_xmm_or_ymm(&dst.name) => {
+                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
+                let r = needs_vex_ext(&dst.name);
+                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
+                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
+                self.emit_vex(r, x, b_ext, 2, 0, 0, l, pp);
+                self.bytes.push(opcode);
+                self.encode_modrm_mem(dst_num, mem)
+            }
+            _ => Err("unsupported AVX 2-op operands".to_string()),
         }
     }
 
@@ -4293,37 +4405,6 @@ impl InstructionEncoder {
             }
         }
         1 // default to 64-bit
-    }
-
-    /// Encode AVX 2-operand instruction in 0F38 map (no vvvv)
-    /// vpabsb, vpabsw, vpabsd, etc.
-    fn encode_avx_2op_38(&mut self, ops: &[Operand], opcode: u8, has_66: bool) -> Result<(), String> {
-        if ops.len() != 2 { return Err("AVX 2-op requires 2 operands".to_string()); }
-        let l = self.vex_l_from_ops(ops);
-        let pp = if has_66 { 1 } else { 0 };
-
-        match (&ops[0], &ops[1]) {
-            (Operand::Register(src), Operand::Register(dst)) => {
-                let src_num = reg_num(&src.name).ok_or("bad register")?;
-                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
-                let r = needs_vex_ext(&dst.name);
-                let b = needs_vex_ext(&src.name);
-                self.emit_vex(r, false, b, 2, 0, 0, l, pp);
-                self.bytes.push(opcode);
-                self.bytes.push(self.modrm(3, dst_num, src_num));
-                Ok(())
-            }
-            (Operand::Memory(mem), Operand::Register(dst)) => {
-                let dst_num = reg_num(&dst.name).ok_or("bad register")?;
-                let r = needs_vex_ext(&dst.name);
-                let b_ext = mem.base.as_ref().is_some_and(|b| needs_vex_ext(&b.name));
-                let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
-                self.emit_vex(r, x, b_ext, 2, 0, 0, l, pp);
-                self.bytes.push(opcode);
-                self.encode_modrm_mem(dst_num, mem)
-            }
-            _ => Err("unsupported AVX 2-op operands".to_string()),
-        }
     }
 
     /// Encode AVX extract with imm8 (vextracti128, vextractf128)
