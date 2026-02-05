@@ -466,7 +466,6 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
 
         // NEON/SIMD
         "cnt" => encode_cnt(operands),
-        "uaddlv" => encode_uaddlv(operands),
         "cmeq" => {
             // CMEQ has two forms:
             // - CMEQ Vd, Vn, Vm (three-same, U=1): compare registers
@@ -2975,35 +2974,6 @@ fn encode_cnt(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
-fn encode_uaddlv(operands: &[Operand]) -> Result<EncodeResult, String> {
-    // UADDLV Vd, Vn.<T>
-    // Encoding: 0 Q 1 01110 size 11 0000 0011 10 Rn Rd
-    // For .8b: Q=0, size=00, result in Hd
-    // For .16b: Q=1, size=00, result in Hd
-    // For .4h: Q=0, size=01, result in Sd
-    // For .8h: Q=1, size=01, result in Sd
-    // For .4s: Q=1, size=10, result in Dd
-    if operands.len() < 2 {
-        return Err("uaddlv requires 2 operands".to_string());
-    }
-    let (rd, _) = get_neon_reg(operands, 0)?;
-    let (rn, arr) = get_neon_reg(operands, 1)?;
-
-    let (q, size): (u32, u32) = match arr.as_str() {
-        "8b" => (0, 0b00),
-        "16b" => (1, 0b00),
-        "4h" => (0, 0b01),
-        "8h" => (1, 0b01),
-        "4s" => (1, 0b10),
-        _ => return Err(format!("uaddlv: unsupported arrangement: {}", arr)),
-    };
-
-    // 0 Q 1 01110 size 11 0000 0011 10 Rn Rd
-    let word = ((q << 30) | (0b1 << 29) | (0b01110 << 24) | (size << 22)
-        | (0b11 << 20)) | (0b001110 << 10) | (rn << 5) | rd;
-    Ok(EncodeResult::Word(word))
-}
-
 // ── System instructions ──────────────────────────────────────────────────
 
 fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
@@ -5499,7 +5469,7 @@ fn encode_neon_shift_left_imm(operands: &[Operand], u: u32, opcode: u32) -> Resu
     let (rn, _) = get_neon_reg(operands, 1)?;
     let shift = get_imm(operands, 2)? as u32;
 
-    let (q, immh_base, esize) = match arr_d.as_str() {
+    let (q, _immh_base, esize) = match arr_d.as_str() {
         "8b" => (0u32, 0b0001u32, 8u32),
         "16b" => (1, 0b0001, 8),
         "4h" => (0, 0b0010, 16),

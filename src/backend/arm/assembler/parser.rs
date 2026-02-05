@@ -563,7 +563,7 @@ fn collect_macro_body(lines: &[&str], start: usize) -> (Vec<String>, usize) {
 ///
 /// Handles both positional and named arguments (e.g., `shift=1`).
 /// Falls back to default values when arguments are not provided.
-fn substitute_params(body: &[String], params: &[String], defaults: &[Option<String>], args: &[String], has_vararg: bool) -> Vec<String> {
+fn substitute_params(body: &[String], params: &[String], defaults: &[Option<String>], args: &[String], _has_vararg: bool) -> Vec<String> {
     // Build a map of param_name -> value, considering named args and defaults.
     let mut param_values: Vec<String> = Vec::with_capacity(params.len());
     // Start with defaults or "0" for each param
@@ -572,7 +572,7 @@ fn substitute_params(body: &[String], params: &[String], defaults: &[Option<Stri
     }
     // Apply positional and named arguments
     let mut pos_idx = 0;
-    for (arg_idx, arg) in args.iter().enumerate() {
+    for arg in args.iter() {
         if let Some(eq_pos) = arg.find('=') {
             // Named argument: "param=value"
             let name = &arg[..eq_pos];

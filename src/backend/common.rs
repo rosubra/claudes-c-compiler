@@ -58,6 +58,10 @@ pub struct AssemblerConfig {
 }
 
 /// Configuration for an external linker.
+///
+/// The `command` and `extra_args` fields are only used when linking via GCC
+/// (`gcc_linker` feature). The built-in linker dispatches by `expected_elf_machine`.
+#[allow(dead_code)]
 pub struct LinkerConfig {
     /// The linker command (e.g., "gcc", "aarch64-linux-gnu-gcc")
     pub command: &'static str,

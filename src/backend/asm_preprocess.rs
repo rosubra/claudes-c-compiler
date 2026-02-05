@@ -25,6 +25,9 @@ pub enum CommentStyle {
     HashAndSlashSlash,
     /// `//` and `@` (ARM GAS — but `@` is not a comment before type specifiers
     /// like `@function`, `@object`, `@progbits`, `@nobits`, `@tls_object`, `@note`)
+    /// Currently the ARM assembler uses its own strip_comment; this variant will
+    /// be used when ARM migrates to the shared preprocessor.
+    #[allow(dead_code)]
     SlashSlashAndAt,
 }
 

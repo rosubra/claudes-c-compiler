@@ -1178,6 +1178,10 @@ pub fn load_thin_archive_elf64<G: GlobalSymbolOps>(
 /// The `on_shared_lib` callback handles shared libraries (.so files). This allows
 /// x86 and ARM to handle dynamic symbol extraction differently. Pass a no-op
 /// closure for static-only linking.
+///
+/// Currently unused: x86 and ARM linkers have their own `load_file` implementations.
+/// This generic version will be used as those linkers migrate to shared infrastructure.
+#[allow(dead_code)]
 pub fn load_file_elf64<G: GlobalSymbolOps>(
     path: &str,
     objects: &mut Vec<Elf64Object>,
