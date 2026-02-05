@@ -6,7 +6,8 @@ This module implements a self-contained static linker for RISC-V 64-bit ELF
 targets. It reads relocatable object files (`.o`) and static archives (`.a`),
 resolves symbols, merges sections, applies all RISC-V relocations, generates
 PLT/GOT structures for dynamic library interop, and emits a complete
-dynamically-linked (or optionally static) ELF executable.
+dynamically-linked (or optionally static) ELF executable. It can also produce
+shared libraries (`.so`) via the `link_shared` entry point.
 
 The linker is invoked in-process by the compiler driver (no fork/exec of a
 system `ld`), removing any dependency on a RISC-V cross-linker installation.
@@ -14,35 +15,42 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
 
 ### Capabilities at a glance
 
-- Reads ELF64 relocatable objects and GNU `ar` archives
+- Reads ELF64 relocatable objects and GNU `ar` / thin archives
 - Reads ELF shared libraries to discover dynamic symbols
 - Handles GNU-style linker scripts embedded in `.so` wrappers
 - Iterative archive member resolution (pull-in-on-demand)
-- Full RISC-V relocation processing (30+ relocation types)
+- Full RISC-V relocation processing (35+ relocation types including compressed)
 - PLT/GOT generation for function calls into shared libraries
 - COPY relocations for data symbols imported from shared libraries
-- TLS support (Local-Exec and Initial-Exec models; GD->LE relaxation for static binaries; PT_TLS segment)
+- TLS support (Local-Exec and Initial-Exec models; GD→LE relaxation for static binaries; PT_TLS segment)
 - GNU RELRO segment for .dynamic, .got, init/fini arrays
-- Linker-defined symbols (__global_pointer$, _start, _edata, __bss_start, ...)
-- CRT startup object discovery and automatic linking of libc/libgcc
-- Produces a conformant ELF64 executable with correct program and section headers
+- Linker-defined symbols (`__global_pointer$`, `_start`, `_edata`, `__bss_start`, ...)
+- Shared library output (`ET_DYN`) with `R_RISCV_RELATIVE` relocations and SONAME
+- `--defsym` symbol aliasing via `-Wl,--defsym=SYM=VAL`
+- Produces conformant ELF64 executables and shared libraries with program and section headers
+
+CRT object discovery and library search path resolution are handled by the
+shared compiler driver (`common.rs`) before the linker is invoked. The linker
+receives pre-resolved CRT object paths, library search paths, and default
+library names as function parameters.
 
 ## Architecture / Pipeline
 
+### Executable Linking (`link_builtin`)
+
 ```
-  .o files      .a archives      .so shared libs      -l/-L flags
-      |               |                |                    |
-      v               v                v                    v
+  CRT objects    .o files    .a archives    .so shared libs    -l/-L flags
+      |              |            |               |                 |
+      v              v            v               v                 v
 +--------------------------------------------------------------------------+
 |                      Phase 1: Input Collection                           |
-|  - Read ELF objects and ar archives                                      |
-|  - Discover CRT objects (crt1.o, crti.o, crtbegin.o, crtend.o, crtn.o)  |
-|  - Parse -L library search paths and -l library names                    |
+|  - Read pre-resolved CRT objects, user .o files, and .a archives         |
+|  - Parse additional -l and -Wl, flags from user arguments                |
 +--------------------------------------------------------------------------+
       |
       v
 +--------------------------------------------------------------------------+
-|                Phase 1b: Library Resolution                              |
+|           Phase 1b-1c: Library and Archive Resolution                    |
 |  - Scan shared libraries (.so) for exported symbols                      |
 |  - Parse linker scripts embedded in .so stubs                            |
 |  - Build shared_lib_syms: HashMap<name, DynSymbol>                       |
@@ -72,10 +80,7 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
 |              Phase 4: Address Layout                                     |
 |  - Sort merged sections by canonical order                               |
 |  - Compute sizes of generated sections (PLT, GOT, .dynamic, ...)        |
-|  - Layout RX segment: headers, .interp, .gnu.hash, .dynsym, .dynstr,    |
-|    .rela.plt, .plt, then user .text/.rodata/.eh_frame                    |
-|  - Layout RW segment: init/fini arrays, .dynamic, .got (RELRO region),  |
-|    then .got.plt, .data, .sdata, TLS sections, .bss                     |
+|  - Layout RX and RW LOAD segments with page-aligned boundary             |
 |  - Assign virtual addresses and file offsets to all sections             |
 +--------------------------------------------------------------------------+
       |
@@ -84,7 +89,7 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
 |              Phase 5: Symbol Fixup                                       |
 |  - Add section base vaddrs to all symbol values                          |
 |  - Define linker-provided symbols (__global_pointer$, _edata, etc.)      |
-|  - Patch dynsym entries for COPY-relocated symbols                       |
+|  - Apply --defsym aliases                                                |
 |  - Build local symbol vaddr map for relocation resolution                |
 +--------------------------------------------------------------------------+
       |
@@ -94,7 +99,7 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
 |  - Iterate all input relocations, mapped to merged sections              |
 |  - Resolve each symbol to its final virtual address                      |
 |  - Patch instruction/data bytes in merged section buffers                |
-|  - Handle all 30+ RISC-V relocation types                                |
+|  - Handle all 35+ RISC-V relocation types                                |
 +--------------------------------------------------------------------------+
       |
       v
@@ -110,7 +115,7 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
       v
 +--------------------------------------------------------------------------+
 |        Phases 11-14: Final ELF Emission                                  |
-|  - Build .eh_frame_hdr (minimal, for basic execution)                    |
+|  - Build .eh_frame_hdr with binary search table                          |
 |  - Find entry point (_start or main)                                     |
 |  - Write ELF header, program headers, section data, section headers      |
 |  - Set file permissions to 0755                                          |
@@ -120,89 +125,38 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
                     ELF Executable
 ```
 
+### Shared Library Linking (`link_shared`)
+
+A separate 5-phase pipeline (with sub-phases) produces `ET_DYN` shared objects:
+
+- **Phase 1**: Load input objects and resolve archives on demand
+- **Phase 2**: Merge sections (same grouping rules as executable linking)
+- **Phase 3/3b**: Build global symbol table and identify GOT entries
+- **Phase 4**: Layout sections into RX+RW segments; build PLT, GOT, `.dynamic`,
+  `.rela.dyn` (with `R_RISCV_RELATIVE` entries), dynsym/dynstr tables
+- **Phase 5**: Emit ELF with `ET_DYN`, SONAME, and all program/section headers
+
 ## File Inventory
 
-| File              | Lines | Role                                                          |
-|-------------------|-------|---------------------------------------------------------------|
-| `mod.rs`          | ~22   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
-| `link.rs`         | ~3900 | Core linker implementation: `link_builtin` (executable) and `link_shared` (shared library) |
-| `relocations.rs`  | ~610  | RISC-V relocation constants, instruction patching, shared types (GlobalSym, MergedSection, InputSecRef), and utility functions used by both executable and shared library linking |
-| `elf_read.rs`     | ~90   | Re-exports shared linker_common types; delegates parsing to shared infrastructure |
+| File              | Lines  | Role                                                          |
+|-------------------|--------|---------------------------------------------------------------|
+| `mod.rs`          | ~22    | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
+| `link.rs`         | ~4600  | Core linker: `link_builtin` (~2465 lines) and `link_shared` (~2000 lines) |
+| `relocations.rs`  | ~620   | Relocation constants, instruction patching, shared types (GlobalSym, MergedSection, InputSecRef), and utility functions used by both linking modes |
+| `elf_read.rs`     | ~90    | Re-exports shared linker_common types; delegates ELF parsing to shared infrastructure |
 
 ## Key Data Structures
 
-### `ElfObject` (linker_common via elf_read.rs)
+### Shared types (from `linker_common` via `elf_read.rs`)
 
-A fully parsed relocatable ELF64 object file. This type is shared with the
-x86 and ARM backends via `linker_common::Elf64Object`.
+The linker uses shared ELF64 types from the cross-backend `linker_common` module:
 
-```
-ElfObject {
-    sections:      Vec<Elf64Section>,          // parsed section headers
-    symbols:       Vec<Elf64Symbol>,           // full symbol table
-    section_data:  Vec<Vec<u8>>,               // raw data for each section (empty for NOBITS)
-    relocations:   Vec<Vec<Elf64Rela>>,        // relocs indexed by target section
-    source_name:   String,                     // source file name
-}
-```
-
-### `Elf64Section` (linker_common)
-
-A single section header from an input object file.
-
-```
-Elf64Section {
-    name:       String,    // e.g., ".text", ".rodata", ".rela.text"
-    sh_type:    u32,       // SHT_PROGBITS, SHT_NOBITS, SHT_RELA, ...
-    flags:      u64,       // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS
-    size:       u64,       // section size in bytes
-    addralign:  u64,       // required alignment
-    entsize:    u64,       // entry size for uniform-entry sections
-    link:       u32,       // linked section index (e.g., .symtab -> .strtab)
-    info:       u32,       // extra info (e.g., .rela.text -> .text section index)
-}
-```
-
-### `Elf64Symbol` (linker_common)
-
-A parsed ELF symbol table entry. Binding, type, and visibility are accessed
-via methods: `binding()`, `sym_type()`, `visibility()`.
-
-```
-Elf64Symbol {
-    name:   String,   // symbol name from .strtab
-    value:  u64,      // st_value (offset within section, or alignment for COMMON)
-    size:   u64,      // st_size
-    info:   u8,       // packed binding (>>4) and type (&0xf)
-    other:  u8,       // packed visibility (&0x3)
-    shndx:  u16,      // section index, or SHN_UNDEF / SHN_ABS / SHN_COMMON
-}
-```
-
-### `Elf64Rela` (linker_common)
-
-A single relocation entry from a `.rela.*` section.
-
-```
-Elf64Rela {
-    offset:     u64,     // byte offset within the target section
-    rela_type:  u32,     // R_RISCV_* relocation type
-    sym_idx:    u32,     // index into the object's symbol table
-    addend:     i64,     // explicit addend (Elf64_Rela format)
-}
-```
-
-### `DynSymbol` (linker_common)
-
-Information about a symbol exported by a shared library.
-
-```
-DynSymbol {
-    name:   String,    // symbol name
-    info:   u8,        // packed type; use sym_type() method for STT_FUNC/STT_OBJECT
-    size:   u64,       // st_size (needed for COPY relocation allocation)
-}
-```
+- **`ElfObject`** (`Elf64Object`): A fully parsed relocatable object with sections,
+  symbols, section data, and relocations.
+- **`Elf64Symbol`**: A parsed symbol table entry with name, value, size, binding/type/visibility,
+  and section index.
+- **`Elf64Rela`**: A relocation entry with offset, type, symbol index, and addend.
+- **`DynSymbol`**: A symbol exported by a shared library (name, type, size).
 
 ### `MergedSection` (relocations.rs)
 
@@ -255,26 +209,19 @@ InputSecRef {
 
 ### Phase 1: Input Collection
 
-1. Parse command-line flags to determine linking mode (`-static`, `-nostdlib`).
-2. Auto-discover CRT directories by searching well-known paths for
-   `crt1.o`, `crti.o`, `crtbegin.o`, etc. The search covers both native and
-   cross-compiler install layouts:
-   - `/usr/lib/gcc-cross/riscv64-linux-gnu/{14..8}/`
-   - `/usr/lib/gcc/riscv64-linux-gnu/{14..8}/`
-   - `/usr/riscv64-linux-gnu/lib/`
-   - `/usr/lib/riscv64-linux-gnu/`
-3. Unless `-nostdlib`, prepend CRT startup objects (`crt1.o`, `crti.o`,
-   `crtbegin.o`) and append CRT finalization objects (`crtend.o`, `crtn.o`).
+1. Receive pre-resolved CRT objects, library paths, and default library names
+   from the compiler driver (`common.rs`). The driver handles searching
+   well-known paths for `crt1.o`, `crti.o`, `crtbegin.o`, etc.
+2. Parse command-line flags to determine linking mode (`-static`).
+3. Prepend CRT startup objects and append CRT finalization objects.
 4. Read each input file. If it starts with `!<arch>\n`, parse as a GNU `ar`
-   archive (extracting all ELF members). If it starts with `\x7fELF`, parse
-   as a single object file. Other files (e.g., linker scripts) are silently
-   skipped.
-5. Parse `-L` paths and `-l` library names from user arguments, including
-   `-Wl,` pass-through syntax.
-6. Add default library search paths and default libraries (`-lgcc -lgcc_eh -lc -lm`
-   for static linking, `-lgcc -lgcc_s -lc -lm` for dynamic linking).
+   archive. If it starts with `!<thin>\n`, parse as a thin archive.
+   If it starts with `\x7fELF`, parse as a single object file.
+   Archives are deferred for demand-driven extraction in Phase 1c.
+5. Parse additional `-l` library names and `-Wl,--defsym` definitions from
+   user arguments, including `-Wl,` pass-through syntax.
 
-### Phase 1b: Library Resolution
+### Phase 1b-1c: Library and Archive Resolution
 
 The linker builds a set of defined and undefined symbols from the initial
 input objects. Then:
@@ -286,7 +233,7 @@ input objects. Then:
    Read the `.dynsym` section of each real shared library to collect all
    exported symbol names, types, and sizes.
 
-2. **Archive group-loading**: All archives are iterated in an outer group
+2. **Archive group-loading** (Phase 1c): All archives are iterated in an outer group
    loop until no new objects are added, handling circular cross-archive
    dependencies (e.g., `libm -> libgcc -> libc -> libgcc`). Within each
    archive, a multi-pass iterative algorithm pulls in members on demand:
@@ -373,8 +320,10 @@ object:
 
 ### Phase 4: Address Layout
 
-The linker lays out the executable image in two LOAD segments:
+The linker lays out the executable image in two LOAD segments. Dynamic and
+static linking produce different layouts:
 
+**Dynamic linking layout:**
 ```
 +================================================================+
 |  LOAD Segment 0 (RX -- Read + Execute)                         |
@@ -385,8 +334,8 @@ The linker lays out the executable image in two LOAD segments:
 |  .gnu.hash        (GNU hash table for .dynsym)                 |
 |  .dynsym          (dynamic symbol table)                       |
 |  .dynstr          (dynamic string table)                       |
-|  .gnu.version     (symbol versioning, may be empty)            |
-|  .gnu.version_r   (version requirements, may be empty)         |
+|  .gnu.version     (symbol versioning, currently empty)          |
+|  .gnu.version_r   (version requirements, currently empty)       |
 |  .rela.dyn        (COPY relocations for data imports)          |
 |  .rela.plt        (JUMP_SLOT relocations for PLT)              |
 |  .plt             (Procedure Linkage Table)                    |
@@ -415,6 +364,11 @@ The linker lays out the executable image in two LOAD segments:
 +================================================================+
 ```
 
+**Static linking layout** omits `.interp`, `.gnu.hash`, `.dynsym`, `.dynstr`,
+`.rela.*`, `.plt`, `.got.plt`, and `.dynamic`. The RX segment contains only
+`.text`, `.rodata`, and `.eh_frame`. The RW segment contains `.init_array`,
+`.fini_array`, `.got`, `.data`, `.sdata`, TLS sections, and `.bss`.
+
 The base virtual address is `0x10000`. The page size is `0x1000` (4 KiB).
 File offsets and virtual addresses are kept congruent modulo page size, as
 required for mmap-based loading.
@@ -440,8 +394,9 @@ function:
 ### Phase 5: Symbol Fixup
 
 After layout, every global symbol's `value` is adjusted by adding its merged
-section's base virtual address.  Then the linker defines a comprehensive set
-of linker-provided symbols:
+section's base virtual address. `--defsym` aliases are applied (each alias
+copies the target symbol's resolved value). Then the linker defines a
+comprehensive set of linker-provided symbols:
 
 | Symbol                    | Value                                         |
 |---------------------------|-----------------------------------------------|
@@ -511,6 +466,9 @@ linker:
 | `R_RISCV_SUB16`          | 38   | *P -= S + A          | 2-byte data            |
 | `R_RISCV_SUB32`          | 39   | *P -= S + A          | 4-byte data            |
 | `R_RISCV_SUB64`          | 40   | *P -= S + A          | 8-byte data            |
+| `R_RISCV_ALIGN`          | 43   | (skip -- hint only)  | --                     |
+| `R_RISCV_RVC_BRANCH`    | 44   | S + A - P            | CB-type (8-bit compressed) |
+| `R_RISCV_RVC_JUMP`      | 45   | S + A - P            | CJ-type (11-bit compressed) |
 | `R_RISCV_RELAX`          | 51   | (skip -- hint only)  | --                     |
 | `R_RISCV_SUB6`           | 52   | *P[5:0] -= (S+A)     | 6-bit sub-byte field   |
 | `R_RISCV_SET6`           | 53   | *P[5:0] = (S+A)      | 6-bit sub-byte field   |
@@ -518,6 +476,8 @@ linker:
 | `R_RISCV_SET16`          | 55   | *P = (S + A)         | 2-byte data            |
 | `R_RISCV_SET32`          | 56   | *P = (S + A)         | 4-byte data            |
 | `R_RISCV_32_PCREL`       | 57   | S + A - P            | 4-byte data            |
+| `R_RISCV_SET_ULEB128`   | 60   | set ULEB128(S + A)   | ULEB128 encoded value  |
+| `R_RISCV_SUB_ULEB128`   | 61   | sub ULEB128(S + A)   | ULEB128 encoded value  |
 
 Legend: S = symbol value, A = addend, P = relocation site address,
 G = GOT entry address, TP = thread pointer (TLS base).
@@ -533,6 +493,8 @@ helper, which scans the current section's relocations for a matching hi20
 relocation at the AUIPC virtual address.
 
 ### Phases 7-10: Dynamic Linking Support
+
+These phases are skipped for static linking (`-static`).
 
 #### PLT Generation (Phase 8)
 
@@ -604,18 +566,14 @@ The final phase writes the complete ELF executable:
    `e_flags = 0x05` (RVC + double-float ABI), `e_entry` set to `_start`
    (or `main`, or start of `.text`).
 
-2. **Program Headers** (10 or 11 entries):
-   - `PT_PHDR`: self-referencing program header table
-   - `PT_INTERP`: path to dynamic linker
-   - `PT_RISCV_ATTRIBUTES`: RISC-V architecture attributes
-   - `PT_LOAD` (RX): read-execute segment
-   - `PT_LOAD` (RW): read-write segment
-   - `PT_DYNAMIC`: dynamic section
-   - `PT_NOTE`: note section (stub)
-   - `PT_GNU_EH_FRAME`: exception handling frame header (.eh_frame_hdr with binary search table)
-   - `PT_GNU_STACK`: stack permissions (RW, no execute)
-   - `PT_GNU_RELRO`: RELRO boundary for .dynamic/.got/init arrays
-   - `PT_TLS`: thread-local storage segment (only if TLS sections exist)
+2. **Program Headers**:
+   - Dynamic linking (10 or 11 entries): `PT_PHDR`, `PT_INTERP`,
+     `PT_RISCV_ATTRIBUTES`, `PT_LOAD` (RX), `PT_LOAD` (RW), `PT_DYNAMIC`,
+     `PT_NOTE`, `PT_GNU_EH_FRAME`, `PT_GNU_STACK`, `PT_GNU_RELRO`,
+     and optionally `PT_TLS` (if TLS sections exist).
+   - Static linking (6 or 7 entries): `PT_LOAD` (RX), `PT_LOAD` (RW),
+     `PT_NOTE`, `PT_GNU_EH_FRAME`, `PT_GNU_STACK`, `PT_RISCV_ATTRIBUTES`,
+     and optionally `PT_TLS`.
 
 3. **Segment Data**: Written in order -- RX segment contents, then RW segment
    contents, then `.riscv.attributes`, each padded to their file offsets.
@@ -629,8 +587,8 @@ The final phase writes the complete ELF executable:
 
 ### 1. Two-function architecture
 
-The linker has two main entry points: `link_builtin` (for executables, ~2400
-lines) and `link_shared` (for shared libraries, ~1500 lines), each organized
+The linker has two main entry points: `link_builtin` (for executables, ~2465
+lines) and `link_shared` (for shared libraries, ~2000 lines), each organized
 as a linear pipeline with clearly labeled phases. Shared types, relocation
 constants, instruction patching functions, and utility helpers are factored into
 `relocations.rs` to avoid duplication between the two functions. Each main
@@ -656,10 +614,11 @@ is fast (2-3 passes for typical C programs with libc).
 
 ### 4. Limited linker relaxation
 
-The linker recognizes `R_RISCV_RELAX` relocations but does not perform general
-relaxation optimizations (e.g., converting `auipc+jalr` to `jal`, or `auipc+addi`
-to `addi` when the target is within GP range). All instructions retain their
-original encoding width, avoiding the complexity of iterative section resizing.
+The linker recognizes `R_RISCV_RELAX` and `R_RISCV_ALIGN` relocations but
+does not perform general relaxation optimizations (e.g., converting
+`auipc+jalr` to `jal`, or `auipc+addi` to `addi` when the target is within
+GP range). All instructions retain their original encoding width, avoiding the
+complexity of iterative section resizing.
 
 The one exception is **TLS GD→LE relaxation** for static binaries. When
 `R_RISCV_TLS_GD_HI20` relocations are encountered in a static link, the General
@@ -695,7 +654,8 @@ The `.got` section (for `GOT_HI20` references) is placed *inside* the RELRO
 region, so it becomes read-only after startup. The `.got.plt` section is placed
 *outside* RELRO because it must remain writable for lazy PLT resolution. This
 matches the standard RELRO layout used by GNU ld and provides hardening against
-GOT overwrite attacks without breaking lazy binding.
+GOT overwrite attacks without breaking lazy binding. Note: the `link_shared`
+path does not yet emit `PT_GNU_RELRO`.
 
 ### 8. Entry point discovery
 
