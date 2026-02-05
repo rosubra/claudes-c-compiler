@@ -13,10 +13,10 @@ not enabled).  It accepts the same textual assembly that GCC's gas would consume
 and produces ABI-compatible `.o` files that any standard AArch64 ELF linker (or
 the companion built-in linker) can link.
 
-The implementation spans roughly 8,470 lines of Rust across four files and is
+The implementation spans roughly 9,100 lines of Rust across four files and is
 organized as a clean three-stage pipeline.  Shared ELF infrastructure (section
 management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
-`elf.rs`; this file only contains AArch64-specific logic.
+`elf.rs`; the files here contain only AArch64-specific logic.
 
 ```
                     AArch64 Built-in Assembler
@@ -27,14 +27,14 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        v
   +------------------+
   |   parser.rs       |   Stage 1: Preprocess + Parse
-  |   (2,193 lines)   |   Macros, .rept, .if -> AsmStatement[]
+  |   (~2,340 lines)  |   Macros, .rept, .if -> AsmStatement[]
   +------------------+
        |
        | Vec<AsmStatement>
        v
   +------------------+
   |   elf_writer.rs   |   Stage 2: Process + Encode + Emit
-  |   (454 lines)     |   AArch64-specific: branch resolution,
+  |   (~560 lines)    |   AArch64-specific: branch resolution,
   |                    |   sym diffs (uses ElfWriterBase)
   +------------------+
        |         ^
@@ -42,7 +42,7 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        v         |
   +------------------+
   |   encoder.rs      |   Instruction Encoding Library
-  |   (5,604 lines)   |   Mnemonic + Operands -> u32 words
+  |   (~5,980 lines)  |   Mnemonic + Operands -> u32 words
   +------------------+
        |
        v
@@ -52,12 +52,12 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
 The single public entry point is:
 
 ```rust
-// mod.rs (221 lines)
+// mod.rs (~220 lines)
 pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String>
 ```
 
-It calls `parse_asm()`, creates an `ElfWriter`, feeds it the parsed
-statements, and writes the final `.o` file.
+It calls `parse_asm()`, resolves GNU numeric labels (`1f`/`1b`), creates an
+`ElfWriter`, feeds it the parsed statements, and writes the final `.o` file.
 
 
 ---
@@ -75,7 +75,7 @@ IR; no raw text parsing happens after this point.
 | Type | Role |
 |------|------|
 | `AsmStatement` | Top-level IR node: `Label`, `Directive`, `Instruction`, or `Empty`. |
-| `AsmDirective` | Fully-typed directive variant (24 kinds, from `.section` to `.cfi_*`). |
+| `AsmDirective` | Fully-typed directive variant (27 kinds, from `.section` to `.cfi_*`). |
 | `Operand` | Operand of an instruction (20 variants covering every AArch64 addressing mode). |
 | `SectionDirective` | Parsed `.section name, "flags", @type` triple. |
 | `DataValue` | Data that can be an integer, a symbol, a symbol+offset, or a symbol difference. |
@@ -102,6 +102,7 @@ Extend { kind, amount }            -- sxtw #N
 Cond("eq")                         -- condition code
 Barrier("ish")                     -- barrier option
 Label(".LBB0_4")                   -- branch target
+Expr("complex_expr")               -- raw expression fallback
 RegArrangement { reg, arr }        -- v0.16b (NEON arrangement)
 RegLane { reg, elem_size, index }  -- v0.d[1] (NEON lane)
 RegList(Vec<Operand>)              -- {v0.16b, v1.16b}
@@ -117,13 +118,19 @@ parse_asm(text)
      - Supports default parameters, varargs (\()), .purgem
      - Nested macro definitions tracked with depth counter
      - Recursive expansion with 64-level depth limit
+     - \@ counter substitution for unique label generation
   2. expand_rept_blocks() -- flatten .rept/.endr and .irp/.irpc/.endr
   3. resolve_set_constants() -- substitute .set/.equ symbol values
   4. resolve_register_aliases() -- process .req/.unreq register aliases
-  5. Conditional assembly: .if/.elseif/.else/.endif, .ifc/.ifnc, .ifb/.ifnb
+  5. Conditional assembly (evaluated during line processing):
+     - .if/.elseif/.elsif/.else/.endif
+     - .ifdef/.ifndef (symbol existence)
+     - .ifc/.ifnc (string comparison)
+     - .ifb/.ifnb (blank argument test)
+     - .ifeq/.ifne (numeric comparison)
      - Supports ==, !=, >, >=, <, <= comparisons
      - Arithmetic expressions via shared asm_expr evaluator
-  6. ldr =symbol pseudo-instruction expansion (literal pool)
+  6. ldr =symbol pseudo-instruction expansion (adrp + add :lo12:)
   for each line:
     a. Trim whitespace, strip comments (// and @ style)
     b. Split on ';' (GAS multi-statement separator)
@@ -143,13 +150,13 @@ parse_asm(text)
 | Sections | `.section`, `.text`, `.data`, `.bss`, `.rodata`, `.pushsection`, `.popsection`/`.previous` |
 | Symbols | `.globl`/`.global`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type`, `.size`, `.local`, `.comm`, `.set`/`.equ` |
 | Alignment | `.align`, `.p2align` (power-of-2), `.balign` (byte count) |
-| Data emission | `.byte`, `.short`/`.hword`/`.2byte`, `.long`/`.4byte`/`.word`, `.quad`/`.8byte`/`.xword`, `.zero`/`.space`, `.ascii`, `.asciz`/`.string`, `.float`, `.double`, `.inst` |
+| Data emission | `.byte`, `.short`/`.hword`/`.2byte`, `.long`/`.4byte`/`.word`, `.quad`/`.8byte`/`.xword`, `.zero`/`.space`, `.ascii`, `.asciz`/`.string`, `.float`/`.single`, `.double`, `.inst` |
 | Macros | `.macro`/`.endm` (with default params, varargs), `.purgem`, `.req`/`.unreq` (register aliases) |
 | Repetition | `.rept`/`.endr`, `.irp`/`.endr`, `.irpc`/`.endr` |
-| Conditionals | `.if`/`.elseif`/`.else`/`.endif`, `.ifc`/`.ifnc`, `.ifb`/`.ifnb` |
+| Conditionals | `.if`/`.elseif`/`.elsif`/`.else`/`.endif`, `.ifdef`/`.ifndef`, `.ifc`/`.ifnc`, `.ifb`/`.ifnb`, `.ifeq`/`.ifne` |
 | Includes | `.incbin` (binary file inclusion) |
 | CFI | `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa_offset`, `.cfi_offset`, and 12 more (all passed through as no-ops) |
-| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute`, `.arch`, `.arch_extension`, `.ltorg`/`.pool` |
+| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute`, `.arch`, `.arch_extension`, `.cpu`, `.ltorg`/`.pool` |
 
 ### Design Decisions (Parser)
 
@@ -182,7 +189,7 @@ width, which makes encoding straightforward compared to variable-length ISAs.
 | Type | Role |
 |------|------|
 | `EncodeResult` | Outcome of encoding one instruction. |
-| `RelocType` | AArch64 ELF relocation types (17 variants). |
+| `RelocType` | AArch64 ELF relocation types (20 variants). |
 | `Relocation` | A relocation request: type + symbol + addend. |
 
 The `EncodeResult` enum has four variants:
@@ -204,7 +211,7 @@ The dispatch table in `encode_instruction()` maps ~240 base mnemonics
 |----------|-----------|
 | **Data Processing** | `mov`, `movz`, `movk`, `movn`, `add`, `adds`, `sub`, `subs`, `and`, `orr`, `eor`, `ands`, `orn`, `eon`, `bics`, `mul`, `madd`, `msub`, `smull`, `umull`, `smaddl`, `umaddl`, `mneg`, `udiv`, `sdiv`, `umulh`, `smulh`, `neg`, `negs`, `mvn`, `adc`, `adcs`, `sbc`, `sbcs` |
 | **Shifts** | `lsl`, `lsr`, `asr`, `ror` |
-| **Bit fields** | `ubfm`, `sbfm`, `ubfx`, `sbfx`, `ubfiz`, `sbfiz`, `bfm`, `bfi`, `bfxil` |
+| **Bit fields** | `ubfm`, `sbfm`, `ubfx`, `sbfx`, `ubfiz`, `sbfiz`, `bfm`, `bfi`, `bfxil`, `extr` |
 | **Extensions** | `sxtw`, `sxth`, `sxtb`, `uxtw`, `uxth`, `uxtb` |
 | **Compare** | `cmp`, `cmn`, `tst`, `ccmp`, `fccmp` |
 | **Conditional select** | `csel`, `csinc`, `csinv`, `csneg`, `cset`, `csetm`, `fcsel` |
@@ -227,21 +234,23 @@ The dispatch table in `encode_instruction()` maps ~240 base mnemonics
 | **NEON convert** | `fcvtzs`, `fcvtzu`, `scvtf`, `ucvtf`, `fcvtns`, `fcvtms`, `fcvtas`, `fcvtps` (vector forms) |
 | **NEON scalar** | `addp` (scalar), `add`/`sub` (d-regs), `sqabs`/`sqneg` (scalar), `sqshrn` (scalar) |
 | **NEON crypto** | `aese`, `aesd`, `aesmc`, `aesimc`, `sha1h`, `sha1c`, `sha1m`, `sha1p`, `sha1su0`, `sha1su1`, `sha256h`, `sha256h2`, `sha256su0`, `sha256su1`, `eor3` |
-| **System** | `nop`, `yield`, `wfe`, `sev`, `clrex`, `hint`, `dc`, `ic`, `tlbi`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
+| **System** | `nop`, `yield`, `wfe`, `wfi`, `sev`, `sevl`, `clrex`, `hint`, `bti`, `dc`, `ic`, `tlbi`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
 | **Bit manipulation** | `clz`, `cls`, `rbit`, `rev`, `rev16`, `rev32` |
 | **CRC32** | `crc32b`, `crc32h`, `crc32w`, `crc32x`, `crc32cb`, `crc32ch`, `crc32cw`, `crc32cx` |
+| **LSE Atomics** | `cas`/`casa`/`casal`/`casl`, `swp`/`swpa`/`swpal`/`swpl`, `ldadd`/`ldclr`/`ldeor`/`ldset` (with acquire/release variants) |
 | **Prefetch** | `prfm` |
 
 ### Relocation Types Emitted
 
 When an instruction references an external symbol (e.g., `bl printf` or
-`adrp x0, :got:variable`), the encoder returns `WordWithReloc`.  The 18
+`adrp x0, :got:variable`), the encoder returns `WordWithReloc`.  The 20
 relocation types cover the full AArch64 static-linking relocation model:
 
 | Relocation | ELF Number | Usage |
 |-----------|-----------|-------|
 | `Call26` | 283 | `bl` (26-bit PC-relative call) |
 | `Jump26` | 282 | `b` (26-bit PC-relative jump) |
+| `AdrPrelLo21` | 274 | `adr` (21-bit PC-relative) |
 | `AdrpPage21` | 275 | `adrp` (page-relative, bits [32:12]) |
 | `AddAbsLo12` | 277 | `add :lo12:sym` (low 12 bits) |
 | `Ldst8AbsLo12` | 278 | Load/store byte, low 12 |
@@ -252,7 +261,7 @@ relocation types cover the full AArch64 static-linking relocation model:
 | `AdrGotPage21` | 311 | `adrp` via GOT |
 | `Ld64GotLo12` | 312 | `ldr` from GOT entry |
 | `TlsLeAddTprelHi12` | 549 | TLS Local Exec, high 12 |
-| `TlsLeAddTprelLo12` | 550 | TLS Local Exec, low 12 |
+| `TlsLeAddTprelLo12` | 551 | TLS Local Exec, low 12 (no overflow check) |
 | `CondBr19` | 280 | Conditional branch, 19-bit |
 | `TstBr14` | 279 | Test-and-branch, 14-bit |
 | `Ldr19` | 273 | LDR literal, 19-bit PC-relative |
@@ -468,8 +477,8 @@ relaxation passes (unlike x86).  The only multi-word output is the
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | 223 | Public API: `assemble()` entry point, numeric label resolution |
-| `parser.rs` | 2,193 | Preprocessor (macros, .rept, .irp, conditionals, aliases) and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | 5,604 | Instruction encoder: ~240 base mnemonics + operands -> `u32` machine code |
-| `elf_writer.rs` | 454 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
-| **Total** | **8,474** | |
+| `mod.rs` | ~220 | Public API: `assemble()` entry point, GNU numeric label resolution (`1f`/`1b`) |
+| `parser.rs` | ~2,340 | Preprocessor (macros, .rept, .irp, conditionals, aliases) and parser: text -> `Vec<AsmStatement>` |
+| `encoder.rs` | ~5,980 | Instruction encoder: ~240 base mnemonics + operands -> `u32` machine code |
+| `elf_writer.rs` | ~560 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
+| **Total** | **~9,100** | |
