@@ -707,4 +707,576 @@ _MM_SET_FLUSH_ZERO_MODE(unsigned int __mode)
     _mm_setcsr((_mm_getcsr() & ~_MM_FLUSH_ZERO_MASK) | __mode);
 }
 
+/* === Scalar min/max === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_min_ss(__m128 __a, __m128 __b)
+{
+    __a.__val[0] = __a.__val[0] < __b.__val[0] ? __a.__val[0] : __b.__val[0];
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_max_ss(__m128 __a, __m128 __b)
+{
+    __a.__val[0] = __a.__val[0] > __b.__val[0] ? __a.__val[0] : __b.__val[0];
+    return __a;
+}
+
+/* === Move === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_move_ss(__m128 __a, __m128 __b)
+{
+    __a.__val[0] = __b.__val[0];
+    return __a;
+}
+
+/* === Negated comparisons (packed) === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnlt_ps(__m128 __a, __m128 __b)
+{
+    unsigned int __r[4];
+    __r[0] = !(__a.__val[0] < __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __r[1] = !(__a.__val[1] < __b.__val[1]) ? 0xFFFFFFFFu : 0;
+    __r[2] = !(__a.__val[2] < __b.__val[2]) ? 0xFFFFFFFFu : 0;
+    __r[3] = !(__a.__val[3] < __b.__val[3]) ? 0xFFFFFFFFu : 0;
+    __m128 __rv;
+    __builtin_memcpy(&__rv, __r, 16);
+    return __rv;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnle_ps(__m128 __a, __m128 __b)
+{
+    unsigned int __r[4];
+    __r[0] = !(__a.__val[0] <= __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __r[1] = !(__a.__val[1] <= __b.__val[1]) ? 0xFFFFFFFFu : 0;
+    __r[2] = !(__a.__val[2] <= __b.__val[2]) ? 0xFFFFFFFFu : 0;
+    __r[3] = !(__a.__val[3] <= __b.__val[3]) ? 0xFFFFFFFFu : 0;
+    __m128 __rv;
+    __builtin_memcpy(&__rv, __r, 16);
+    return __rv;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpngt_ps(__m128 __a, __m128 __b)
+{
+    return _mm_cmpnlt_ps(__b, __a);
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnge_ps(__m128 __a, __m128 __b)
+{
+    return _mm_cmpnle_ps(__b, __a);
+}
+
+/* === Negated scalar comparisons === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnlt_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = !(__a.__val[0] < __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnle_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = !(__a.__val[0] <= __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpngt_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = !(__a.__val[0] > __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpnge_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = !(__a.__val[0] >= __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+/* === Scalar ordered/unordered comparisons === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpord_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = (__a.__val[0] == __a.__val[0] && __b.__val[0] == __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cmpunord_ss(__m128 __a, __m128 __b)
+{
+    unsigned int __u = (__a.__val[0] != __a.__val[0] || __b.__val[0] != __b.__val[0]) ? 0xFFFFFFFFu : 0;
+    __builtin_memcpy(&__a.__val[0], &__u, 4);
+    return __a;
+}
+
+/* === Ordered scalar comparison returning int (COMISS) === */
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comieq_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] == __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comilt_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] < __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comile_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] <= __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comigt_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] > __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comige_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] >= __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_comineq_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] != __b.__val[0];
+}
+
+/* === Unordered scalar comparison returning int (UCOMISS) === */
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomieq_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] == __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomilt_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] < __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomile_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] <= __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomigt_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] > __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomige_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] >= __b.__val[0];
+}
+
+static __inline__ int __attribute__((__always_inline__))
+_mm_ucomineq_ss(__m128 __a, __m128 __b)
+{
+    return __a.__val[0] != __b.__val[0];
+}
+
+/* === 64-bit integer conversion (SSE) === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtsi64_ss(__m128 __a, long long __b)
+{
+    __a.__val[0] = (float)__b;
+    return __a;
+}
+
+#define _mm_cvtsi64x_ss(a, b) _mm_cvtsi64_ss(a, b)
+
+static __inline__ long long __attribute__((__always_inline__))
+_mm_cvtss_si64(__m128 __a)
+{
+    return (long long)__a.__val[0];
+}
+
+#define _mm_cvtss_si64x(a) _mm_cvtss_si64(a)
+
+static __inline__ long long __attribute__((__always_inline__))
+_mm_cvttss_si64(__m128 __a)
+{
+    return (long long)__a.__val[0];
+}
+
+#define _mm_cvttss_si64x(a) _mm_cvttss_si64(a)
+
+/* === Load (additional) === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_loadh_pi(__m128 __a, const __m64 *__p)
+{
+    __builtin_memcpy((char *)&__a + 8, __p, 8);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_loadl_pi(__m128 __a, const __m64 *__p)
+{
+    __builtin_memcpy(&__a, __p, 8);
+    return __a;
+}
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_loadr_ps(const float *__p)
+{
+    return (__m128){ { __p[3], __p[2], __p[1], __p[0] } };
+}
+
+/* === Store (additional) === */
+
+static __inline__ void __attribute__((__always_inline__))
+_mm_storer_ps(float *__p, __m128 __a)
+{
+    __p[0] = __a.__val[3]; __p[1] = __a.__val[2];
+    __p[2] = __a.__val[1]; __p[3] = __a.__val[0];
+}
+
+/* === MMX<->float conversion (SSE additions that operate on __m64) === */
+
+/* Convert packed 32-bit integers in __m64 to packed floats (low 2 elements) */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpi32_ps(__m128 __a, __m64 __b)
+{
+    int *__bi = (int *)&__b.__val;
+    __a.__val[0] = (float)__bi[0];
+    __a.__val[1] = (float)__bi[1];
+    return __a;
+}
+
+#define _mm_cvt_pi2ps(a, b) _mm_cvtpi32_ps(a, b)
+
+/* Convert packed floats (low 2 elements) to packed 32-bit integers in __m64 */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_cvtps_pi32(__m128 __a)
+{
+    __m64 __r;
+    int __rr[2];
+    __rr[0] = (int)__a.__val[0];
+    __rr[1] = (int)__a.__val[1];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _mm_cvt_ps2pi(a) _mm_cvtps_pi32(a)
+
+/* Convert packed floats (low 2 elements) to packed 32-bit integers with truncation */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_cvttps_pi32(__m128 __a)
+{
+    __m64 __r;
+    int __rr[2];
+    __rr[0] = (int)__a.__val[0];
+    __rr[1] = (int)__a.__val[1];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _mm_cvtt_ps2pi(a) _mm_cvttps_pi32(a)
+
+/* Convert packed 16-bit signed integers to packed floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpi16_ps(__m64 __a)
+{
+    short *__as = (short *)&__a.__val;
+    return (__m128){ { (float)__as[0], (float)__as[1], (float)__as[2], (float)__as[3] } };
+}
+
+/* Convert packed 16-bit unsigned integers to packed floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpu16_ps(__m64 __a)
+{
+    unsigned short *__as = (unsigned short *)&__a.__val;
+    return (__m128){ { (float)__as[0], (float)__as[1], (float)__as[2], (float)__as[3] } };
+}
+
+/* Convert packed 8-bit signed integers (low 4 bytes) to packed floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpi8_ps(__m64 __a)
+{
+    signed char *__ab = (signed char *)&__a.__val;
+    return (__m128){ { (float)__ab[0], (float)__ab[1], (float)__ab[2], (float)__ab[3] } };
+}
+
+/* Convert packed 8-bit unsigned integers (low 4 bytes) to packed floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpu8_ps(__m64 __a)
+{
+    unsigned char *__ab = (unsigned char *)&__a.__val;
+    return (__m128){ { (float)__ab[0], (float)__ab[1], (float)__ab[2], (float)__ab[3] } };
+}
+
+/* Convert two __m64 packed 32-bit integers to __m128 packed floats */
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_cvtpi32x2_ps(__m64 __a, __m64 __b)
+{
+    int *__ai = (int *)&__a.__val;
+    int *__bi = (int *)&__b.__val;
+    return (__m128){ { (float)__ai[0], (float)__ai[1], (float)__bi[0], (float)__bi[1] } };
+}
+
+/* Convert packed floats to packed 16-bit signed integers (with saturation) in __m64 */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_cvtps_pi16(__m128 __a)
+{
+    __m64 __r;
+    short __rr[4];
+    for (int __i = 0; __i < 4; __i++) {
+        int __v = (int)__a.__val[__i];
+        if (__v > 32767) __v = 32767;
+        if (__v < -32768) __v = -32768;
+        __rr[__i] = (short)__v;
+    }
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+/* Convert packed floats to packed 8-bit signed integers (low 4 bytes, high 4 zero) */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_cvtps_pi8(__m128 __a)
+{
+    __m64 __r;
+    signed char __rr[8];
+    for (int __i = 0; __i < 4; __i++) {
+        int __v = (int)__a.__val[__i];
+        if (__v > 127) __v = 127;
+        if (__v < -128) __v = -128;
+        __rr[__i] = (signed char)__v;
+    }
+    __rr[4] = __rr[5] = __rr[6] = __rr[7] = 0;
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+/* === SSE intrinsics operating on __m64 (SSE additions to MMX) === */
+
+/* Extract a 16-bit integer from __m64 at position N */
+#define _mm_extract_pi16(A, N) \
+    ((int)(unsigned short)(((unsigned short *)&(A).__val)[(N) & 3]))
+
+#define _m_pextrw(A, N) _mm_extract_pi16(A, N)
+
+/* Insert a 16-bit integer into __m64 at position N */
+#define _mm_insert_pi16(A, D, N) __extension__ ({ \
+    __m64 __tmp = (A); \
+    ((unsigned short *)&__tmp.__val)[(N) & 3] = (unsigned short)(D); \
+    __tmp; \
+})
+
+#define _m_pinsrw(A, D, N) _mm_insert_pi16(A, D, N)
+
+/* Packed maximum of signed 16-bit integers */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_max_pi16(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    short *__ra = (short *)&__a.__val;
+    short *__rb = (short *)&__b.__val;
+    short __rr[4];
+    for (int __i = 0; __i < 4; __i++)
+        __rr[__i] = __ra[__i] > __rb[__i] ? __ra[__i] : __rb[__i];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pmaxsw(a, b) _mm_max_pi16(a, b)
+
+/* Packed maximum of unsigned 8-bit integers */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_max_pu8(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned char *__ra = (unsigned char *)&__a.__val;
+    unsigned char *__rb = (unsigned char *)&__b.__val;
+    unsigned char __rr[8];
+    for (int __i = 0; __i < 8; __i++)
+        __rr[__i] = __ra[__i] > __rb[__i] ? __ra[__i] : __rb[__i];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pmaxub(a, b) _mm_max_pu8(a, b)
+
+/* Packed minimum of signed 16-bit integers */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_min_pi16(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    short *__ra = (short *)&__a.__val;
+    short *__rb = (short *)&__b.__val;
+    short __rr[4];
+    for (int __i = 0; __i < 4; __i++)
+        __rr[__i] = __ra[__i] < __rb[__i] ? __ra[__i] : __rb[__i];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pminsw(a, b) _mm_min_pi16(a, b)
+
+/* Packed minimum of unsigned 8-bit integers */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_min_pu8(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned char *__ra = (unsigned char *)&__a.__val;
+    unsigned char *__rb = (unsigned char *)&__b.__val;
+    unsigned char __rr[8];
+    for (int __i = 0; __i < 8; __i++)
+        __rr[__i] = __ra[__i] < __rb[__i] ? __ra[__i] : __rb[__i];
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pminub(a, b) _mm_min_pu8(a, b)
+
+/* Create mask from most significant bit of each byte in __m64 */
+static __inline__ int __attribute__((__always_inline__))
+_mm_movemask_pi8(__m64 __a)
+{
+    int __r = 0;
+    unsigned char *__ab = (unsigned char *)&__a.__val;
+    for (int __i = 0; __i < 8; __i++)
+        __r |= ((__ab[__i] >> 7) & 1) << __i;
+    return __r;
+}
+
+#define _m_pmovmskb(a) _mm_movemask_pi8(a)
+
+/* Multiply packed unsigned 16-bit integers, return high 16 bits */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_mulhi_pu16(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned short *__ra = (unsigned short *)&__a.__val;
+    unsigned short *__rb = (unsigned short *)&__b.__val;
+    unsigned short __rr[4];
+    for (int __i = 0; __i < 4; __i++)
+        __rr[__i] = (unsigned short)(((unsigned int)__ra[__i] * (unsigned int)__rb[__i]) >> 16);
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pmulhuw(a, b) _mm_mulhi_pu16(a, b)
+
+/* Shuffle 16-bit integers in __m64 using immediate selector */
+#define _mm_shuffle_pi16(A, N) __extension__ ({ \
+    __m64 __tmp_a = (A); \
+    unsigned short *__src = (unsigned short *)&__tmp_a.__val; \
+    __m64 __tmp_r; \
+    unsigned short *__dst = (unsigned short *)&__tmp_r.__val; \
+    __dst[0] = __src[(N) & 3]; \
+    __dst[1] = __src[((N) >> 2) & 3]; \
+    __dst[2] = __src[((N) >> 4) & 3]; \
+    __dst[3] = __src[((N) >> 6) & 3]; \
+    __tmp_r; \
+})
+
+#define _m_pshufw(A, N) _mm_shuffle_pi16(A, N)
+
+/* Average of packed unsigned 8-bit integers (rounded) */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_avg_pu8(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned char *__ra = (unsigned char *)&__a.__val;
+    unsigned char *__rb = (unsigned char *)&__b.__val;
+    unsigned char __rr[8];
+    for (int __i = 0; __i < 8; __i++)
+        __rr[__i] = (unsigned char)(((unsigned int)__ra[__i] + (unsigned int)__rb[__i] + 1) >> 1);
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pavgb(a, b) _mm_avg_pu8(a, b)
+
+/* Average of packed unsigned 16-bit integers (rounded) */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_avg_pu16(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned short *__ra = (unsigned short *)&__a.__val;
+    unsigned short *__rb = (unsigned short *)&__b.__val;
+    unsigned short __rr[4];
+    for (int __i = 0; __i < 4; __i++)
+        __rr[__i] = (unsigned short)(((unsigned int)__ra[__i] + (unsigned int)__rb[__i] + 1) >> 1);
+    __builtin_memcpy(&__r.__val, __rr, 8);
+    return __r;
+}
+
+#define _m_pavgw(a, b) _mm_avg_pu16(a, b)
+
+/* Sum of absolute differences of packed unsigned 8-bit integers */
+static __inline__ __m64 __attribute__((__always_inline__))
+_mm_sad_pu8(__m64 __a, __m64 __b)
+{
+    __m64 __r;
+    unsigned char *__ra = (unsigned char *)&__a.__val;
+    unsigned char *__rb = (unsigned char *)&__b.__val;
+    unsigned int __sum = 0;
+    for (int __i = 0; __i < 8; __i++) {
+        int __diff = (int)__ra[__i] - (int)__rb[__i];
+        __sum += __diff < 0 ? -__diff : __diff;
+    }
+    __r.__val = __sum;
+    return __r;
+}
+
+#define _m_psadbw(a, b) _mm_sad_pu8(a, b)
+
+/* Non-temporal store of __m64 */
+static __inline__ void __attribute__((__always_inline__))
+_mm_stream_pi(__m64 *__p, __m64 __a)
+{
+    *__p = __a;
+}
+
+/* Conditional byte store from __m64 (MASKMOVQ) */
+static __inline__ void __attribute__((__always_inline__))
+_mm_maskmove_si64(__m64 __a, __m64 __n, char *__p)
+{
+    unsigned char *__da = (unsigned char *)&__a.__val;
+    unsigned char *__dn = (unsigned char *)&__n.__val;
+    for (int __i = 0; __i < 8; __i++) {
+        if (__dn[__i] & 0x80)
+            __p[__i] = __da[__i];
+    }
+}
+
+#define _m_maskmovq(a, n, p) _mm_maskmove_si64(a, n, p)
+
+/* === Undefined value === */
+
+static __inline__ __m128 __attribute__((__always_inline__))
+_mm_undefined_ps(void)
+{
+    __m128 __r;
+    return __r;
+}
+
 #endif /* _XMMINTRIN_H_INCLUDED */

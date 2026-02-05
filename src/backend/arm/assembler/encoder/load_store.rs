@@ -799,9 +799,8 @@ pub(crate) fn encode_prfop(name: &str) -> Result<u32, String> {
 
 // ── LSE Atomics ──────────────────────────────────────────────────────────
 
-/// Encode CAS/CASA/CASAL/CASL (Compare and Swap).
-/// CAS Xs, Xt, [Xn]: size 001000 1 L=0 1 Rs o0 11111 Rn Rt
-/// TODO: Only 32-bit (W) and 64-bit (X) sizes supported; casb/cash need size=00/01.
+/// Encode CAS/CASA/CASAL/CASL and byte/halfword variants (Compare and Swap).
+/// CAS Xs, Xt, [Xn]: size 001000 1 L 1 Rs o0 11111 Rn Rt
 pub(crate) fn encode_cas(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
         return Err(format!("{} requires 3 operands", mnemonic));
@@ -812,9 +811,18 @@ pub(crate) fn encode_cas(mnemonic: &str, operands: &[Operand]) -> Result<EncodeR
         Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("cas: invalid base")?,
         _ => return Err("cas requires memory operand [Xn]".to_string()),
     };
-    let size = if is_64 { 0b11u32 } else { 0b10u32 };
     let mn = mnemonic.to_lowercase();
     let suffix = mn.strip_prefix("cas").unwrap_or("");
+    // Determine size: 'b' suffix = byte (00), 'h' suffix = half (01), else register-based
+    let size = if suffix.contains('b') {
+        0b00u32
+    } else if suffix.contains('h') {
+        0b01u32
+    } else if is_64 {
+        0b11u32
+    } else {
+        0b10u32
+    };
     // L bit (acquire): set for casa, casal
     let l = if suffix.contains('a') { 1u32 } else { 0u32 };
     // o0 bit (release): set for casl, casal
@@ -825,8 +833,9 @@ pub(crate) fn encode_cas(mnemonic: &str, operands: &[Operand]) -> Result<EncodeR
     Ok(EncodeResult::Word(word))
 }
 
-/// Encode SWP/SWPA/SWPAL/SWPL (Swap).
+/// Encode SWP/SWPA/SWPAL/SWPL and byte/halfword variants (Swap).
 /// SWP Xs, Xt, [Xn]: size 111000 AR 1 Rs 1 000 00 Rn Rt
+/// Variants: swp, swpa, swpal, swpl, swpb, swpab, swpalb, swplb, swph, swpah, swpalh, swplh
 pub(crate) fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
         return Err(format!("{} requires 3 operands", mnemonic));
@@ -837,9 +846,18 @@ pub(crate) fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeR
         Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("swp: invalid base")?,
         _ => return Err("swp requires memory operand [Xn]".to_string()),
     };
-    let size = if is_64 { 0b11u32 } else { 0b10u32 };
     let mn = mnemonic.to_lowercase();
     let suffix = mn.strip_prefix("swp").unwrap_or("");
+    // Determine size: 'b' suffix = byte (00), 'h' suffix = half (01), else register-based
+    let size = if suffix.contains('b') {
+        0b00u32
+    } else if suffix.contains('h') {
+        0b01u32
+    } else if is_64 {
+        0b11u32
+    } else {
+        0b10u32
+    };
     let a = if suffix.contains('a') { 1u32 } else { 0u32 };
     let r = if suffix.contains('l') { 1u32 } else { 0u32 };
     // size 111000 A R 1 Rs 1 000 00 Rn Rt
@@ -848,7 +866,7 @@ pub(crate) fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeR
     Ok(EncodeResult::Word(word))
 }
 
-/// Encode LDADD/LDCLR/LDEOR/LDSET and their acquire/release variants (LSE atomics).
+/// Encode LDADD/LDCLR/LDEOR/LDSET and their acquire/release/byte/halfword variants (LSE atomics).
 /// LDADD Rs, Rt, [Xn]: size 111000 A R 1 Rs 0 opc 00 Rn Rt
 /// opc: LDADD=000, LDCLR=001, LDEOR=010, LDSET=011
 pub(crate) fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
@@ -861,7 +879,6 @@ pub(crate) fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<Encode
         Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("ldop: invalid base")?,
         _ => return Err(format!("{} requires memory operand [Xn]", mnemonic)),
     };
-    let size = if is_64 { 0b11u32 } else { 0b10u32 };
     let mn = mnemonic.to_lowercase();
     // Determine base op and suffix
     let (base, suffix) = if let Some(s) = mn.strip_prefix("ldadd") {
@@ -875,10 +892,65 @@ pub(crate) fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<Encode
     } else {
         return Err(format!("unknown ld atomic op: {}", mnemonic));
     };
+    // Determine size: 'b' suffix = byte (00), 'h' suffix = half (01), else register-based
+    let size = if suffix.contains('b') {
+        0b00u32
+    } else if suffix.contains('h') {
+        0b01u32
+    } else if is_64 {
+        0b11u32
+    } else {
+        0b10u32
+    };
     let a = if suffix.contains('a') { 1u32 } else { 0u32 };
     let r = if suffix.contains('l') { 1u32 } else { 0u32 };
     // size 111000 A R 1 Rs 0 opc 00 Rn Rt
     let word = (size << 30) | (0b111000 << 24) | (a << 23) | (r << 22) | (1 << 21)
         | (rs << 16) | (base << 12) | (rn << 5) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode STADD/STCLR/STEOR/STSET and their release/byte/halfword variants.
+/// These are aliases for LDADD/LDCLR/LDEOR/LDSET with Rt=XZR (register 31).
+/// STADD Ws, [Xn] encodes as LDADD Ws, WZR, [Xn]
+/// Variants: stadd/stclr/steor/stset, plus 'l' (release), 'b' (byte), 'h' (half).
+pub(crate) fn encode_stop(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err(format!("{} requires 2 operands", mnemonic));
+    }
+    let (rs, is_64) = get_reg(operands, 0)?;
+    let rn = match operands.get(1) {
+        Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or_else(|| format!("{}: invalid base", mnemonic))?,
+        _ => return Err(format!("{} requires memory operand [Xn]", mnemonic)),
+    };
+    let mn = mnemonic.to_lowercase();
+    // Determine base op from the prefix
+    let (opc, suffix) = if let Some(s) = mn.strip_prefix("stadd") {
+        (0b000u32, s)
+    } else if let Some(s) = mn.strip_prefix("stclr") {
+        (0b001u32, s)
+    } else if let Some(s) = mn.strip_prefix("steor") {
+        (0b010u32, s)
+    } else if let Some(s) = mn.strip_prefix("stset") {
+        (0b011u32, s)
+    } else {
+        return Err(format!("unknown st atomic op: {}", mnemonic));
+    };
+    // Determine size: 'b' suffix = byte (00), 'h' suffix = half (01), else register-based
+    let size = if suffix.contains('b') {
+        0b00u32
+    } else if suffix.contains('h') {
+        0b01u32
+    } else if is_64 {
+        0b11u32
+    } else {
+        0b10u32
+    };
+    // A=0 (no acquire for store aliases), R from 'l' suffix (release)
+    let r = if suffix.contains('l') { 1u32 } else { 0u32 };
+    let rt = 31u32; // XZR/WZR - discard result
+    // size 111000 A R 1 Rs 0 opc 00 Rn Rt
+    let word = (size << 30) | (0b111000 << 24) | (r << 22) | (1 << 21)
+        | (rs << 16) | (opc << 12) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }

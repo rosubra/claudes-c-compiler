@@ -237,7 +237,7 @@ The dispatch table in `encode_instruction()` maps ~400 base mnemonics
 | **System** | `nop`, `yield`, `wfe`, `wfi`, `sev`, `sevl`, `clrex`, `hint`, `bti`, `dc`, `ic`, `tlbi`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
 | **Bit manipulation** | `clz`, `cls`, `rbit`, `rev`, `rev16`, `rev32` |
 | **CRC32** | `crc32b`, `crc32h`, `crc32w`, `crc32x`, `crc32cb`, `crc32ch`, `crc32cw`, `crc32cx` |
-| **LSE Atomics** | `cas`/`casa`/`casal`/`casl`, `swp`/`swpa`/`swpal`/`swpl`, `ldadd`/`ldclr`/`ldeor`/`ldset` (with acquire/release variants) |
+| **LSE Atomics** | `cas`/`swp`/`ldadd`/`ldclr`/`ldeor`/`ldset` (with acquire/release/byte/halfword variants), `stadd`/`stclr`/`steor`/`stset` store aliases (with release/byte/halfword variants) |
 | **Prefetch** | `prfm` |
 
 ### Relocation Types Emitted

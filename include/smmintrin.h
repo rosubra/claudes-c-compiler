@@ -321,4 +321,30 @@ _mm_crc32_u64(unsigned long long __crc, unsigned long long __v)
     return __builtin_ia32_crc32di(__crc, __v);
 }
 
+/* === Pack with Unsigned Saturation (SSE4.1) === */
+
+/* Pack 32-bit signed integers from a and b to 16-bit unsigned integers with unsigned saturation */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_packus_epi32(__m128i __a, __m128i __b)
+{
+    __m128i __r;
+    int *__ai = (int *)&__a.__val;
+    int *__bi = (int *)&__b.__val;
+    unsigned short __rr[8];
+    for (int __i = 0; __i < 4; __i++) {
+        int __v = __ai[__i];
+        if (__v > 65535) __v = 65535;
+        if (__v < 0) __v = 0;
+        __rr[__i] = (unsigned short)__v;
+    }
+    for (int __i = 0; __i < 4; __i++) {
+        int __v = __bi[__i];
+        if (__v > 65535) __v = 65535;
+        if (__v < 0) __v = 0;
+        __rr[__i + 4] = (unsigned short)__v;
+    }
+    __builtin_memcpy(&__r.__val, __rr, 16);
+    return __r;
+}
+
 #endif /* _SMMINTRIN_H_INCLUDED */

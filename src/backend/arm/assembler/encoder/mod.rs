@@ -917,12 +917,29 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "prfm" => encode_prfm(operands),
 
         // LSE atomics
-        "cas" | "casa" | "casal" | "casl" => encode_cas(mnemonic, operands),
-        "swp" | "swpa" | "swpal" | "swpl" => encode_swp(mnemonic, operands),
+        "cas" | "casa" | "casal" | "casl"
+        | "casb" | "casab" | "casalb" | "caslb"
+        | "cash" | "casah" | "casalh" | "caslh" => encode_cas(mnemonic, operands),
+        "swp" | "swpa" | "swpal" | "swpl"
+        | "swpb" | "swpab" | "swpalb" | "swplb"
+        | "swph" | "swpah" | "swpalh" | "swplh" => encode_swp(mnemonic, operands),
         "ldadd" | "ldadda" | "ldaddal" | "ldaddl"
+        | "ldaddb" | "ldaddab" | "ldaddalb" | "ldaddlb"
+        | "ldaddh" | "ldaddah" | "ldaddalh" | "ldaddlh"
         | "ldclr" | "ldclra" | "ldclral" | "ldclrl"
+        | "ldclrb" | "ldclrab" | "ldclralb" | "ldclrlb"
+        | "ldclrh" | "ldclrah" | "ldclralh" | "ldclrlh"
         | "ldeor" | "ldeora" | "ldeoral" | "ldeorl"
-        | "ldset" | "ldseta" | "ldsetal" | "ldsetl" => encode_ldop(mnemonic, operands),
+        | "ldeorb" | "ldeorab" | "ldeoralb" | "ldeorlb"
+        | "ldeorh" | "ldeorah" | "ldeoralh" | "ldeorlh"
+        | "ldset" | "ldseta" | "ldsetal" | "ldsetl"
+        | "ldsetb" | "ldsetab" | "ldsetalb" | "ldsetlb"
+        | "ldseth" | "ldsetah" | "ldsetalh" | "ldsetlh" => encode_ldop(mnemonic, operands),
+        // LSE atomic store aliases (Rt=XZR, discard result)
+        "stadd" | "staddl" | "staddb" | "staddlb" | "staddh" | "staddlh"
+        | "stclr" | "stclrl" | "stclrb" | "stclrlb" | "stclrh" | "stclrlh"
+        | "steor" | "steorl" | "steorb" | "steorlb" | "steorh" | "steorlh"
+        | "stset" | "stsetl" | "stsetb" | "stsetlb" | "stseth" | "stsetlh" => encode_stop(mnemonic, operands),
 
         // NEON move-not-immediate
         "mvni" => encode_neon_mvni(operands),
