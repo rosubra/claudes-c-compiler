@@ -208,6 +208,7 @@ pub fn resolve_archives(
     input_objs: &mut Vec<(String, ElfObject)>,
     defined_syms: &mut HashSet<String>,
     undefined_syms: &mut HashSet<String>,
+    shared_lib_syms: &HashMap<String, DynSymbol>,
 ) {
     let mut archive_paths: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -243,6 +244,19 @@ pub fn resolve_archives(
     while group_changed {
         group_changed = false;
         let prev_count = input_objs.len();
+
+        // Remove symbols available from shared libraries from undefined_syms.
+        // This prevents archive members from being extracted just because they
+        // define symbols already available via dynamic linking (e.g., stdio.o
+        // from libc.a defining stderr/stdout when libc.so provides them).
+        // Must be done each iteration since newly-extracted members may add
+        // shared-lib-provided symbols back into undefined_syms.
+        for sym_name in shared_lib_syms.keys() {
+            if !defined_syms.contains(sym_name) {
+                undefined_syms.remove(sym_name);
+            }
+        }
+
         for path in &archive_paths {
             let data = match std::fs::read(path) {
                 Ok(d) => d,

@@ -96,6 +96,7 @@ pub fn link_builtin(
     input::resolve_archives(
         &inline_archive_paths, &needed_libs, &lib_search_paths,
         &mut input_objs, &mut defined_syms, &mut undefined_syms,
+        &shared_lib_syms,
     );
 
     // Restore shared-lib-defined symbols back into undefined_syms

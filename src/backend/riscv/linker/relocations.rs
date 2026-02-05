@@ -463,31 +463,106 @@ pub use crate::backend::linker_common::write_elf64_phdr_at as write_phdr_at;
 pub use crate::backend::linker_common::align_up_64 as align_up;
 pub use crate::backend::linker_common::pad_to;
 
-/// Build a minimal .gnu.hash section for the given number of dynamic symbols.
+/// Build a proper `.gnu.hash` section for the given dynamic symbol names.
 ///
-/// Uses a simple one-bucket-per-symbol layout with a single zero bloom filter
-/// entry (accept all). This is correct but not optimal for lookup performance.
-pub fn build_gnu_hash(nsyms: usize) -> Vec<u8> {
-    let mut data = Vec::new();
-    let nbuckets = if nsyms == 0 { 1 } else { nsyms.next_power_of_two() } as u32;
-    data.extend_from_slice(&nbuckets.to_le_bytes());       // nbuckets
-    data.extend_from_slice(&1u32.to_le_bytes());            // symoffset (skip null symbol)
-    data.extend_from_slice(&1u32.to_le_bytes());            // bloom_size
-    data.extend_from_slice(&6u32.to_le_bytes());            // bloom_shift
-    data.extend_from_slice(&0u64.to_le_bytes());            // bloom filter (accept all)
-    // Buckets: one entry per bucket -> first symbol index or 0
-    for i in 0..nbuckets {
-        if (i as usize) < nsyms {
-            data.extend_from_slice(&(i + 1).to_le_bytes());
+/// Returns `(hash_data, sorted_order)` where `sorted_order[i]` is the original
+/// index in `sym_names` for the i-th symbol in the reordered dynsym.
+/// The dynsym must be reordered according to `sorted_order` for the hash table
+/// to work correctly.
+///
+/// `sym_names` should NOT include the null symbol at index 0.
+pub fn build_gnu_hash(sym_names: &[String]) -> (Vec<u8>, Vec<usize>) {
+    let nsyms = sym_names.len();
+    if nsyms == 0 {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes()); // nbuckets
+        data.extend_from_slice(&1u32.to_le_bytes()); // symoffset
+        data.extend_from_slice(&1u32.to_le_bytes()); // bloom_size
+        data.extend_from_slice(&6u32.to_le_bytes()); // bloom_shift
+        data.extend_from_slice(&0u64.to_le_bytes()); // bloom[0]
+        data.extend_from_slice(&0u32.to_le_bytes()); // bucket[0]
+        return (data, Vec::new());
+    }
+
+    // Compute hashes for all symbols
+    let hashes: Vec<u32> = sym_names.iter()
+        .map(|n| crate::backend::linker_common::gnu_hash(n.as_bytes()))
+        .collect();
+
+    // Choose number of buckets: roughly nsyms, but at least 1
+    let nbuckets = nsyms.max(1) as u32;
+
+    // Sort symbols by bucket (hash % nbuckets), preserving relative order
+    let mut indices: Vec<usize> = (0..nsyms).collect();
+    indices.sort_by_key(|&i| hashes[i] % nbuckets);
+
+    // symoffset = 1 (first hashed symbol is at dynsym index 1, after null entry)
+    let symoffset = 1u32;
+
+    // Build bloom filter.  ELF64 uses 64-bit bloom words.
+    let bloom_shift = 6u32;
+    let bloom_size = (nsyms / 2).max(1).next_power_of_two() as u32;
+    let mut bloom: Vec<u64> = vec![0u64; bloom_size as usize];
+    let c = 64u32; // bits per bloom word for ELF64
+    for &idx in &indices {
+        let h = hashes[idx];
+        let word_idx = ((h / c) % bloom_size) as usize;
+        let bit1 = (h % c) as u64;
+        let bit2 = ((h >> bloom_shift) % c) as u64;
+        bloom[word_idx] |= (1u64 << bit1) | (1u64 << bit2);
+    }
+
+    // Build buckets and hash chain.
+    // bucket[b] = first dynsym index in this bucket, or 0 if empty.
+    // chain[i] = hash value with low bit = 1 if last in chain.
+    let mut buckets: Vec<u32> = vec![0u32; nbuckets as usize];
+    let mut chain: Vec<u32> = vec![0u32; nsyms];
+
+    for (pos, &orig_idx) in indices.iter().enumerate() {
+        let h = hashes[orig_idx];
+        let bucket = (h % nbuckets) as usize;
+        let dynsym_idx = (pos as u32) + symoffset;
+        if buckets[bucket] == 0 {
+            buckets[bucket] = dynsym_idx;
+        }
+        // Store hash with low bit cleared (we set it for chain terminators below)
+        chain[pos] = h & !1;
+    }
+
+    // Set chain terminator bits: the last symbol in each bucket gets bit 0 set.
+    // Walk backwards through the sorted symbols. When the next symbol has a
+    // different bucket (or we're at the end), the current one is a chain end.
+    for pos in (0..nsyms).rev() {
+        let h = hashes[indices[pos]];
+        let bucket = h % nbuckets;
+        let is_last = if pos + 1 >= nsyms {
+            true
         } else {
-            data.extend_from_slice(&0u32.to_le_bytes());
+            let next_bucket = hashes[indices[pos + 1]] % nbuckets;
+            next_bucket != bucket
+        };
+        if is_last {
+            chain[pos] |= 1;
         }
     }
-    // Hash values: one per symbol with chain terminator bit set
-    for _i in 0..nsyms {
-        data.extend_from_slice(&1u32.to_le_bytes()); // bit 0 = end of chain
+
+    // Serialize
+    let mut data = Vec::new();
+    data.extend_from_slice(&nbuckets.to_le_bytes());
+    data.extend_from_slice(&symoffset.to_le_bytes());
+    data.extend_from_slice(&bloom_size.to_le_bytes());
+    data.extend_from_slice(&bloom_shift.to_le_bytes());
+    for &word in &bloom {
+        data.extend_from_slice(&word.to_le_bytes());
     }
-    data
+    for &b in &buckets {
+        data.extend_from_slice(&b.to_le_bytes());
+    }
+    for &c in &chain {
+        data.extend_from_slice(&c.to_le_bytes());
+    }
+
+    (data, indices)
 }
 
 /// Find a versioned soname for a library (e.g., "c" -> "libc.so.6").

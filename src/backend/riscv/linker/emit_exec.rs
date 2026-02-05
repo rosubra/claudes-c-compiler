@@ -159,17 +159,29 @@ pub fn emit_executable(
         vaddr += interp_size;
 
         // Build .gnu.hash, .dynsym, .dynstr for dynamic symbols
-        dynsym_names = plt_symbols.to_vec();
-        dynsym_names.extend(copy_sym_names.iter().cloned());
+        let unsorted_names: Vec<String> = {
+            let mut v = plt_symbols.to_vec();
+            v.extend(copy_sym_names.iter().cloned());
+            v
+        };
+
+        // Build .gnu.hash and get the sorted symbol order
+        let sorted_order;
+        (gnu_hash_data, sorted_order) = build_gnu_hash(&unsorted_names);
+
+        // Reorder dynsym_names according to the hash table ordering
+        dynsym_names = sorted_order.iter().map(|&i| unsorted_names[i].clone()).collect();
 
         // Build dynstr
         dynstr_data = vec![0u8];
         let mut dynstr_offsets: HashMap<String, u32> = HashMap::new();
         for name in &dynsym_names {
-            let off = dynstr_data.len() as u32;
-            dynstr_offsets.insert(name.clone(), off);
-            dynstr_data.extend_from_slice(name.as_bytes());
-            dynstr_data.push(0);
+            if !dynstr_offsets.contains_key(name) {
+                let off = dynstr_data.len() as u32;
+                dynstr_offsets.insert(name.clone(), off);
+                dynstr_data.extend_from_slice(name.as_bytes());
+                dynstr_data.push(0);
+            }
         }
         for lib in actual_needed_libs {
             let off = dynstr_data.len() as u32;
@@ -178,7 +190,7 @@ pub fn emit_executable(
             dynstr_data.push(0);
         }
 
-        // Build dynsym
+        // Build dynsym (in hash-sorted order)
         dynsym_data = vec![0u8; 24]; // null entry
         let copy_sym_set: HashSet<String> = copy_sym_names.iter().cloned().collect();
         for name in dynsym_names.iter() {
@@ -198,8 +210,6 @@ pub fn emit_executable(
             entry[6..8].copy_from_slice(&0u16.to_le_bytes());
             dynsym_data.extend_from_slice(&entry);
         }
-
-        gnu_hash_data = build_gnu_hash(dynsym_names.len());
 
         // Layout generated RX sections
         vaddr = align_up(vaddr, 8);
@@ -669,9 +679,10 @@ pub fn emit_executable(
     // ── Phase 9: Build .rela.plt ────────────────────────────────────────
 
     let mut rela_plt_data = Vec::with_capacity(rela_plt_size as usize);
-    for (i, _name) in plt_symbols.iter().enumerate() {
+    for (i, name) in plt_symbols.iter().enumerate() {
         let got_entry_addr = got_plt_vaddr + (2 + i) as u64 * 8;
-        let r_info = (((i + 1) as u64) << 32) | 5; // R_RISCV_JUMP_SLOT
+        let sym_idx = dynsym_names.iter().position(|n| n == name).unwrap_or(0) + 1;
+        let r_info = ((sym_idx as u64) << 32) | 5; // R_RISCV_JUMP_SLOT
         rela_plt_data.extend_from_slice(&got_entry_addr.to_le_bytes());
         rela_plt_data.extend_from_slice(&r_info.to_le_bytes());
         rela_plt_data.extend_from_slice(&0i64.to_le_bytes());
