@@ -5,8 +5,8 @@
 The i686 built-in linker reads ELF32 relocatable object files (`.o`) and static
 archives (`.a`, including thin archives), resolves symbols against system shared
 libraries, applies i386 relocations, and emits a dynamically-linked (or static)
-ELF32 executable.  It replaces the external GNU linker (`ld`) for the
-`i686-linux-gnu` target.
+ELF32 executable or shared library (`-shared`).  It replaces the external GNU
+linker (`ld`) for the `i686-linux-gnu` target.
 
 The linker is invoked by the compiler driver, which first discovers CRT objects
 (`crt1.o`, `crti.o`, `crtn.o`), GCC library directories, and system library
@@ -261,6 +261,13 @@ After PLT/GOT lists are built, weak dynamic data symbols (non-function,
 `STB_WEAK`) are converted from copy relocations to text relocations
 (`DT_TEXTREL`).  This avoids issues with copy relocations for weak symbols
 that may not exist in all library versions.
+
+**COMMON symbol allocation:**
+
+Tentative definitions (`SHN_COMMON`) -- global variables declared without an
+initializer -- are allocated space in `.bss` with proper alignment.  This
+happens after symbol resolution so that a real definition from another object
+file takes precedence.
 
 **Undefined symbol check:**
 
@@ -534,8 +541,8 @@ headers matter) and reduces file size.
 
 | File         | Role                                                        |
 |--------------|-------------------------------------------------------------|
-| `mod.rs`     | Main orchestration: `link_builtin()` entry point, argument  |
-|              | parsing, archive resolution, section merging, symbol        |
+| `mod.rs`     | Main orchestration: `link_builtin()` and `link_shared()`    |
+|              | entry points, archive resolution, section merging, symbol   |
 |              | resolution, PLT/GOT construction, layout, ELF emission     |
 | `types.rs`   | ELF32-specific constants (relocation types, dynamic tags,   |
 |              | section flags), struct definitions (`InputObject`,          |
