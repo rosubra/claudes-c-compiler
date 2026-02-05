@@ -1802,7 +1802,7 @@ impl InstructionEncoder {
 
     /// Emit segment override prefix (0x64 for %fs, 0x65 for %gs) if present.
     /// Must be emitted before any operand-size override, REX prefix, or opcode.
-    // TODO: emit_segment_prefix is currently only called in mov (reg-mem, mem-reg) and ALU ops.
+    // TODO: emit_segment_prefix is called in mov, ALU ops, push, and pop.
     // Other instruction families that accept memory operands should also call this.
     fn emit_segment_prefix(&mut self, mem: &MemoryOperand) -> Result<(), String> {
         if let Some(ref seg) = mem.segment {
@@ -2202,6 +2202,7 @@ impl InstructionEncoder {
     }
 
     fn encode_mov_imm_mem(&mut self, imm: &ImmediateValue, mem: &MemoryOperand, size: u8) -> Result<(), String> {
+        self.emit_segment_prefix(mem)?;
         if size == 2 {
             self.bytes.push(0x66);
         }
@@ -2378,6 +2379,7 @@ impl InstructionEncoder {
                 Ok(())
             }
             Operand::Memory(mem) => {
+                self.emit_segment_prefix(mem)?;
                 self.emit_rex_rm(0, "", mem);
                 self.bytes.push(0xFF);
                 self.encode_modrm_mem(6, mem)
@@ -2401,6 +2403,7 @@ impl InstructionEncoder {
             }
             Operand::Memory(mem) => {
                 // pop to memory: 8F /0
+                self.emit_segment_prefix(mem)?;
                 self.emit_rex_rm(0, "", mem);
                 self.bytes.push(0x8F);
                 self.encode_modrm_mem(0, mem)

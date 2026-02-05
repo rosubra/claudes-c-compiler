@@ -289,7 +289,7 @@ pub struct ElfWriterCore<A: X86Arch> {
     pending_protected: Vec<String>,
     pending_internal: Vec<String>,
     aliases: HashMap<String, String>,
-    section_stack: Vec<Option<usize>>,
+    section_stack: Vec<(Option<usize>, Option<usize>)>,
     /// Deferred `.skip` expressions: (section_index, offset, expression, fill_byte).
     deferred_skips: Vec<(usize, usize, String, u8)>,
     /// Deferred byte-sized symbol diffs: (section_index, offset, sym_a, sym_b, size, addend).
@@ -374,12 +374,13 @@ impl<A: X86Arch> ElfWriterCore<A> {
                 self.switch_section(dir);
             }
             AsmItem::PushSection(dir) => {
-                self.section_stack.push(self.current_section);
+                self.section_stack.push((self.current_section, self.previous_section));
                 self.switch_section(dir);
             }
             AsmItem::PopSection => {
-                if let Some(prev) = self.section_stack.pop() {
-                    self.current_section = prev;
+                if let Some((saved_current, saved_previous)) = self.section_stack.pop() {
+                    self.current_section = saved_current;
+                    self.previous_section = saved_previous;
                 }
             }
             AsmItem::Previous => {
@@ -1661,7 +1662,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
                         let rel = (target_off as i64) + reloc.addend - (reloc.offset as i64);
                         resolved.push((reloc.offset as usize, rel, reloc.patch_size as usize));
                     } else if let Some(abs32_type) = A::reloc_abs32_for_internal() {
-                        if is_local && reloc.reloc_type == abs32_type {
+                        if target_sec == sec_idx && is_local && reloc.reloc_type == abs32_type {
                             let val = (target_off as i64) + reloc.addend;
                             resolved.push((reloc.offset as usize, val, reloc.patch_size as usize));
                         } else {
