@@ -232,7 +232,7 @@ resolution back into sema's own state.
 
 | Field | Type | Contents |
 |-------|------|----------|
-| `functions` | `FxHashMap<String, FunctionInfo>` | Return type, parameter types, variadic flag, and definition status for every function encountered |
+| `functions` | `FxHashMap<String, FunctionInfo>` | Return type, parameter types, variadic flag, definition status, and noreturn attribute for every function encountered |
 | `type_context` | `TypeContext` | Struct/union layouts, typedef resolutions, enum constants, function typedef metadata, packed enum types, and a type cache |
 | `expr_types` | `ExprTypeMap` | Per-expression type annotations keyed by `ExprId` (AST node identity) |
 | `const_values` | `ConstMap` | Pre-evaluated compile-time constants (float literals, sizeof, cast chains, binary ops with correct signedness) |
