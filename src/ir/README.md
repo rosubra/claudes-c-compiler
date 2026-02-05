@@ -25,7 +25,9 @@ the entire IR design without reading the source code.
 15. [CFG Analysis](#cfg-analysis)
 16. [SSA Construction](#ssa-construction)
 17. [Phi Elimination](#phi-elimination)
-18. [Key Design Decisions](#key-design-decisions)
+18. [Pass Interface](#pass-interface)
+19. [IR Debugging](#ir-debugging)
+20. [Key Design Decisions](#key-design-decisions)
 
 ---
 
@@ -124,6 +126,19 @@ type system itself. Pointers are opaque at the IR level -- the `IrType` attached
 to load/store instructions determines the access width; the pointer itself
 carries no pointee type information.
 
+### AddressSpace
+
+`AddressSpace` (defined in `common/types`) is used by `Load`, `Store`, and
+`InlineAsm` to express x86 segment register overrides:
+
+| Variant | Description |
+|---------|-------------|
+| `Default` | Normal memory access (no segment prefix) |
+| `SegGs` | `__seg_gs`: GS segment (used for per-CPU variables in the Linux kernel) |
+| `SegFs` | `__seg_fs`: FS segment (used for TLS on some platforms) |
+
+On non-x86 targets this is always `Default`.
+
 ---
 
 ## IrModule
@@ -146,7 +161,7 @@ string literals, and linker directives for a translation unit.
 
 `IrModule` provides a `for_each_function` method that runs a transformation on
 each defined (non-declaration) function, returning the total count of changes
-made. This is used by optimization passes.
+made. This is used by optimization passes (see [Pass Interface](#pass-interface)).
 
 ---
 
@@ -460,48 +475,14 @@ Methods:
 
 Key methods on `IrConst`:
 
-| Method | Description |
-|--------|-------------|
-| `is_zero()`, `is_one()`, `is_nonzero()` | Truthiness predicates |
-| `to_i64()`, `to_i128()`, `to_u64()`, `to_f64()` | Value extraction (returns `None` when not applicable) |
-| `from_i64(val, ty)` | Construct from `i64` with proper signedness handling |
-| `coerce_to(target_ty)` | Type coercion (assumes signed source for int-to-float) |
-| `coerce_to_with_src(target_ty, src_ty)` | Type coercion with explicit source type for unsigned-aware widening |
-| `narrowed_to(ty)` | Truncate to a narrower type |
-| `zero(ty)`, `one(ty)` | Typed zero/one constants |
-| `bool_normalize()` | Normalize to `I8(0)` or `I8(1)` per C11 6.3.1.2 |
-| `cast_float_to_target(fv, target)` | Cast float to target type |
-| `cast_long_double_to_target(fv, bytes, target)` | Full-precision long double cast using f128 bytes |
-| `long_double(v)` | Create `LongDouble` from `f64` (bytes derived from f64) |
-| `long_double_with_bytes(v, bytes)` | Create `LongDouble` with explicit f128 bytes |
-| `long_double_from_i64(val)` | Create `LongDouble` from `i64` with full precision |
-| `long_double_from_u64(val)` | Create `LongDouble` from `u64` with full precision |
-| `long_double_from_i128(val)` | Create `LongDouble` from `i128` (exact up to 2^112) |
-| `long_double_from_u128(val)` | Create `LongDouble` from `u128` (exact up to 2^112) |
-| `x87_bytes()` | Get x87 80-bit byte representation for any float constant |
-| `push_le_bytes(out, size)` | Target-default byte serialization |
-| `push_le_bytes_x86(out, size)` | x86 serialization (x87 80-bit for long doubles) |
-| `push_le_bytes_riscv(out, size)` | RISC-V/ARM64 serialization (IEEE binary128 for long doubles) |
-| `ptr_int(val)` | Create pointer-width integer constant (`I32` on ILP32, `I64` on LP64) |
-| `to_le_bytes()` | Serialize to little-endian byte vector |
-| `to_hash_key()` | Convert to `ConstHashKey` for use as hash map key |
-
-### ConstHashKey
-
-A hashable wrapper for `IrConst` that uses raw bit patterns for floats, enabling
-constants to be used as `HashMap` keys for value numbering:
-
-| Variant | Payload | Derivation |
-|---------|---------|------------|
-| `I8` | `i8` | Direct |
-| `I16` | `i16` | Direct |
-| `I32` | `i32` | Direct |
-| `I64` | `i64` | Direct |
-| `I128` | `i128` | Direct |
-| `F32` | `u32` | `f32::to_bits()` |
-| `F64` | `u64` | `f64::to_bits()` |
-| `LongDouble` | `[u8; 16]` | Raw binary128 bytes |
-| `Zero` | (none) | Direct |
+- **Predicates:** `is_zero()`, `is_one()`, `is_nonzero()`
+- **Value extraction:** `to_i64()`, `to_i128()`, `to_u64()`, `to_f64()` (returns `None` when not applicable)
+- **Construction:** `from_i64(val, ty)`, `zero(ty)`, `one(ty)`, `ptr_int(val)` (pointer-width `I32` or `I64`)
+- **Type coercion:** `coerce_to(target_ty)`, `coerce_to_with_src(target_ty, src_ty)` (unsigned-aware), `narrowed_to(ty)`, `bool_normalize()` (to `I8(0)`/`I8(1)` per C11 6.3.1.2)
+- **Long double constructors:** `long_double(v)`, `long_double_with_bytes(v, bytes)`, `long_double_from_i64(val)`, `long_double_from_u64(val)`, `long_double_from_i128(val)`, `long_double_from_u128(val)`
+- **Float casts:** `cast_float_to_target(fv, target)`, `cast_long_double_to_target(fv, bytes, target)`
+- **Serialization:** `push_le_bytes(out, size)` (target-default), `push_le_bytes_x86(out, size)` (x87 80-bit for long doubles), `push_le_bytes_riscv(out, size)` (binary128 for long doubles), `to_le_bytes()`, `x87_bytes()`
+- **Hashing:** `to_hash_key()` converts to `ConstHashKey` which uses raw bit patterns for floats, enabling constants as `HashMap` keys for value numbering.
 
 ### Float Encoding Utilities
 
@@ -516,178 +497,42 @@ constants to be used as `HashMap` keys for value numbering:
 
 `IntrinsicOp` defines **80 target-independent intrinsic operations**. Each
 backend emits the appropriate native instructions for its architecture. The
-`is_pure()` method returns `true` for intrinsics with no side effects (most
-math/SIMD operations), enabling dead code elimination when the result is unused.
+variants are organized by ISA extension:
 
-### Fences and Barriers (5)
+| Category | Count | Examples |
+|----------|-------|---------|
+| Fences and barriers | 5 | `Lfence`, `Mfence`, `Sfence`, `Pause`, `Clflush` |
+| Non-temporal stores | 4 | `Movnti`, `Movnti64`, `Movntdq`, `Movntpd` |
+| 128-bit load/store | 2 | `Loaddqu`, `Storedqu` |
+| SSE2 packed integer | 12 | `Pcmpeqb128`, `Pand128`, `Pmovmskb128`, `SetEpi8`, `SetEpi32`, `SetEpi16`, ... |
+| SSE2 packed 16-bit | 6 | `Paddw128`, `Psubw128`, `Pmulhw128`, `Pmaddwd128`, `Pcmpgtw128`, `Pcmpgtb128` |
+| SSE2 packed 16-bit shifts | 3 | `Psllwi128`, `Psrlwi128`, `Psrawi128` |
+| SSE2 packed 32-bit | 2 | `Paddd128`, `Psubd128` |
+| SSE2 packed 32-bit shifts | 3 | `Psradi128`, `Pslldi128`, `Psrldi128` |
+| SSE2 byte/bit shifts | 4 | `Pslldqi128`, `Psrldqi128`, `Psllqi128`, `Psrlqi128` |
+| SSE2 shuffle | 3 | `Pshufd128`, `Pshuflw128`, `Pshufhw128` |
+| SSE2 pack/unpack | 6 | `Packssdw128`, `Packuswb128`, `Punpcklbw128`, ... |
+| SSE2 insert/extract/convert | 6 | `Pinsrw128`, `Pextrw128`, `Cvtsi128Si32`, `Cvtsi32Si128`, ... |
+| SSE4.1 insert/extract | 6 | `Pinsrd128`, `Pextrd128`, `Pinsrb128`, `Pextrb128`, `Pinsrq128`, `Pextrq128` |
+| AES-NI | 6 | `Aesenc128`, `Aesenclast128`, `Aesdec128`, `Aesdeclast128`, `Aesimc128`, `Aeskeygenassist128` |
+| CLMUL | 1 | `Pclmulqdq128` |
+| CRC32 | 4 | `Crc32_8`, `Crc32_16`, `Crc32_32`, `Crc32_64` |
+| Scalar math | 4 | `SqrtF32`, `SqrtF64`, `FabsF32`, `FabsF64` |
+| Frame/return address | 3 | `FrameAddress`, `ReturnAddress`, `ThreadPointer` |
 
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Lfence` | `lfence` | Load fence |
-| `Mfence` | `mfence` | Memory fence |
-| `Sfence` | `sfence` | Store fence |
-| `Pause` | `pause` | Spin-wait hint |
-| `Clflush` | `clflush` | Cache line flush |
+Each variant name maps directly to an x86 instruction mnemonic (e.g.,
+`Pcmpeqb128` -> `pcmpeqb`, `Aesenc128` -> `aesenc`). On ARM and RISC-V,
+backends emit the equivalent native instructions. See `intrinsics.rs` for the
+complete variant list with per-variant doc comments.
 
-### Non-Temporal Stores (4)
+### Purity
 
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Movnti` | `movnti` | Non-temporal store 32-bit |
-| `Movnti64` | `movnti` | Non-temporal store 64-bit |
-| `Movntdq` | `movntdq` | Non-temporal store 128-bit integer |
-| `Movntpd` | `movntpd` | Non-temporal store 128-bit double |
-
-### 128-bit Load/Store (2)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Loaddqu` | `movdqu` | Load 128-bit unaligned |
-| `Storedqu` | `movdqu` | Store 128-bit unaligned |
-
-### SSE2 Packed Integer (12)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pcmpeqb128` | `pcmpeqb` | Compare equal packed bytes (16 bytes) |
-| `Pcmpeqd128` | `pcmpeqd` | Compare equal packed dwords (4x32) |
-| `Psubusb128` | `psubusb` | Subtract packed unsigned saturated bytes |
-| `Psubsb128` | `psubsb` | Subtract packed signed saturated bytes |
-| `Por128` | `por` | Bitwise OR 128-bit |
-| `Pand128` | `pand` | Bitwise AND 128-bit |
-| `Pxor128` | `pxor` | Bitwise XOR 128-bit |
-| `Pmovmskb128` | `pmovmskb` | Move byte mask (returns i32) |
-| `SetEpi8` | (splat sequence) | Set all bytes to value (splat) |
-| `SetEpi32` | (splat sequence) | Set all dwords to value (splat) |
-| `SetEpi16` | (splat sequence) | Set all 16-bit lanes to value (splat) |
-| `Loadldi128` | `movq` | Load low 64 bits, zero upper |
-
-### SSE2 Packed 16-bit (6)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Paddw128` | `paddw` | Packed 16-bit add |
-| `Psubw128` | `psubw` | Packed 16-bit subtract |
-| `Pmulhw128` | `pmulhw` | Packed 16-bit multiply high |
-| `Pmaddwd128` | `pmaddwd` | Packed 16-bit multiply-add to 32-bit |
-| `Pcmpgtw128` | `pcmpgtw` | Packed 16-bit compare greater-than |
-| `Pcmpgtb128` | `pcmpgtb` | Packed 8-bit compare greater-than |
-
-### SSE2 Packed 16-bit Shifts (3)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Psllwi128` | `psllw` | Packed 16-bit shift left by immediate |
-| `Psrlwi128` | `psrlw` | Packed 16-bit shift right logical by immediate |
-| `Psrawi128` | `psraw` | Packed 16-bit shift right arithmetic by immediate |
-
-### SSE2 Packed 32-bit (2)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Paddd128` | `paddd` | Packed 32-bit add |
-| `Psubd128` | `psubd` | Packed 32-bit subtract |
-
-### SSE2 Packed 32-bit Shifts (3)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Psradi128` | `psrad` | Packed 32-bit shift right arithmetic by immediate |
-| `Pslldi128` | `pslld` | Packed 32-bit shift left by immediate |
-| `Psrldi128` | `psrld` | Packed 32-bit shift right logical by immediate |
-
-### SSE2 Byte/Bit Shifts (4)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pslldqi128` | `pslldq` | Byte shift left by immediate bytes |
-| `Psrldqi128` | `psrldq` | Byte shift right by immediate bytes |
-| `Psllqi128` | `psllq` | Bit shift left per 64-bit lane |
-| `Psrlqi128` | `psrlq` | Bit shift right per 64-bit lane |
-
-### SSE2 Shuffle (3)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pshufd128` | `pshufd` | Shuffle 32-bit integers with immediate control |
-| `Pshuflw128` | `pshuflw` | Shuffle low 16-bit integers |
-| `Pshufhw128` | `pshufhw` | Shuffle high 16-bit integers |
-
-### SSE2 Pack/Unpack (6)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Packssdw128` | `packssdw` | Pack 32-bit to 16-bit signed saturate |
-| `Packuswb128` | `packuswb` | Pack 16-bit to 8-bit unsigned saturate |
-| `Punpcklbw128` | `punpcklbw` | Unpack and interleave low 8-bit |
-| `Punpckhbw128` | `punpckhbw` | Unpack and interleave high 8-bit |
-| `Punpcklwd128` | `punpcklwd` | Unpack and interleave low 16-bit |
-| `Punpckhwd128` | `punpckhwd` | Unpack and interleave high 16-bit |
-
-### SSE2 Insert/Extract/Convert (6)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pinsrw128` | `pinsrw` | Insert 16-bit value at lane |
-| `Pextrw128` | `pextrw` | Extract 16-bit value at lane (returns scalar i32) |
-| `Storeldi128` | `movq` | Store low 64 bits to memory |
-| `Cvtsi128Si32` | `movd` | Convert low 32-bit of `__m128i` to int (returns scalar i32) |
-| `Cvtsi32Si128` | `movd` | Convert int to `__m128i` with zero extension |
-| `Cvtsi128Si64` | `movq` | Convert low 64-bit of `__m128i` to long long (returns scalar i64) |
-
-### SSE4.1 Insert/Extract (6)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pinsrd128` | `pinsrd` | Insert 32-bit value at lane |
-| `Pextrd128` | `pextrd` | Extract 32-bit value at lane (returns scalar i32) |
-| `Pinsrb128` | `pinsrb` | Insert 8-bit value at lane |
-| `Pextrb128` | `pextrb` | Extract 8-bit value at lane (returns scalar i32) |
-| `Pinsrq128` | `pinsrq` | Insert 64-bit value at lane |
-| `Pextrq128` | `pextrq` | Extract 64-bit value at lane (returns scalar i64) |
-
-### AES-NI (6)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Aesenc128` | `aesenc` | Single round AES encrypt |
-| `Aesenclast128` | `aesenclast` | Final round AES encrypt |
-| `Aesdec128` | `aesdec` | Single round AES decrypt |
-| `Aesdeclast128` | `aesdeclast` | Final round AES decrypt |
-| `Aesimc128` | `aesimc` | Inverse mix columns |
-| `Aeskeygenassist128` | `aeskeygenassist` | AES key generation assist |
-
-### CLMUL (1)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Pclmulqdq128` | `pclmulqdq` | Carry-less multiplication |
-
-### CRC32 (4)
-
-| Variant | x86 Instruction | Description |
-|---------|-----------------|-------------|
-| `Crc32_8` | `crc32b` | CRC32 accumulate 8-bit |
-| `Crc32_16` | `crc32w` | CRC32 accumulate 16-bit |
-| `Crc32_32` | `crc32l` | CRC32 accumulate 32-bit |
-| `Crc32_64` | `crc32q` | CRC32 accumulate 64-bit |
-
-### Scalar Math (4)
-
-| Variant | x86 Instruction | ARM/RISC-V | Description |
-|---------|-----------------|------------|-------------|
-| `SqrtF32` | `sqrtss` | `fsqrt` | Square root (f32) |
-| `SqrtF64` | `sqrtsd` | `fsqrt` | Square root (f64) |
-| `FabsF32` | bitwise AND with sign mask | `fabs` | Absolute value (f32) |
-| `FabsF64` | bitwise AND with sign mask | `fabs` | Absolute value (f64) |
-
-### Frame/Return Address (3)
-
-| Variant | Description |
-|---------|-------------|
-| `FrameAddress` | `__builtin_frame_address(0)` -- returns current frame pointer |
-| `ReturnAddress` | `__builtin_return_address(0)` -- returns current return address |
-| `ThreadPointer` | `__builtin_thread_pointer()` -- returns thread pointer (TLS base address) |
+The `is_pure()` method returns `true` for intrinsics with no side effects --
+pure intrinsics can be dead-code eliminated when their result is unused. Most
+SIMD arithmetic, shifts, shuffles, pack/unpack, insert/extract, AES-NI, CLMUL,
+and scalar math operations are marked pure. Intrinsics with memory or ordering
+side effects (fences, non-temporal stores, loads/stores) are not pure. See the
+`is_pure()` match in `intrinsics.rs` for the authoritative list.
 
 ---
 
@@ -929,6 +774,85 @@ critical edge is split by inserting a new **trampoline block** that contains onl
 the phi copies and branches unconditionally to the target. Trampoline block IDs
 are allocated from a global counter (computed as the maximum block ID across all
 functions) to avoid label collisions.
+
+---
+
+## Pass Interface
+
+Optimization passes consume and transform the SSA IR. The pass pipeline lives
+in `src/passes/` (see `passes/README.md` for the complete pass-by-pass
+reference). This section describes how passes interact with the IR.
+
+### Pass Signature
+
+A per-function optimization pass is a function with signature:
+
+```rust
+fn my_pass(func: &mut IrFunction) -> usize
+```
+
+It takes a mutable reference to a single function and returns the number of
+changes made (0 = no changes). This change count drives the fixed-point
+iteration: the pipeline re-runs passes until no more changes occur or a
+diminishing-returns threshold is reached.
+
+### Running Passes
+
+`IrModule::for_each_function(f)` iterates over all defined (non-declaration)
+functions and calls `f` on each, accumulating the total change count. This is
+the standard way to apply a per-function pass to the entire module.
+
+For passes that need CFG/dominator analysis (GVN, LICM, IVSR), the pipeline
+builds a shared `CfgAnalysis` once per function and passes it to all three.
+Since GVN only replaces operands without modifying the CFG, the analysis remains
+valid across all three passes.
+
+### Pipeline Structure
+
+The optimization pipeline runs inlining first (with its own mem2reg passes),
+then enters a fixed-point loop (up to 3 iterations) over these per-function
+passes:
+
+1. CFG simplification
+2. Copy propagation
+3. Division-by-constant strength reduction (first iteration only, 64-bit targets only)
+4. Integer narrowing
+5. Algebraic simplification
+6. Constant folding
+7. GVN (Global Value Numbering) -- shares `CfgAnalysis` with LICM and IVSR
+8. LICM (Loop-Invariant Code Motion)
+9. IVSR (Induction Variable Strength Reduction, first iteration only)
+10. If-conversion
+11. Copy propagation (second round)
+12. DCE (Dead Code Elimination)
+13. CFG simplification (second round)
+14. IPCP (Interprocedural Constant Propagation)
+
+After the fixed-point loop, dead static function elimination removes
+unreferenced `static` functions.  Each per-function pass has dependency
+tracking: it only runs if it or its upstream passes made changes in the
+previous iteration, avoiding redundant work.  See `passes/README.md` for
+the complete dependency graph and per-pass documentation.
+
+---
+
+## IR Debugging
+
+There is no structured textual IR format (unlike LLVM's `.ll` files). All IR
+types derive `Debug`, so Rust's `{:?}` formatter can dump any IR structure,
+though the output is verbose.
+
+The inliner contains a private `dump_function_ir` helper that prints a
+human-readable IR dump to stderr. It is activated via the `CCC_INLINE_DUMP_IR`
+environment variable.
+
+Other useful environment variables for debugging the IR pipeline:
+
+| Variable | Effect |
+|----------|--------|
+| `CCC_DISABLE_PASSES=pass1,pass2,...` | Disable specific optimization passes (e.g., `gvn,licm`). Use `all` to skip the entire optimizer. |
+| `CCC_TIME_PASSES=1` | Print per-pass timing and change counts to stderr. |
+| `CCC_INLINE_DUMP_IR=1` | Dump function IR to stderr after each inlining event. |
 
 ---
 
