@@ -263,7 +263,7 @@ impl ArmCodegen {
             | IntrinsicOp::Psrawi128 | IntrinsicOp::Psradi128
             | IntrinsicOp::Pslldi128 | IntrinsicOp::Psrldi128
             | IntrinsicOp::Paddd128 | IntrinsicOp::Psubd128
-            | IntrinsicOp::Packssdw128 | IntrinsicOp::Packuswb128
+            | IntrinsicOp::Packssdw128 | IntrinsicOp::Packsswb128 | IntrinsicOp::Packuswb128
             | IntrinsicOp::Punpcklbw128 | IntrinsicOp::Punpckhbw128
             | IntrinsicOp::Punpcklwd128 | IntrinsicOp::Punpckhwd128
             | IntrinsicOp::SetEpi16 | IntrinsicOp::Pinsrw128

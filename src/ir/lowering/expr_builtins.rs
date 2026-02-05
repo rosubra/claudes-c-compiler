@@ -390,7 +390,7 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Psrawi128 | BuiltinIntrinsic::X86Psradi128
             | BuiltinIntrinsic::X86Pslldi128 | BuiltinIntrinsic::X86Psrldi128
             | BuiltinIntrinsic::X86Paddd128 | BuiltinIntrinsic::X86Psubd128
-            | BuiltinIntrinsic::X86Packssdw128 | BuiltinIntrinsic::X86Packuswb128
+            | BuiltinIntrinsic::X86Packssdw128 | BuiltinIntrinsic::X86Packsswb128 | BuiltinIntrinsic::X86Packuswb128
             | BuiltinIntrinsic::X86Punpcklbw128 | BuiltinIntrinsic::X86Punpckhbw128
             | BuiltinIntrinsic::X86Punpcklwd128 | BuiltinIntrinsic::X86Punpckhwd128
             | BuiltinIntrinsic::X86Set1Epi16 | BuiltinIntrinsic::X86Pinsrw128
@@ -821,6 +821,7 @@ fn x86_intrinsic_op(intrinsic: &BuiltinIntrinsic) -> IntrinsicOp {
         BuiltinIntrinsic::X86Paddd128 => IntrinsicOp::Paddd128,
         BuiltinIntrinsic::X86Psubd128 => IntrinsicOp::Psubd128,
         BuiltinIntrinsic::X86Packssdw128 => IntrinsicOp::Packssdw128,
+        BuiltinIntrinsic::X86Packsswb128 => IntrinsicOp::Packsswb128,
         BuiltinIntrinsic::X86Packuswb128 => IntrinsicOp::Packuswb128,
         BuiltinIntrinsic::X86Punpcklbw128 => IntrinsicOp::Punpcklbw128,
         BuiltinIntrinsic::X86Punpckhbw128 => IntrinsicOp::Punpckhbw128,

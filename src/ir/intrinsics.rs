@@ -139,6 +139,8 @@ pub enum IntrinsicOp {
     // --- SSE2 pack/unpack operations ---
     /// Pack 32-bit to 16-bit signed saturate (PACKSSDW)
     Packssdw128,
+    /// Pack 16-bit to 8-bit signed saturate (PACKSSWB)
+    Packsswb128,
     /// Pack 16-bit to 8-bit unsigned saturate (PACKUSWB)
     Packuswb128,
     /// Unpack and interleave low 8-bit (PUNPCKLBW)
@@ -208,7 +210,7 @@ impl IntrinsicOp {
             IntrinsicOp::Psrawi128 | IntrinsicOp::Psradi128 |
             IntrinsicOp::Pslldi128 | IntrinsicOp::Psrldi128 |
             IntrinsicOp::Paddd128 | IntrinsicOp::Psubd128 |
-            IntrinsicOp::Packssdw128 | IntrinsicOp::Packuswb128 |
+            IntrinsicOp::Packssdw128 | IntrinsicOp::Packsswb128 | IntrinsicOp::Packuswb128 |
             IntrinsicOp::Punpcklbw128 | IntrinsicOp::Punpckhbw128 |
             IntrinsicOp::Punpcklwd128 | IntrinsicOp::Punpckhwd128 |
             IntrinsicOp::SetEpi16 | IntrinsicOp::Pinsrw128 |

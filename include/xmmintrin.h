@@ -116,6 +116,14 @@ _mm_store1_ps(float *__p, __m128 __a)
 
 #define _mm_store_ps1(p, a) _mm_store1_ps(p, a)
 
+/* Non-temporal store of 128-bit float vector (MOVNTPS).
+ * Implemented as a regular aligned store (non-temporal hint is optimization only). */
+static __inline__ void __attribute__((__always_inline__))
+_mm_stream_ps(float *__p, __m128 __a)
+{
+    *((__m128 *)__p) = __a;
+}
+
 /* Store the lower 2 floats of __m128 to __m64* memory location. */
 static __inline__ void __attribute__((__always_inline__))
 _mm_storel_pi(__m64 *__p, __m128 __a)

@@ -370,7 +370,7 @@ impl X86Codegen {
             IntrinsicOp::Paddw128 | IntrinsicOp::Psubw128 | IntrinsicOp::Pmulhw128
             | IntrinsicOp::Pmaddwd128 | IntrinsicOp::Pcmpgtw128 | IntrinsicOp::Pcmpgtb128
             | IntrinsicOp::Paddd128 | IntrinsicOp::Psubd128
-            | IntrinsicOp::Packssdw128 | IntrinsicOp::Packuswb128
+            | IntrinsicOp::Packssdw128 | IntrinsicOp::Packsswb128 | IntrinsicOp::Packuswb128
             | IntrinsicOp::Punpcklbw128 | IntrinsicOp::Punpckhbw128
             | IntrinsicOp::Punpcklwd128 | IntrinsicOp::Punpckhwd128 => {
                 if let Some(dptr) = dest_ptr {
@@ -384,6 +384,7 @@ impl X86Codegen {
                         IntrinsicOp::Paddd128 => "paddd",
                         IntrinsicOp::Psubd128 => "psubd",
                         IntrinsicOp::Packssdw128 => "packssdw",
+                        IntrinsicOp::Packsswb128 => "packsswb",
                         IntrinsicOp::Packuswb128 => "packuswb",
                         IntrinsicOp::Punpcklbw128 => "punpcklbw",
                         IntrinsicOp::Punpckhbw128 => "punpckhbw",

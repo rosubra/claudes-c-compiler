@@ -378,6 +378,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_sub_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubd128));
     // New SSE2 pack/unpack _mm_* mappings
     m.insert("_mm_packs_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packssdw128));
+    m.insert("_mm_packs_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packsswb128));
     m.insert("_mm_packus_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packuswb128));
     m.insert("_mm_unpacklo_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklbw128));
     m.insert("_mm_unpackhi_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhbw128));
@@ -417,6 +418,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_ia32_paddd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddd128));
     m.insert("__builtin_ia32_psubd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubd128));
     m.insert("__builtin_ia32_packssdw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packssdw128));
+    m.insert("__builtin_ia32_packsswb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packsswb128));
     m.insert("__builtin_ia32_packuswb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Packuswb128));
     m.insert("__builtin_ia32_punpcklbw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpcklbw128));
     m.insert("__builtin_ia32_punpckhbw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Punpckhbw128));
@@ -592,6 +594,7 @@ pub enum BuiltinIntrinsic {
     X86Psubd128,       // _mm_sub_epi32 (PSUBD)
     // SSE2 pack/unpack
     X86Packssdw128,    // _mm_packs_epi32 (PACKSSDW)
+    X86Packsswb128,    // _mm_packs_epi16 (PACKSSWB)
     X86Packuswb128,    // _mm_packus_epi16 (PACKUSWB)
     X86Punpcklbw128,   // _mm_unpacklo_epi8 (PUNPCKLBW)
     X86Punpckhbw128,   // _mm_unpackhi_epi8 (PUNPCKHBW)

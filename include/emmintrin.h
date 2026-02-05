@@ -535,6 +535,12 @@ _mm_packs_epi32(__m128i __a, __m128i __b)
 }
 
 static __inline__ __m128i __attribute__((__always_inline__))
+_mm_packs_epi16(__m128i __a, __m128i __b)
+{
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_packsswb128(__a, __b));
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
 _mm_packus_epi16(__m128i __a, __m128i __b)
 {
     return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_packuswb128(__a, __b));

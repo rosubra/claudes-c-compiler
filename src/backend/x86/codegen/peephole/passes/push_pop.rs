@@ -30,6 +30,14 @@ pub(super) fn eliminate_push_pop_pairs(store: &LineStore, infos: &mut [LineInfo]
                             safe = false;
                             break;
                         }
+                        // Check for instructions that implicitly modify the stack
+                        // (pushfq, popfq, pushfl, popfl, etc.) -- these read/write
+                        // the stack slot that our push placed data on, so eliminating
+                        // the push/pop pair would be incorrect.
+                        if instruction_modifies_stack(store.get(k), &infos[k]) {
+                            safe = false;
+                            break;
+                        }
                     }
                     if safe {
                         mark_nop(&mut infos[i]);
@@ -48,6 +56,29 @@ pub(super) fn eliminate_push_pop_pairs(store: &LineStore, infos: &mut [LineInfo]
         }
     }
     changed
+}
+
+/// Check if an instruction implicitly modifies the stack pointer or accesses
+/// the stack in ways that would make push/pop elimination incorrect.
+/// This catches instructions like pushfq, popfq, pushfl, popfl, etc. that
+/// read/write stack memory without being classified as Push/Pop.
+fn instruction_modifies_stack(line: &str, info: &LineInfo) -> bool {
+    if info.is_nop() { return false; }
+    let s = info.trimmed(line);
+    let b = s.as_bytes();
+    if b.is_empty() { return false; }
+    // pushfq, pushfl, pushf, popfq, popfl, popf -- these modify %rsp and
+    // read/write the stack, making it unsafe to eliminate surrounding push/pop
+    if b[0] == b'p' {
+        if s.starts_with("pushf") || s.starts_with("popf") {
+            return true;
+        }
+    }
+    // subq/addq to %rsp
+    if (s.starts_with("subq ") || s.starts_with("addq ")) && s.ends_with("%rsp") {
+        return true;
+    }
+    false
 }
 
 /// Fast check whether a line's instruction modifies a register identified by RegId.
@@ -106,6 +137,16 @@ pub(super) fn eliminate_binop_push_pop_pattern(store: &mut LineStore, infos: &mu
 
             if let LineKind::Pop { reg: pop_reg_id } = infos[pop_idx].kind {
                 if pop_reg_id == push_reg_id {
+                    // Check no stack-modifying instructions between push and pop
+                    let mut stack_safe = true;
+                    for k in (i + 1)..=pop_idx {
+                        if !infos[k].is_nop() && instruction_modifies_stack(store.get(k), &infos[k]) {
+                            stack_safe = false;
+                            break;
+                        }
+                    }
+                    if !stack_safe { i += 1; continue; }
+
                     let load_line = infos[load_idx].trimmed(store.get(load_idx));
                     let move_line = infos[move_idx].trimmed(store.get(move_idx));
 
