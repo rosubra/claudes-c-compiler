@@ -11,13 +11,14 @@ compilation latency on cross-compilation setups.
 
 The assembler supports the full RV64I base integer ISA, the M (multiply/divide),
 A (atomics), F (single-precision float), D (double-precision float),
-C (compressed 16-bit), and Zbb (basic bit manipulation) standard extensions.  It handles all standard assembler
-directives, pseudo-instructions, relocation modifiers, numeric local labels,
-macro expansion, and conditional assembly.
+C (compressed 16-bit), Zbb (basic bit manipulation), and V (vector) standard extensions,
+plus Zvksh/Zvksed vector crypto.  It handles all standard assembler directives,
+pseudo-instructions, relocation modifiers, numeric local labels, macro expansion,
+and conditional assembly.
 
 ### Capabilities at a glance
 
-- Full RV64IMAFDC + Zbb instruction encoding
+- Full RV64IMAFDCV + Zbb + Zvksh/Zvksed instruction encoding
 - 40+ pseudo-instructions (li, la, call, tail, mv, not, negw, seqz, ...)
 - All standard assembler directives (.text, .data, .globl, .align, .byte, ...)
 - Preprocessor: `.macro/.endm`, `.rept/.irp/.endr`, `.if/.else/.endif`
@@ -88,7 +89,7 @@ compression would conflict with the linker's relaxation pass.
 |-----------------|--------|---------------------------------------------------------|
 | `mod.rs`        | ~100   | Public `assemble_with_args()` entry point; orchestrates parser → ELF writer pipeline, handles `-mabi=` flag for float ABI selection and `-march=` for RV32/RV64 and RVC detection |
 | `parser.rs`     | ~1025  | Line tokenizer and operand parser; splits assembly text into `AsmStatement` records, evaluates `.if/.else/.endif` conditionals |
-| `encoder.rs`    | ~2250  | Instruction encoder; maps every mnemonic to its binary encoding, handles pseudo-instruction expansion, relocation emission |
+| `encoder.rs`    | ~2630  | Instruction encoder; maps every mnemonic to its binary encoding (including RVV vector + Zvk* crypto), handles pseudo-instruction expansion, relocation emission |
 | `compress.rs`   | ~850   | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents (currently disabled) |
 | `elf_writer.rs` | ~1210  | ELF object file builder; composes with `ElfWriterBase` (from shared `elf.rs`) for section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, numeric label handling, and ELF serialization |
 

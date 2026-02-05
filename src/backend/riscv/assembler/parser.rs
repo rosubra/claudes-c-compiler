@@ -1043,6 +1043,10 @@ pub fn is_register(s: &str) -> bool {
     (s.starts_with('f') && !s.starts_with("ft") && !s.starts_with("fs") && !s.starts_with("fa")
         && s.len() >= 2 && {
         if let Ok(n) = s[1..].parse::<u32>() { n <= 31 } else { false }
+    }) ||
+    // Vector registers: v0-v31
+    (s.starts_with('v') && s.len() >= 2 && s.len() <= 3 && {
+        if let Ok(n) = s[1..].parse::<u32>() { n <= 31 } else { false }
     })
 }
 
