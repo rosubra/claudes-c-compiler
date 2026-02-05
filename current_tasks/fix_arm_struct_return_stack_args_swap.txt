@@ -1,0 +1,14 @@
+Fix ARM64 ABI bug: stack arguments swapped when function returns large struct.
+
+When a function returns a struct larger than 16 bytes (requiring implicit x8 return pointer)
+and has more than 8 explicit parameters (so some go on the stack), the stack-based
+arguments are placed at the wrong offsets. This causes arguments 9 and 10 to be swapped.
+
+Root cause: The caller-side codegen likely miscalculates the stack offset for arguments
+when accounting for the implicit x8 return pointer, or puts stack args in reversed order.
+
+Reproducer: zstd fullbench on ARM64 crashes with SIGSEGV because
+ZSTD_buildSequencesStatistics (10 params, returns 32-byte struct) passes
+entropyWorkspace and entropyWkspSize in the wrong order to HIST_countFast_wksp.
+
+Started: 2026-02-05
