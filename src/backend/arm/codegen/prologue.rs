@@ -76,7 +76,14 @@ impl ArmCodegen {
             let param_classes = crate::backend::call_abi::classify_params(func, &config);
             let mut named_gp = 0usize;
             let mut named_fp = 0usize;
-            for class in &param_classes {
+            for (i, class) in param_classes.iter().enumerate() {
+                // On ARM64, the sret pointer goes in x8 (a dedicated register),
+                // NOT in x0-x7. Don't count it as consuming a GP argument register,
+                // otherwise va_start computes the wrong __gr_offs and skips the
+                // first variadic argument.
+                if self.state.uses_sret && i == 0 {
+                    continue;
+                }
                 named_gp += class.gp_reg_count();
                 if matches!(class, crate::backend::call_abi::ParamClass::FloatReg { .. }
                     | crate::backend::call_abi::ParamClass::F128FpReg { .. }) {

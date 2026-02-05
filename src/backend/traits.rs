@@ -442,13 +442,36 @@ pub trait ArchCodegen {
         // (it will be handled by emit_call_sret_setup) and shift all other GP
         // register indices down by one so that x0 is available for the first
         // real argument.
+        // Additionally, since the sret pointer freed up a GP register slot (the
+        // classification used one for sret that actually goes in x8), promote
+        // the first GP stack-overflow arg to use the freed register (x7).
         let sret_operand = if is_sret && self.sret_uses_dedicated_reg() && !args.is_empty() {
             arg_classes[0] = CallArgClass::ZeroSizeSkip;
+            // Find the max GP register index used after shifting, to know
+            // which register slot is now free for promotion.
+            let max_int_regs = config.max_int_regs; // 8 for ARM64
             for cls in arg_classes.iter_mut().skip(1) {
                 match cls {
                     CallArgClass::IntReg { reg_idx } if *reg_idx > 0 => { *reg_idx -= 1; }
                     CallArgClass::I128RegPair { base_reg_idx } if *base_reg_idx > 0 => { *base_reg_idx -= 1; }
                     CallArgClass::StructByValReg { base_reg_idx, .. } if *base_reg_idx > 0 => { *base_reg_idx -= 1; }
+                    _ => {}
+                }
+            }
+            // Promote the first single-register GP stack arg to the freed slot (max_int_regs - 1).
+            // The classification originally overflowed this arg because sret consumed a slot.
+            let freed_reg = max_int_regs - 1; // x7
+            for cls in arg_classes.iter_mut().skip(1) {
+                match cls {
+                    CallArgClass::Stack => {
+                        *cls = CallArgClass::IntReg { reg_idx: freed_reg };
+                        break;
+                    }
+                    CallArgClass::StructByValStack { size } if *size <= 8 => {
+                        let sz = *size;
+                        *cls = CallArgClass::StructByValReg { base_reg_idx: freed_reg, size: sz };
+                        break;
+                    }
                     _ => {}
                 }
             }
