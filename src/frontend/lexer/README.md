@@ -22,7 +22,7 @@ pub struct Token {
 }
 ```
 
-`TokenKind` is a large enum whose variants fall into eight categories:
+`TokenKind` is a large enum whose variants fall into nine categories:
 
 ### 1. Integer Literals
 
@@ -63,11 +63,15 @@ The `[u8; 16]` payload on long-double variants is computed by `common::long_doub
 
 Multi-character constants like `'AB'` produce an `IntLiteral` with the bytes packed left-to-right (matching GCC behavior).
 
-### 4. Keywords
+### 4. Identifiers
+
+Any identifier that is not a keyword produces `Identifier(String)`. This includes variable names, function names, type names, macro-expanded identifiers, and GCC builtins like `__builtin_va_start` that are handled as ordinary function calls rather than special syntax.
+
+### 5. Keywords
 
 All C89, C99, and C11 keywords have dedicated variants (`Auto`, `Break`, `Case`, `Char`, ..., `Bool`, `Complex`, `Generic`, `StaticAssert`, `ThreadLocal`, etc.). The C23 spelling `static_assert` (without underscore prefix) is also accepted alongside `_Static_assert`. The parser never string-compares against keyword text; it pattern-matches on enum variants directly.
 
-### 5. GCC Extension Keywords
+### 6. GCC Extension Keywords
 
 The lexer recognizes a broad set of GCC built-in keywords:
 
@@ -91,7 +95,7 @@ Double-underscore forms are always recognized. The bare forms `typeof` and `asm`
 
 GCC-style qualifier aliases (`__const`/`__const__`, `__volatile`/`__volatile__`, `__inline`/`__inline__`, `__restrict`/`__restrict__`, `__signed__`, `__complex`/`__complex__`, `__noreturn__`, `__thread`) map to their standard C counterparts. Both single- and double-underscore-suffix forms are accepted where shown.
 
-### 6. Pragma Tokens
+### 7. Pragma Tokens
 
 The preprocessor rewrites `#pragma pack(...)` and `#pragma GCC visibility ...` directives into synthetic identifier tokens (`__ccc_pack_set_N`, `__ccc_visibility_push_hidden`, etc.). The lexer's `lex_identifier` path recognizes these by prefix and emits structured pragma token variants:
 
@@ -100,11 +104,11 @@ The preprocessor rewrites `#pragma pack(...)` and `#pragma GCC visibility ...` d
 
 This keeps pragma semantics out of the preprocessor while giving the parser typed tokens to work with.
 
-### 7. Punctuation and Operators
+### 8. Punctuation and Operators
 
 All C punctuation and operators have individual variants (`LParen`, `RParen`, `Plus`, `Arrow`, `Ellipsis`, `LessLessAssign`, etc.). There are no "generic operator" fallbacks -- every valid C operator has its own variant.
 
-### 8. Special
+### 9. Special
 
 `Eof` marks the end of input.
 
