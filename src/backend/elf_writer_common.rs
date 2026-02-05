@@ -475,6 +475,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
                 self.emit_data_values(vals, 8)?;
             }
             AsmItem::Zero(n) => {
+                self.ensure_section()?;
                 let section = self.current_section_mut()?;
                 section.data.extend(std::iter::repeat_n(0u8, *n as usize));
             }
@@ -482,6 +483,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
                 self.process_org(sym, *offset)?;
             }
             AsmItem::SkipExpr(expr, fill) => {
+                self.ensure_section()?;
                 if A::supports_deferred_skips() {
                     let sec_idx = self.current_section.ok_or("no active section for .skip")?;
                     let offset = self.sections[sec_idx].data.len();
