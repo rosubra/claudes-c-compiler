@@ -24,6 +24,21 @@
 //! - `filter_available_regs`: callee-saved register filtering
 //! - `find_param_alloca`: parameter alloca lookup
 
+mod inline_asm;
+mod regalloc_helpers;
+
+// Re-export submodule public APIs at the stack_layout:: level
+pub use inline_asm::{
+    collect_inline_asm_callee_saved,
+    collect_inline_asm_callee_saved_with_overflow,
+    collect_inline_asm_callee_saved_with_generic,
+};
+pub use regalloc_helpers::{
+    run_regalloc_and_merge_clobbers,
+    filter_available_regs,
+    find_param_alloca,
+};
+
 use crate::ir::reexports::{
     Instruction,
     IrConst,
@@ -381,239 +396,6 @@ fn compute_coalescable_allocas(
     }
     analysis.scan_instructions(func);
     analysis.into_result()
-}
-
-// ── Inline asm callee-saved scanning ──────────────────────────────────────
-
-/// Scan inline-asm instructions for callee-saved register usage.
-///
-/// Iterates over all inline-asm instructions in `func`, checking output/input
-/// constraints and clobber lists for callee-saved registers.  Uses two callbacks:
-/// - `constraint_to_phys`: maps an output/input constraint string to a PhysReg
-/// - `clobber_to_phys`: maps a clobber register name to a PhysReg
-///
-/// Any discovered callee-saved PhysRegs are appended to `used` (deduplicated).
-/// This shared helper eliminates duplicated scan loops in x86 and RISC-V.
-///
-/// When a generic register class constraint (e.g. "r", "q", "g") is found that
-/// doesn't map to a specific register, ALL callee-saved registers from
-/// `all_callee_saved` are conservatively marked as clobbered. This prevents the
-/// register allocator from assigning callee-saved registers to values whose live
-/// ranges span the inline asm block, since the scratch register allocator may
-/// pick any callee-saved register at codegen time. This is especially important
-/// on i686 where there are only 3 callee-saved GP registers (ebx, esi, edi) and
-/// the scratch pool includes all of them.
-pub fn collect_inline_asm_callee_saved(
-    func: &IrFunction,
-    used: &mut Vec<super::regalloc::PhysReg>,
-    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-) {
-    collect_inline_asm_callee_saved_inner(func, used, constraint_to_phys, clobber_to_phys, &[])
-}
-
-/// Like `collect_inline_asm_callee_saved`, but triggers conservative marking
-/// of all callee-saved registers when any single inline asm has more generic GP
-/// register operands than the caller-saved scratch pool can hold. This avoids
-/// the overly conservative behavior of `_with_generic` (which marks all callee-saved
-/// for ANY generic "r" constraint, even if only 1 register is needed).
-pub fn collect_inline_asm_callee_saved_with_overflow(
-    func: &IrFunction,
-    used: &mut Vec<super::regalloc::PhysReg>,
-    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    all_callee_saved: &[super::regalloc::PhysReg],
-    caller_saved_scratch_count: usize,
-) {
-    let mut already: FxHashSet<u8> = used.iter().map(|r| r.0).collect();
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            if let Instruction::InlineAsm { outputs, inputs, clobbers, .. } = inst {
-                // Count how many generic GP register operands this inline asm has.
-                // This approximates how many scratch registers will be needed.
-                // Note: "+" outputs create synthetic inputs too, but those are handled
-                // by finalize (not scratch alloc), so we only count non-plus outputs
-                // and non-synthetic inputs for the overflow check.
-                let mut generic_gp_count = 0usize;
-                let mut specific_claimed = 0usize;
-                let mut clobber_claimed = 0usize;
-                let num_plus = outputs.iter().filter(|(c, _, _)| c.contains('+')).count();
-
-                for (constraint, _, _) in outputs {
-                    let c = constraint.trim_start_matches(['=', '+', '&', '%']);
-                    if let Some(phys) = constraint_to_phys(c) {
-                        if already.insert(phys.0) { used.push(phys); }
-                        specific_claimed += 1;
-                    } else if is_generic_gp_constraint(c) {
-                        generic_gp_count += 1;
-                    }
-                }
-                for (idx, (constraint, _, _)) in inputs.iter().enumerate() {
-                    let c = constraint.trim_start_matches(['=', '+', '&', '%']);
-                    if let Some(phys) = constraint_to_phys(c) {
-                        if already.insert(phys.0) { used.push(phys); }
-                        specific_claimed += 1;
-                    } else if idx >= num_plus && is_generic_gp_constraint(c) {
-                        // Only count non-synthetic inputs (synthetic "+" inputs
-                        // don't consume scratch registers)
-                        generic_gp_count += 1;
-                    }
-                }
-                for clobber in clobbers {
-                    if let Some(phys) = clobber_to_phys(clobber.as_str()) {
-                        if already.insert(phys.0) { used.push(phys); }
-                        clobber_claimed += 1;
-                    }
-                }
-                // If generic GP operands exceed the available caller-saved scratch
-                // pool (after accounting for specific/clobber claims), the scratch
-                // allocator will overflow into callee-saved registers.
-                let available_scratch = caller_saved_scratch_count.saturating_sub(specific_claimed + clobber_claimed);
-                if generic_gp_count > available_scratch {
-                    for &phys in all_callee_saved {
-                        if already.insert(phys.0) { used.push(phys); }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Like `collect_inline_asm_callee_saved`, but with an additional
-/// `all_callee_saved` list. When a constraint is a generic GP register class
-/// (like "r", "q", "g") that doesn't map to a specific callee-saved register,
-/// all registers in `all_callee_saved` are conservatively marked as clobbered.
-pub fn collect_inline_asm_callee_saved_with_generic(
-    func: &IrFunction,
-    used: &mut Vec<super::regalloc::PhysReg>,
-    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    all_callee_saved: &[super::regalloc::PhysReg],
-) {
-    collect_inline_asm_callee_saved_inner(func, used, constraint_to_phys, clobber_to_phys, all_callee_saved)
-}
-
-/// Returns true if the constraint string (after stripping `=`, `+`, `&`)
-/// contains a generic GP register class character that could cause the scratch
-/// allocator to pick any GP register, including callee-saved ones.
-fn is_generic_gp_constraint(constraint: &str) -> bool {
-    // Skip explicit register constraints like {eax}
-    if constraint.starts_with('{') { return false; }
-    // Skip tied operands (all digits)
-    if !constraint.is_empty() && constraint.chars().all(|ch| ch.is_ascii_digit()) { return false; }
-    // Skip condition code constraints (@cc...)
-    if constraint.starts_with("@cc") { return false; }
-    // Check for generic GP register class characters
-    for ch in constraint.chars() {
-        match ch {
-            // 'r', 'q', 'R', 'Q', 'l' = any GP register
-            // 'g' = general operand (GP reg, memory, or immediate)
-            'r' | 'q' | 'R' | 'Q' | 'l' | 'g' => return true,
-            // Specific register letters are not generic
-            'a' | 'b' | 'c' | 'd' | 'S' | 'D' => return false,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn collect_inline_asm_callee_saved_inner(
-    func: &IrFunction,
-    used: &mut Vec<super::regalloc::PhysReg>,
-    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
-    all_callee_saved: &[super::regalloc::PhysReg],
-) {
-    let mut already: FxHashSet<u8> = used.iter().map(|r| r.0).collect();
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            if let Instruction::InlineAsm { outputs, inputs, clobbers, .. } = inst {
-                for (constraint, _, _) in outputs {
-                    let c = constraint.trim_start_matches(['=', '+', '&', '%']);
-                    if let Some(phys) = constraint_to_phys(c) {
-                        if already.insert(phys.0) { used.push(phys); }
-                    } else if !all_callee_saved.is_empty() && is_generic_gp_constraint(c) {
-                        // Generic register class: conservatively mark all
-                        // callee-saved registers as clobbered since the
-                        // scratch allocator may pick any of them.
-                        for &phys in all_callee_saved {
-                            if already.insert(phys.0) { used.push(phys); }
-                        }
-                    }
-                }
-                for (constraint, _, _) in inputs {
-                    let c = constraint.trim_start_matches(['=', '+', '&', '%']);
-                    if let Some(phys) = constraint_to_phys(c) {
-                        if already.insert(phys.0) { used.push(phys); }
-                    } else if !all_callee_saved.is_empty() && is_generic_gp_constraint(c) {
-                        for &phys in all_callee_saved {
-                            if already.insert(phys.0) { used.push(phys); }
-                        }
-                    }
-                }
-                for clobber in clobbers {
-                    if let Some(phys) = clobber_to_phys(clobber.as_str()) {
-                        if already.insert(phys.0) { used.push(phys); }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── Register allocation helpers ───────────────────────────────────────────
-
-/// Run register allocation and merge ASM-clobbered callee-saved registers.
-///
-/// This shared helper eliminates duplicated regalloc setup boilerplate across
-/// all four backends (x86-64, i686, AArch64, RISC-V 64).  Each backend supplies its callee-saved
-/// register list and pre-collected ASM clobber list; this function handles the
-/// common steps: filtering available registers, running the allocator, storing
-/// results, merging clobbers into `used_callee_saved`, and building the
-/// `reg_assigned` set.
-///
-/// Returns `(reg_assigned, cached_liveness)` for use by `calculate_stack_space_common`.
-pub fn run_regalloc_and_merge_clobbers(
-    func: &IrFunction,
-    available_regs: Vec<super::regalloc::PhysReg>,
-    caller_saved_regs: Vec<super::regalloc::PhysReg>,
-    asm_clobbered_regs: &[super::regalloc::PhysReg],
-    reg_assignments: &mut FxHashMap<u32, PhysReg>,
-    used_callee_saved: &mut Vec<PhysReg>,
-    allow_inline_asm_regalloc: bool,
-) -> (FxHashMap<u32, PhysReg>, Option<super::liveness::LivenessResult>) {
-    let config = super::regalloc::RegAllocConfig { available_regs, caller_saved_regs, allow_inline_asm_regalloc };
-    let alloc_result = super::regalloc::allocate_registers(func, &config);
-    *reg_assignments = alloc_result.assignments;
-    *used_callee_saved = alloc_result.used_regs;
-    let cached_liveness = alloc_result.liveness;
-
-    // Merge inline-asm clobbered callee-saved registers into the save/restore
-    // list (they need to be preserved per the ABI even though we don't allocate
-    // values to them).
-    for phys in asm_clobbered_regs {
-        if !used_callee_saved.iter().any(|r| r.0 == phys.0) {
-            used_callee_saved.push(*phys);
-        }
-    }
-    used_callee_saved.sort_by_key(|r| r.0);
-
-    let reg_assigned: FxHashMap<u32, PhysReg> = reg_assignments.clone();
-    (reg_assigned, cached_liveness)
-}
-
-/// Filter a callee-saved register list by removing ASM-clobbered entries.
-/// Returns the filtered list suitable for passing to `run_regalloc_and_merge_clobbers`.
-pub fn filter_available_regs(
-    callee_saved: &[super::regalloc::PhysReg],
-    asm_clobbered: &[super::regalloc::PhysReg],
-) -> Vec<super::regalloc::PhysReg> {
-    let mut available = callee_saved.to_vec();
-    if !asm_clobbered.is_empty() {
-        let clobbered_set: FxHashSet<u8> = asm_clobbered.iter().map(|r| r.0).collect();
-        available.retain(|r| !clobbered_set.contains(&r.0));
-    }
-    available
 }
 
 // ── Main stack space calculation ──────────────────────────────────────────
@@ -2019,20 +1801,3 @@ fn propagate_wide_values(
 
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────
-
-/// Find the nth alloca instruction in the entry block (used for parameter storage).
-pub fn find_param_alloca(func: &IrFunction, param_idx: usize) -> Option<(Value, IrType)> {
-    func.blocks.first().and_then(|block| {
-        block.instructions.iter()
-            .filter(|i| matches!(i, Instruction::Alloca { .. }))
-            .nth(param_idx)
-            .and_then(|inst| {
-                if let Instruction::Alloca { dest, ty, .. } = inst {
-                    Some((*dest, *ty))
-                } else {
-                    None
-                }
-            })
-    })
-}

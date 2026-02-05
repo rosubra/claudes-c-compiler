@@ -100,14 +100,29 @@ The pipeline is driven from `Target::generate_assembly_with_opts_and_debug` in
 
 ## Directory Layout
 
-The backend is split into 19 shared modules at the top level and 4
-architecture-specific subdirectories:
+The backend is split into shared modules at the top level (some as directory
+modules with submodules) and 4 architecture-specific subdirectories:
 
 ```
 src/backend/
   mod.rs              Target enum, CodegenOptions, top-level dispatch
-  elf.rs              Shared ELF constants, StringTable, read/write helpers, archive parsing
-  linker_common.rs    Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash, GC sections
+  elf/                Shared ELF constants, StringTable, read/write helpers, archive parsing
+    mod.rs            Core ELF types, struct definitions, re-exports
+    constants.rs      ELF format constants (section types, flags, relocations)
+    string_table.rs   StringTable builder for ELF string sections
+    section_flags.rs  Section flag parsing from GAS directives
+    archive.rs        AR archive (.a) parsing
+    io.rs             Binary read/write helpers (little-endian, big-endian)
+    parse_string.rs   GAS string literal parsing with escape sequences
+    linker_symbols.rs Linker-generated symbols (_GLOBAL_OFFSET_TABLE_, etc.)
+    symbol_table.rs   ELF symbol table emission
+    numeric_labels.rs GAS numeric label (1:, 2f, 3b) support
+    object_writer.rs  High-level ELF object file writer
+    writer_base.rs    Low-level ELF writer (headers, sections, relocations)
+  linker_common/      Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash
+    mod.rs            ELF64 object parsing, linker types, dynamic string/hash tables
+    eh_frame.rs       .eh_frame FDE counting and .eh_frame_hdr builder
+    gc_sections.rs    --gc-sections BFS reachability analysis
   peephole_common.rs  Shared peephole optimizer utilities: word matching, register replacement, LineStore
   asm_expr.rs         Shared integer expression evaluator (all 4 assembler parsers)
   asm_preprocess.rs   Shared GAS preprocessing: comments, macros, .rept, .if/.elseif/.else/.endif
@@ -115,7 +130,10 @@ src/backend/
   traits.rs           ArchCodegen trait (~185 methods, ~64 default impls)
   generation.rs       Module/function/instruction dispatch (arch-independent)
   state.rs            CodegenState, StackSlot, SlotAddr, RegCache
-  stack_layout.rs     Three-tier stack slot allocation
+  stack_layout/       Three-tier stack slot allocation
+    mod.rs            Stack space calculation, alloca/multi-block/block-local allocation
+    inline_asm.rs     Inline asm callee-saved register scanning
+    regalloc_helpers.rs Register allocation setup and parameter alloca lookup
   call_abi.rs         Unified ABI classification (CallArgClass, ParamClass)
   cast.rs             CastKind classification, FloatOp classification
   liveness.rs         Live interval computation (backward dataflow)
