@@ -214,8 +214,18 @@ pub(crate) fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_
         // LDR (literal): ldr Rt, label — PC-relative load
         Some(Operand::Symbol(sym)) if is_load => {
             // opc V 011 00 imm19 Rt
-            // opc encodes size: 00=32/s, 01=64/d, 10=128/q for FP; 00=w, 01=x for GP
-            let opc = if is_128bit { 0b10u32 } else { actual_size & 0b11 };
+            // For GP registers: opc=00 → 32-bit (W), opc=01 → 64-bit (X), opc=11 → PRFM
+            // For FP/SIMD:      opc=00 → 32-bit (S), opc=01 → 64-bit (D), opc=10 → 128-bit (Q)
+            // Note: actual_size uses 10=32-bit, 11=64-bit but LDR literal uses 00=32-bit, 01=64-bit
+            let opc = if is_128bit {
+                0b10u32
+            } else if fp {
+                // FP: S=00, D=01 (same mapping as GP)
+                if actual_size == 0b11 { 0b01 } else { 0b00 }
+            } else {
+                // GP: W=00, X=01
+                if actual_size == 0b11 { 0b01 } else { 0b00 }
+            };
             let word = (opc << 30) | (v << 26) | (0b011 << 27) | rt;
             return Ok(EncodeResult::WordWithReloc {
                 word,

@@ -264,7 +264,7 @@ multi-stage pipeline:
 
 7. **Directive parsing** -- A large `match` on the directive name handles
    `.section`, `.globl`, `.type`, `.size`, `.align`/`.p2align`/`.balign`,
-   `.byte`/`.short`/`.value`/`.2byte`/`.long`/`.4byte`/`.int`/`.quad`/`.8byte`,
+   `.byte`/`.short`/`.value`/`.2byte`/`.word`/`.hword`/`.long`/`.4byte`/`.int`/`.quad`/`.8byte`,
    `.zero`, `.skip`, `.asciz`/`.string`/`.ascii`, `.comm`, `.set`,
    `.cfi_*`, `.file`, `.loc`, `.pushsection`, `.popsection`, `.previous`,
    `.org`, `.incbin`, and more.  Unknown directives (`.ident`, `.addrsig`,
@@ -692,7 +692,7 @@ provided flags/type instead of these defaults.
 | `.p2align` | `.p2align N` | Align to 2^N-byte boundary (power of 2) |
 | `.balign` | `.balign N` | Align to N-byte boundary (byte count) |
 | `.byte` | `.byte val, ...` | Emit 1-byte values |
-| `.short` / `.value` / `.2byte` | `.short val, ...` | Emit 2-byte values |
+| `.short` / `.value` / `.2byte` / `.word` / `.hword` | `.short val, ...` | Emit 2-byte values |
 | `.long` / `.4byte` / `.int` | `.long val, ...` | Emit 4-byte values |
 | `.quad` / `.8byte` | `.quad val, ...` | Emit 8-byte values |
 | `.zero` | `.zero N` | Emit N zero bytes |

@@ -156,6 +156,8 @@ pub enum AsmDirective {
     Incbin { path: String, skip: u64, count: Option<u64> },
     /// Raw bytes emitted from .float, .double, etc.
     RawBytes(Vec<u8>),
+    /// Literal pool dump: `.ltorg` or `.pool`
+    Ltorg,
     /// Other ignored directives (.file, .loc, .ident, etc.)
     Ignored,
 }
@@ -176,6 +178,13 @@ pub enum AsmStatement {
     },
     /// An empty line or comment
     Empty,
+    /// Literal pool load pseudo-instruction: `ldr Rd, =symbol[+offset]`
+    /// Will be expanded into `ldr Rd, .Llpool_N` + pool entries by a later pass.
+    LdrLiteralPool {
+        reg: String,
+        symbol: String,
+        addend: i64,
+    },
 }
 
 // C-style /* ... */ comment stripping is handled by asm_preprocess::strip_c_comments
@@ -1355,11 +1364,11 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Try to expand `ldr Rd, =symbol[+offset]` pseudo-instruction into adrp+add.
+/// Try to parse `ldr Rd, =symbol[+offset]` pseudo-instruction.
 ///
 /// In GAS, `ldr Rd, =expr` loads a 64-bit value via a literal pool.
-/// We expand it to `adrp Rd, symbol; add Rd, Rd, :lo12:symbol` which is the
-/// standard PIC expansion and avoids the need for literal pool management.
+/// Returns a `LdrLiteralPool` statement that will be expanded into
+/// `ldr Rd, .Llpool_N` + pool entries by the `expand_literal_pools` pass.
 fn try_expand_ldr_literal(line: &str) -> Option<Result<Vec<AsmStatement>, String>> {
     let lower = line.to_ascii_lowercase();
     // Match: ldr xN, =symbol or ldr wN, =symbol (32-bit registers use adrp too on AArch64)
@@ -1374,21 +1383,45 @@ fn try_expand_ldr_literal(line: &str) -> Option<Result<Vec<AsmStatement>, String
     if !operand.starts_with('=') {
         return None;
     }
-    let symbol = operand[1..].trim();
-    // symbol may have +offset, e.g. =coeffs+8
-    // Generate: adrp reg, symbol ; add reg, reg, :lo12:symbol
-    let adrp_line = format!("adrp {}, {}", reg, symbol);
-    let add_line = format!("add {}, {}, :lo12:{}", reg, reg, symbol);
-    let mut stmts = Vec::new();
-    match parse_instruction(&adrp_line) {
-        Ok(s) => stmts.push(s),
-        Err(e) => return Some(Err(e)),
-    }
-    match parse_instruction(&add_line) {
-        Ok(s) => stmts.push(s),
-        Err(e) => return Some(Err(e)),
-    }
-    Some(Ok(stmts))
+    let expr = operand[1..].trim();
+    // Parse symbol and optional +offset, e.g. =coeffs+8
+    let (symbol, addend) = if let Some(plus_pos) = expr.rfind('+') {
+        let sym = expr[..plus_pos].trim();
+        let off_str = expr[plus_pos + 1..].trim();
+        if let Ok(off) = if off_str.starts_with("0x") || off_str.starts_with("0X") {
+            i64::from_str_radix(&off_str[2..], 16)
+        } else {
+            off_str.parse::<i64>()
+        } {
+            (sym, off)
+        } else {
+            (expr, 0i64)
+        }
+    } else if let Some(minus_pos) = expr.rfind('-') {
+        // Only treat as symbol-offset if there's a valid symbol before the minus
+        let sym = expr[..minus_pos].trim();
+        let off_str = expr[minus_pos + 1..].trim();
+        if !sym.is_empty() && !sym.ends_with(|c: char| c == '+' || c == '-') {
+            if let Ok(off) = if off_str.starts_with("0x") || off_str.starts_with("0X") {
+                i64::from_str_radix(&off_str[2..], 16)
+            } else {
+                off_str.parse::<i64>()
+            } {
+                (sym, -off)
+            } else {
+                (expr, 0i64)
+            }
+        } else {
+            (expr, 0i64)
+        }
+    } else {
+        (expr, 0i64)
+    };
+    Some(Ok(vec![AsmStatement::LdrLiteralPool {
+        reg: reg.to_string(),
+        symbol: symbol.to_string(),
+        addend,
+    }]))
 }
 
 fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
@@ -1439,7 +1472,7 @@ fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
         return Ok(vec![parse_directive(trimmed)?]);
     }
 
-    // Handle ldr Rd, =symbol pseudo-instruction by expanding to adrp+add pair
+    // Handle ldr Rd, =symbol pseudo-instruction (creates LdrLiteralPool for later expansion)
     if let Some(expanded) = try_expand_ldr_literal(trimmed) {
         return expanded;
     }
@@ -1684,7 +1717,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         ".file" | ".loc" | ".ident" | ".addrsig" | ".addrsig_sym"
         | ".build_attributes" | ".eabi_attribute"
         | ".arch" | ".arch_extension" | ".cpu"
-        | ".ltorg" | ".pool" => AsmDirective::Ignored,
+        | ".ltorg" | ".pool" => AsmDirective::Ltorg,
         _ => {
             return Err(format!("unsupported AArch64 assembler directive: {} {}", name, args));
         }

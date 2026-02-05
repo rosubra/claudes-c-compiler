@@ -18,6 +18,7 @@ impl RiscvCodegen {
             use_riscv_float_struct_classification: true,
             allow_struct_split_reg_stack: true,
             align_struct_pairs: true,
+            sret_uses_dedicated_reg: false,
         }
     }
 

@@ -523,7 +523,7 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             let vals = parse_data_values(args)?;
             Ok(AsmItem::Byte(vals))
         }
-        ".short" | ".value" | ".2byte" => {
+        ".short" | ".value" | ".2byte" | ".word" | ".hword" => {
             let vals = parse_data_values(args)?;
             Ok(AsmItem::Short(vals))
         }

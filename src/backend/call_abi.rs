@@ -250,6 +250,12 @@ pub struct CallAbiConfig {
     /// ARM AAPCS64: false (composite types never require even-aligned pairs; only
     /// fundamental types like __int128 do, which is handled by align_i128_pairs).
     pub align_struct_pairs: bool,
+    /// Whether sret (struct return) uses a dedicated register (x8 on AArch64) instead of
+    /// consuming a regular GP argument register slot. When true, the classification must
+    /// promote the first stack-overflow GP argument to the freed GP register slot so that
+    /// caller and callee agree on where each argument lives.
+    /// ARM AAPCS64: true (sret pointer in x8), x86/RISC-V: false (sret in x0/a0).
+    pub sret_uses_dedicated_reg: bool,
 }
 
 /// Result of SysV per-eightbyte struct classification.
@@ -655,7 +661,40 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
     // The force_gp check is: is_variadic && config.variadic_floats_in_gp && is_float.
     // For non-variadic functions, config.variadic_floats_in_gp is false, so force_gp
     // is false regardless of the is_variadic flag — making this safe.
-    let core = classify_args_core(&arg_infos, true, config);
+    let mut core = classify_args_core(&arg_infos, true, config);
+
+    // AArch64 ABI: when sret uses a dedicated register (x8), the classification initially
+    // assigns the sret pointer to IntReg(0), consuming one GP register slot. On the caller
+    // side (emit_call in traits.rs), the sret arg is reclassified to ZeroSizeSkip, all
+    // other GP reg indices are shifted down by 1, and the first stack-overflow GP arg is
+    // promoted to the freed register slot (max_int_regs-1, i.e. x7).
+    //
+    // We must apply the same promotion on the callee side so that caller and callee agree
+    // on where each argument lives. The emit_store_gp_params method already handles
+    // the register index shift (sret_shift=1), but it does NOT promote stack args.
+    // Apply the promotion here to match the caller-side logic.
+    if func.uses_sret && config.sret_uses_dedicated_reg && core.classes.len() > 1 {
+        // Use max_int_regs (not max_int_regs-1) because emit_store_gp_params applies
+        // sret_shift=1, computing actual_idx = reg_idx - 1. So reg_idx=8 maps to x7.
+        let freed_reg = config.max_int_regs;
+        // Promote the first GP stack-overflow arg to the freed register slot.
+        for i in 1..core.classes.len() {
+            match core.classes[i] {
+                CoreArgClass::Stack => {
+                    let is_float = func.params.get(i).map(|p| p.ty.is_float()).unwrap_or(false);
+                    if !is_float {
+                        core.classes[i] = CoreArgClass::IntReg { reg_idx: freed_reg };
+                        break;
+                    }
+                }
+                CoreArgClass::StructByValStack { size } if size <= 8 => {
+                    core.classes[i] = CoreArgClass::StructByValReg { base_reg_idx: freed_reg, size };
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
 
     // Convert CoreArgClass -> ParamClass, assigning stack offsets.
     let slot_size = crate::common::types::target_ptr_size();

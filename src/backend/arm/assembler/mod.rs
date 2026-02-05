@@ -22,11 +22,107 @@ use elf_writer::ElfWriter;
 /// This is the default assembler (used when the `gcc_assembler` feature is disabled).
 pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String> {
     let statements = parse_asm(asm_text)?;
+    let statements = expand_literal_pools(&statements);
     let statements = resolve_numeric_labels(&statements);
     let mut writer = ElfWriter::new();
     writer.process_statements(&statements)?;
     writer.write_elf(output_path)?;
     Ok(())
+}
+
+/// Expand `LdrLiteralPool` pseudo-instructions into literal pool loads.
+///
+/// `ldr Xn, =symbol` must load the exact linker-resolved address via a literal
+/// pool, not via `adrp+add` (which gives a PC-relative address). This matters
+/// for code that runs at a different address than its linked address (e.g.,
+/// early boot code running at physical addresses before MMU setup).
+///
+/// This pass replaces each `LdrLiteralPool` with a `ldr Xn, .Llpool_N`
+/// instruction and accumulates pool entries. Pool entries are flushed (emitted
+/// as `.quad` data with labels) when:
+/// - A `.ltorg` / `.pool` directive is encountered
+/// - A section-changing directive is encountered (`.section`, `.pushsection`, `.text`, `.data`)
+/// - The end of the statement list is reached
+///
+/// Each pool entry is 8-byte aligned and consists of:
+///   .Llpool_N: .quad symbol[+addend]
+fn expand_literal_pools(statements: &[AsmStatement]) -> Vec<AsmStatement> {
+    struct PoolEntry {
+        label: String,
+        symbol: String,
+        addend: i64,
+    }
+
+    let mut result = Vec::with_capacity(statements.len());
+    let mut pending_pool: Vec<PoolEntry> = Vec::new();
+    let mut pool_counter: usize = 0;
+
+    // TODO: Track W vs X register to emit .long (4-byte) entries for W registers
+    // instead of always emitting .quad (8-byte). Currently safe on little-endian
+    // (loads low 32 bits) but wrong on big-endian and wastes 4 bytes per W entry.
+    let flush_pool = |pool: &mut Vec<PoolEntry>, out: &mut Vec<AsmStatement>| {
+        if pool.is_empty() {
+            return;
+        }
+        // Align pool to 8 bytes
+        out.push(AsmStatement::Directive(AsmDirective::Balign(8)));
+        for entry in pool.drain(..) {
+            out.push(AsmStatement::Label(entry.label));
+            if entry.addend != 0 {
+                out.push(AsmStatement::Directive(AsmDirective::Quad(vec![
+                    DataValue::SymbolOffset(entry.symbol, entry.addend),
+                ])));
+            } else {
+                out.push(AsmStatement::Directive(AsmDirective::Quad(vec![
+                    DataValue::Symbol(entry.symbol),
+                ])));
+            }
+        }
+    };
+
+    for stmt in statements {
+        match stmt {
+            AsmStatement::LdrLiteralPool { reg, symbol, addend } => {
+                let pool_label = format!(".Llpool_{}", pool_counter);
+                pool_counter += 1;
+
+                // Emit: ldr reg, .Llpool_N (PC-relative literal load)
+                result.push(AsmStatement::Instruction {
+                    mnemonic: "ldr".to_string(),
+                    operands: vec![
+                        Operand::Reg(reg.clone()),
+                        Operand::Symbol(pool_label.clone()),
+                    ],
+                    raw_operands: format!("{}, {}", reg, pool_label),
+                });
+
+                pending_pool.push(PoolEntry {
+                    label: pool_label,
+                    symbol: symbol.clone(),
+                    addend: *addend,
+                });
+            }
+            AsmStatement::Directive(AsmDirective::Ltorg) => {
+                flush_pool(&mut pending_pool, &mut result);
+            }
+            AsmStatement::Directive(AsmDirective::Section(_))
+            | AsmStatement::Directive(AsmDirective::PushSection(_))
+            | AsmStatement::Directive(AsmDirective::PopSection)
+            | AsmStatement::Directive(AsmDirective::Previous) => {
+                // Flush pool before section change (pool must be in the same section)
+                flush_pool(&mut pending_pool, &mut result);
+                result.push(stmt.clone());
+            }
+            _ => {
+                result.push(stmt.clone());
+            }
+        }
+    }
+
+    // Flush any remaining pool entries at the end
+    flush_pool(&mut pending_pool, &mut result);
+
+    result
 }
 
 /// Check if a label name is a GNU assembler numeric label (e.g., "1", "42").

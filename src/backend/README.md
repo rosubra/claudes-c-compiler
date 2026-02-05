@@ -635,6 +635,10 @@ differences without duplicating the core algorithm:
   (AAPCS64) or by value on the stack.
 - F128 handling: x87 stack convention (x86), Q-register (ARM), or GP pair
   (RISC-V).
+- Whether sret uses a dedicated register (ARM: x8) or consumes a regular GP
+  slot (x86: rdi, RISC-V: a0). When a dedicated register is used, the callee
+  classification promotes the first stack-overflow GP arg to the freed register
+  slot so that caller and callee agree on argument locations.
 
 ---
 

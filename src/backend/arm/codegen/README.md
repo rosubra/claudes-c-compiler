@@ -91,6 +91,13 @@ The backend implements the standard AAPCS64 calling convention:
 | Indirect result (sret) | `x8` | Pointer to caller-allocated return buffer |
 | Stack arguments | `[sp, #0]`, `[sp, #8]`, ... | 8-byte aligned, 16-byte for I128/F128 |
 
+Because sret uses the dedicated `x8` register (not `x0`), it does not consume a GP
+argument slot. The initial classification assigns sret to IntReg(0) like other targets,
+but both caller (`emit_call` in `traits.rs`) and callee (`classify_params_full` in
+`call_abi.rs`) then shift GP indices down by 1 and promote the first stack-overflow GP
+argument to `x7`. The callee uses `sret_shift=1` in `emit_store_gp_params` to map the
+promoted reg_idx back to physical registers.
+
 ### Return Values
 
 | Type | Location |

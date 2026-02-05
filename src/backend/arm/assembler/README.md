@@ -56,7 +56,8 @@ The single public entry point is:
 pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String>
 ```
 
-It calls `parse_asm()`, resolves GNU numeric labels (`1f`/`1b`), creates an
+It calls `parse_asm()`, expands literal pools (`ldr Xn, =symbol` → `ldr Xn, .Llpool_N`
++ `.quad` pool entries), resolves GNU numeric labels (`1f`/`1b`), creates an
 `ElfWriter`, feeds it the parsed statements, and writes the final `.o` file.
 
 
@@ -130,7 +131,7 @@ parse_asm(text)
      - .ifeq/.ifne (numeric comparison)
      - Supports ==, !=, >, >=, <, <= comparisons
      - Arithmetic expressions via shared asm_expr evaluator
-  6. ldr =symbol pseudo-instruction expansion (adrp + add :lo12:)
+  6. ldr =symbol pseudo-instruction → LdrLiteralPool (expanded to literal pool later)
   for each line:
     a. Trim whitespace, strip comments (// and @ style)
     b. Split on ';' (GAS multi-statement separator)
@@ -156,7 +157,8 @@ parse_asm(text)
 | Conditionals | `.if`/`.elseif`/`.elsif`/`.else`/`.endif`, `.ifdef`/`.ifndef`, `.ifc`/`.ifnc`, `.ifb`/`.ifnb`, `.ifeq`/`.ifne` |
 | Includes | `.incbin` (binary file inclusion) |
 | CFI | `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa_offset`, `.cfi_offset`, and 12 more (all passed through as no-ops) |
-| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute`, `.arch`, `.arch_extension`, `.cpu`, `.ltorg`/`.pool` |
+| Literal pool | `.ltorg`/`.pool` (flushes pending literal pool entries from `ldr Xn, =symbol`) |
+| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute`, `.arch`, `.arch_extension`, `.cpu` |
 
 ### Design Decisions (Parser)
 

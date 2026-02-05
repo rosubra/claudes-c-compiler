@@ -255,6 +255,11 @@ impl ElfWriter {
             AsmStatement::Instruction { mnemonic, operands, raw_operands } => {
                 self.process_instruction(mnemonic, operands, raw_operands)
             }
+
+            AsmStatement::LdrLiteralPool { .. } => {
+                // Should have been expanded by expand_literal_pools() before reaching here
+                Err("LdrLiteralPool should have been expanded before ELF writing".to_string())
+            }
         }
     }
 
@@ -383,7 +388,7 @@ impl ElfWriter {
 
             AsmDirective::RawBytes(bytes) => { self.base.emit_bytes(bytes); Ok(()) }
 
-            AsmDirective::Cfi | AsmDirective::Ignored => Ok(()),
+            AsmDirective::Cfi | AsmDirective::Ignored | AsmDirective::Ltorg => Ok(()),
         }
     }
 

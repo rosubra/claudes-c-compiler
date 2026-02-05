@@ -22,6 +22,7 @@ impl I686Codegen {
             use_riscv_float_struct_classification: false,
             allow_struct_split_reg_stack: false,
             align_struct_pairs: false,
+            sret_uses_dedicated_reg: false,
         }
     }
 
