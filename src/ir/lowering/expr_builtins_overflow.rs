@@ -80,20 +80,28 @@ impl Lowerer {
                 _ => IrType::I128,
             };
 
-            // Cast operands to the compute type respecting their signedness
-            let lhs_compute = if lhs_src_ir != compute_ty {
-                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
-            } else {
-                lhs_raw
-            };
-            let rhs_compute = if rhs_src_ir != compute_ty {
-                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
-            } else {
-                rhs_raw
-            };
+            // Check if all operands can be represented exactly in compute_ty.
+            // If an unsigned operand is the same size as compute_ty, it can't be
+            // represented in the signed compute type (values > SIGNED_MAX are lost).
+            let all_operands_fit = (lhs_src_ctype.is_signed() || lhs_src_ir.size() < compute_ty.size())
+                && (rhs_src_ctype.is_signed() || rhs_src_ir.size() < compute_ty.size());
 
-            if compute_ty.size() > result_ir_ty.size() {
-                // We were able to widen: compute exactly, truncate, and check
+            // True widening: compute_ty is strictly wider than result_ir_ty AND
+            // all operands fit in compute_ty, so the computation is exact.
+            if all_operands_fit && compute_ty.size() > result_ir_ty.size() {
+                // Cast operands to the compute type respecting their signedness
+                let lhs_compute = if lhs_src_ir != compute_ty {
+                    Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
+                } else {
+                    lhs_raw
+                };
+                let rhs_compute = if rhs_src_ir != compute_ty {
+                    Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
+                } else {
+                    rhs_raw
+                };
+
+                // Compute exactly, truncate, and check
                 // if the truncated result round-trips back to the wide value.
                 let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
 
@@ -112,46 +120,70 @@ impl Lowerer {
                  seg_override: AddressSpace::Default });
 
                 Some(Operand::Value(overflow))
-            } else if compute_ty != result_ir_ty && compute_ty.size() == result_ir_ty.size() {
-                // Same bit width but different signedness (e.g. compute in I64, result is U64).
-                // The round-trip cast won't detect overflow because the bit pattern is preserved.
-                // We need to check signedness constraints explicitly.
-                let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
-
-                // Store the result (reinterpreted as the result type)
-                let truncated = self.emit_cast_val(Operand::Value(wide_result), compute_ty, result_ir_ty);
-                self.emit(Instruction::Store { val: Operand::Value(truncated), ptr: result_ptr, ty: result_ir_ty,
-                 seg_override: AddressSpace::Default });
-
-                let overflow = if compute_ty.is_signed() && !result_ir_ty.is_signed() {
-                    // Computed in signed type, result is unsigned.
-                    // Overflow if the mathematical result is negative (can't fit in unsigned).
-                    let bits = (compute_ty.size() * 8) as i64;
-                    let shifted = self.emit_binop_val(IrBinOp::AShr, Operand::Value(wide_result),
-                        Operand::Const(IrConst::I64(bits - 1)), compute_ty);
-                    // shifted is all-ones (-1) if negative, all-zeros (0) if non-negative
-                    self.emit_binop_val(IrBinOp::And, Operand::Value(shifted),
-                        Operand::Const(IrConst::I64(1)), compute_ty)
+            } else if all_operands_fit && compute_ty.size() == result_ir_ty.size() && compute_ty.is_signed() && !is_signed {
+                // Signed compute type, unsigned result type, same size.
+                // All operands fit in the signed compute type, so we can compute
+                // the exact mathematical result. Overflow iff the result is negative
+                // (negative values can't fit in unsigned types).
+                let lhs_compute = if lhs_src_ir != compute_ty {
+                    Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
                 } else {
-                    // Computed in unsigned type, result is signed.
-                    // Overflow if the value exceeds SIGNED_MAX (i.e. sign bit is set).
-                    let bits = (compute_ty.size() * 8) as i64;
-                    let shifted = self.emit_binop_val(IrBinOp::LShr, Operand::Value(wide_result),
-                        Operand::Const(IrConst::I64(bits - 1)), compute_ty);
-                    self.emit_binop_val(IrBinOp::And, Operand::Value(shifted),
-                        Operand::Const(IrConst::I64(1)), compute_ty)
+                    lhs_raw
                 };
+                let rhs_compute = if rhs_src_ir != compute_ty {
+                    Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
+                } else {
+                    rhs_raw
+                };
+
+                let signed_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
+
+                // Also check for signed overflow: if the signed operation itself overflows,
+                // then we can't trust the result sign. Use signed overflow detection too.
+                let signed_ov = self.compute_signed_overflow(op, lhs_compute.clone(), rhs_compute.clone(), signed_result, compute_ty);
+
+                // Check if result is negative (doesn't fit in unsigned)
+                let is_negative = self.emit_cmp_val(
+                    IrCmpOp::Slt,
+                    Operand::Value(signed_result),
+                    Operand::Const(IrConst::I64(0)),
+                    compute_ty,
+                );
+
+                // Overflow if result is negative OR if the signed operation overflowed
+                let overflow = self.emit_binop_val(
+                    IrBinOp::Or,
+                    Operand::Value(is_negative),
+                    Operand::Value(signed_ov),
+                    IrType::I32,
+                );
+
+                // Store the result (reinterpreted as unsigned)
+                let unsigned_result = self.emit_cast_val(Operand::Value(signed_result), compute_ty, result_ir_ty);
+                self.emit(Instruction::Store { val: Operand::Value(unsigned_result), ptr: result_ptr, ty: result_ir_ty,
+                 seg_override: AddressSpace::Default });
 
                 Some(Operand::Value(overflow))
             } else {
-                // Could not widen (e.g. both operands and result are int64).
-                // Fall back to same-type overflow detection.
-                let result = self.emit_binop_val(op, lhs_compute, rhs_compute, result_ir_ty);
+                // Cannot widen, or widening wouldn't help (e.g., u128 operand can't fit in I128).
+                // Fall back to computing directly in the result type with same-type overflow detection.
+                let lhs_result = if lhs_src_ir != result_ir_ty {
+                    Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, result_ir_ty))
+                } else {
+                    lhs_raw
+                };
+                let rhs_result = if rhs_src_ir != result_ir_ty {
+                    Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, result_ir_ty))
+                } else {
+                    rhs_raw
+                };
+
+                let result = self.emit_binop_val(op, lhs_result.clone(), rhs_result.clone(), result_ir_ty);
 
                 let overflow = if is_signed {
-                    self.compute_signed_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+                    self.compute_signed_overflow(op, lhs_result, rhs_result, result, result_ir_ty)
                 } else {
-                    self.compute_unsigned_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+                    self.compute_unsigned_overflow(op, lhs_result, rhs_result, result, result_ir_ty)
                 };
 
                 self.emit(Instruction::Store { val: Operand::Value(result), ptr: result_ptr, ty: result_ir_ty,
@@ -224,24 +256,21 @@ impl Lowerer {
             _ => IrType::I128,
         };
 
-        let lhs_compute = if lhs_src_ir != compute_ty {
-            Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
-        } else {
-            lhs_raw
-        };
-        let rhs_compute = if rhs_src_ir != compute_ty {
-            Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
-        } else {
-            rhs_raw
-        };
+        let is_signed_result = result_ctype.is_signed();
+        let all_operands_fit = (lhs_src_ctype.is_signed() || lhs_src_ir.size() < compute_ty.size())
+            && (rhs_src_ctype.is_signed() || rhs_src_ir.size() < compute_ty.size());
 
-        if compute_ty.size() > result_ir_ty.size() {
-            // We were able to widen: compute exactly, truncate, and check
-            // if the truncated result round-trips back to the wide value.
+        if all_operands_fit && compute_ty.size() > result_ir_ty.size() {
+            // True widening: compute exactly, truncate, and check round-trip
+            let lhs_compute = if lhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
+            } else { lhs_raw };
+            let rhs_compute = if rhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
+            } else { rhs_raw };
+
             let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
-
             let truncated = self.emit_cast_val(Operand::Value(wide_result), compute_ty, result_ir_ty);
-
             let extended_back = self.emit_cast_val(Operand::Value(truncated), result_ir_ty, compute_ty);
             let overflow = self.emit_cmp_val(
                 IrCmpOp::Ne,
@@ -249,42 +278,46 @@ impl Lowerer {
                 Operand::Value(extended_back),
                 compute_ty,
             );
-
             Some(Operand::Value(overflow))
-        } else if compute_ty != result_ir_ty && compute_ty.size() == result_ir_ty.size() {
-            // Same bit width but different signedness (e.g. compute in I64, result is U64).
-            // The round-trip cast won't detect overflow because the bit pattern is preserved.
-            let wide_result = self.emit_binop_val(op, lhs_compute, rhs_compute, compute_ty);
+        } else if all_operands_fit && compute_ty.size() == result_ir_ty.size() && compute_ty.is_signed() && !is_signed_result {
+            // Signed compute, unsigned result, same size: overflow iff signed result < 0
+            let lhs_compute = if lhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, compute_ty))
+            } else { lhs_raw };
+            let rhs_compute = if rhs_src_ir != compute_ty {
+                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, compute_ty))
+            } else { rhs_raw };
 
-            let overflow = if compute_ty.is_signed() && !result_ir_ty.is_signed() {
-                // Computed in signed type, result is unsigned: overflow if negative
-                let bits = (compute_ty.size() * 8) as i64;
-                let shifted = self.emit_binop_val(IrBinOp::AShr, Operand::Value(wide_result),
-                    Operand::Const(IrConst::I64(bits - 1)), compute_ty);
-                self.emit_binop_val(IrBinOp::And, Operand::Value(shifted),
-                    Operand::Const(IrConst::I64(1)), compute_ty)
-            } else {
-                // Computed in unsigned type, result is signed: overflow if sign bit set
-                let bits = (compute_ty.size() * 8) as i64;
-                let shifted = self.emit_binop_val(IrBinOp::LShr, Operand::Value(wide_result),
-                    Operand::Const(IrConst::I64(bits - 1)), compute_ty);
-                self.emit_binop_val(IrBinOp::And, Operand::Value(shifted),
-                    Operand::Const(IrConst::I64(1)), compute_ty)
-            };
-
+            let signed_result = self.emit_binop_val(op, lhs_compute.clone(), rhs_compute.clone(), compute_ty);
+            let signed_ov = self.compute_signed_overflow(op, lhs_compute, rhs_compute, signed_result, compute_ty);
+            let is_negative = self.emit_cmp_val(
+                IrCmpOp::Slt,
+                Operand::Value(signed_result),
+                Operand::Const(IrConst::I64(0)),
+                compute_ty,
+            );
+            let overflow = self.emit_binop_val(
+                IrBinOp::Or,
+                Operand::Value(is_negative),
+                Operand::Value(signed_ov),
+                IrType::I32,
+            );
             Some(Operand::Value(overflow))
         } else {
-            // Could not widen (e.g. both operands and result are int64).
-            // Fall back to same-type overflow detection.
-            let is_signed = result_ctype.is_signed();
-            let result = self.emit_binop_val(op, lhs_compute, rhs_compute, result_ir_ty);
+            // Fall back to computing in the result type
+            let lhs_result = if lhs_src_ir != result_ir_ty {
+                Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, result_ir_ty))
+            } else { lhs_raw };
+            let rhs_result = if rhs_src_ir != result_ir_ty {
+                Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, result_ir_ty))
+            } else { rhs_raw };
 
-            let overflow = if is_signed {
-                self.compute_signed_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+            let result = self.emit_binop_val(op, lhs_result.clone(), rhs_result.clone(), result_ir_ty);
+            let overflow = if is_signed_result {
+                self.compute_signed_overflow(op, lhs_result, rhs_result, result, result_ir_ty)
             } else {
-                self.compute_unsigned_overflow(op, lhs_compute, rhs_compute, result, result_ir_ty)
+                self.compute_unsigned_overflow(op, lhs_result, rhs_result, result, result_ir_ty)
             };
-
             Some(Operand::Value(overflow))
         }
     }
