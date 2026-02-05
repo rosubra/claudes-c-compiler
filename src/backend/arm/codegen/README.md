@@ -55,7 +55,7 @@ All codegen source files reside under `src/backend/arm/codegen/`.
 | File | Responsibility |
 |------|---------------|
 | `emit.rs` | Core `ArmCodegen` struct, register pool definitions (`ARM_CALLEE_SAVED`, `ARM_CALLER_SAVED`), ALU mnemonic mapping, condition code tables, immediate encoding helpers (`const_as_imm12`, `const_as_power_of_2`), prescan of inline asm for callee-saved register discovery, and integer comparison emission with optimized reg-vs-imm12 and reg-vs-reg paths. |
-| `mod.rs` | Module declaration and re-exports for the codegen submodules. |
+| `mod.rs` | Module declarations for the codegen submodules. |
 | `prologue.rs` | Stack space calculation, prologue/epilogue emission (frame pointer/link register pair save, callee-saved register save/restore via `STP`/`LDP`), parameter store dispatch, and variadic register save area layout. |
 | `calls.rs` | Call ABI configuration (`CallAbiConfig` with 8 integer regs, 8 float regs, I128 pair alignment), stack argument marshalling (scalars, I128, F128, structs by value), GP-to-temp staging, FP register argument loading, indirect call via `BLR x17`, and post-call stack cleanup. |
 | `memory.rs` | Load/store emission with F128 specialization, typed slot access, pointer indirection, GEP (get-element-pointer) address computation, `memcpy` helpers, dynamic alloca support (`sub sp` / `mov sp`), and alignment rounding. |
@@ -251,21 +251,21 @@ For variadic functions, the prologue additionally saves `x0`-`x7` (and optionall
 ```
 High addresses (caller's frame)
   +----------------------------------+
-  | Caller's stack arguments         |  [x29 + 16 + ...]
-  +----------------------------------+
-  | Saved x30 (LR)                   |  [x29 + 8]
-  | Saved x29 (FP)                   |  [x29]
-  +----------------------------------+  <-- x29 (frame pointer)
-  | Local variables / spill slots    |  [sp + N]
-  |   (8-byte minimum alignment,     |
-  |    respecting alloca alignment)   |
-  +----------------------------------+
+  | Caller's stack arguments         |  [x29 + frame_size + ...]
+  +----------------------------------+  <-- previous sp (before prologue)
   | Callee-saved register save area  |  [sp + callee_save_offset]
   |   (x20-x28 as needed, via STP)   |
   +----------------------------------+
-  | Variadic GP save area (64 bytes) |  [sp + va_gp_save_offset]  (if variadic)
   | Variadic FP save area (128 bytes)|  [sp + va_fp_save_offset]  (if variadic)
-  +----------------------------------+  <-- sp (stack pointer)
+  | Variadic GP save area (64 bytes) |  [sp + va_gp_save_offset]  (if variadic)
+  +----------------------------------+
+  | Local variables / spill slots    |  [sp + 16...]
+  |   (8-byte minimum alignment,     |
+  |    respecting alloca alignment)   |
+  +----------------------------------+
+  | Saved x30 (LR)                   |  [sp + 8] = [x29 + 8]
+  | Saved x29 (FP)                   |  [sp + 0] = [x29]
+  +----------------------------------+  <-- sp = x29 (frame pointer)
 Low addresses
 ```
 
@@ -621,8 +621,8 @@ Template operands support modifiers that select the register view:
 | `%s` | 32-bit FP scalar | `%s0` produces `s16` |
 | `%d` | 64-bit FP scalar | `%d0` produces `d16` |
 | `%q` | 128-bit FP vector | `%q0` produces `q16` |
-| `%h` | 16-bit GP (lower) | `%h0` produces `w20` (with AND mask) |
-| `%b` | 8-bit GP (lower) | `%b0` produces `w20` (with AND mask) |
+| `%h` | 16-bit FP half | `%h0` produces `h16` (half-precision view) |
+| `%b` | 8-bit FP byte | `%b0` produces `b16` (byte-width view) |
 | `%c` | Raw constant | No `#` prefix (for data directives) |
 | `%a` | Address reference | `[reg]` form for prefetch |
 
