@@ -3,21 +3,22 @@
 /// This module re-exports the shared ELF64 types and parser from `linker_common`,
 /// plus provides x86-64-specific relocation constants. The actual parsing logic
 /// lives in the shared module to avoid duplication with ARM and RISC-V.
+// Re-export shared ELF constants for mod.rs and the emitter functions.
+// Archive/linker-script functions are now called via linker_common.
 pub use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, ET_EXEC, ET_DYN, EM_X86_64,
-    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
-    SHT_NOBITS, SHT_REL, SHT_GROUP, SHT_DYNAMIC, SHT_DYNSYM,
+    SHT_PROGBITS, SHT_NOBITS, SHT_STRTAB, SHT_RELA, SHT_DYNAMIC, SHT_DYNSYM,
     SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_GNU_HASH, SHT_GNU_VERSYM, SHT_GNU_VERNEED,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
     STB_GLOBAL, STB_WEAK,
-    STT_OBJECT, STT_FUNC, STT_SECTION, STT_FILE, STT_TLS,
+    STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
     PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_PHDR, PT_TLS, PT_GNU_STACK, PT_GNU_RELRO,
     PF_X, PF_W, PF_R,
     DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_STRTAB,
     DT_SYMTAB, DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT,
     DT_JMPREL, DT_PLTREL, DT_GNU_HASH,
-    parse_archive_members, parse_thin_archive_members, is_thin_archive,
+    is_thin_archive,
     parse_linker_script_entries, LinkerScriptEntry,
     LinkerSymbolAddresses, get_standard_linker_symbols,
 };

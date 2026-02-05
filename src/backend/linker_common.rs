@@ -26,16 +26,19 @@ use std::path::Path;
 use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS64, ELFDATA2LSB,
     ET_REL, ET_DYN,
-    SHT_SYMTAB, SHT_RELA, SHT_DYNAMIC, SHT_NOBITS, SHT_DYNSYM,
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_REL,
+    SHT_DYNAMIC, SHT_NOBITS, SHT_DYNSYM, SHT_GROUP,
     SHT_GNU_VERSYM, SHT_GNU_VERDEF,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
     STB_LOCAL, STB_GLOBAL, STB_WEAK,
     STT_SECTION, STT_FILE,
-    SHN_UNDEF,
+    SHN_UNDEF, SHN_COMMON,
     PT_DYNAMIC,
     DT_NULL, DT_SONAME, DT_SYMTAB, DT_STRTAB, DT_STRSZ,
     DT_GNU_HASH, DT_VERSYM,
     read_u16, read_u32, read_u64, read_i64, read_cstr,
-    parse_archive_members,
+    parse_archive_members, parse_thin_archive_members, is_thin_archive,
+    parse_linker_script_entries, LinkerScriptEntry,
 };
 
 // ── ELF64 object file types ──────────────────────────────────────────────
@@ -840,47 +843,279 @@ pub fn sysv_hash(name: &[u8]) -> u32 {
     h
 }
 
-// ── Archive loading ──────────────────────────────────────────────────────
+// ── Shared linker data structures ────────────────────────────────────────
+//
+// InputSection, OutputSection, and the GlobalSymbolOps trait are shared across
+// the x86 and ARM 64-bit linkers. The i686 linker uses ELF32 variants.
 
-/// Check if an archive member defines any currently-undefined symbol.
+/// Reference to one input section placed within an output section.
+pub struct InputSection {
+    pub object_idx: usize,
+    pub section_idx: usize,
+    pub output_offset: u64,
+    pub size: u64,
+}
+
+/// A merged output section in the final executable or shared library.
+pub struct OutputSection {
+    pub name: String,
+    pub sh_type: u32,
+    pub flags: u64,
+    pub alignment: u64,
+    pub inputs: Vec<InputSection>,
+    pub data: Vec<u8>,
+    pub addr: u64,
+    pub file_offset: u64,
+    pub mem_size: u64,
+}
+
+/// Trait abstracting over backend-specific GlobalSymbol types.
 ///
-/// Used by iterative archive resolution (the --start-group algorithm) where
-/// members are pulled in only if they resolve at least one undefined reference.
-// TODO: migrate x86/ARM archive loading to use this shared implementation
-#[allow(dead_code)]
-pub fn member_resolves_undefined_elf64(
+/// The x86 linker's GlobalSymbol has dynamic linking fields (is_dynamic, plt_idx,
+/// got_idx, copy_reloc, from_lib, version, lib_sym_value) that the ARM linker's
+/// version also has (since it now supports dynamic linking too). This trait
+/// extracts the common operations needed by shared functions like register_symbols
+/// and merge_sections, allowing the same code to work with both backends.
+pub trait GlobalSymbolOps: Clone {
+    fn is_defined(&self) -> bool;
+    fn is_dynamic(&self) -> bool;
+    fn info(&self) -> u8;
+    fn section_idx(&self) -> u16;
+    fn value(&self) -> u64;
+    fn size(&self) -> u64;
+    fn new_defined(obj_idx: usize, sym: &Elf64Symbol) -> Self;
+    fn new_common(obj_idx: usize, sym: &Elf64Symbol) -> Self;
+    fn new_undefined(sym: &Elf64Symbol) -> Self;
+    fn set_common_bss(&mut self, bss_offset: u64);
+}
+
+// ── Shared linker functions ─────────────────────────────────────────────
+
+/// Merge input sections from all objects into output sections.
+///
+/// Groups input sections by mapped name (e.g., `.text.foo` -> `.text`),
+/// computes output offsets with proper alignment, and sorts output sections
+/// by permission profile: RO -> Exec -> RW(progbits) -> RW(nobits).
+pub fn merge_sections_elf64(
+    objects: &[Elf64Object], output_sections: &mut Vec<OutputSection>,
+    section_map: &mut HashMap<(usize, usize), (usize, u64)>,
+) {
+    let mut output_map: HashMap<String, usize> = HashMap::new();
+
+    for obj_idx in 0..objects.len() {
+        for sec_idx in 0..objects[obj_idx].sections.len() {
+            let sec = &objects[obj_idx].sections[sec_idx];
+            if sec.flags & SHF_ALLOC == 0 { continue; }
+            if matches!(sec.sh_type, SHT_NULL | SHT_STRTAB | SHT_SYMTAB | SHT_RELA | SHT_REL | SHT_GROUP) { continue; }
+            if sec.flags & SHF_EXCLUDE != 0 { continue; }
+
+            let output_name = map_section_name(&sec.name).to_string();
+            let alignment = sec.addralign.max(1);
+
+            let out_idx = if let Some(&idx) = output_map.get(&output_name) {
+                if alignment > output_sections[idx].alignment {
+                    output_sections[idx].alignment = alignment;
+                }
+                idx
+            } else {
+                let idx = output_sections.len();
+                output_map.insert(output_name.clone(), idx);
+                output_sections.push(OutputSection {
+                    name: output_name, sh_type: sec.sh_type, flags: sec.flags,
+                    alignment, inputs: Vec::new(), data: Vec::new(),
+                    addr: 0, file_offset: 0, mem_size: 0,
+                });
+                idx
+            };
+
+            if sec.sh_type == SHT_PROGBITS { output_sections[out_idx].sh_type = SHT_PROGBITS; }
+            output_sections[out_idx].flags |= sec.flags & (SHF_WRITE | SHF_EXECINSTR | SHF_ALLOC | SHF_TLS);
+            output_sections[out_idx].inputs.push(InputSection {
+                object_idx: obj_idx, section_idx: sec_idx, output_offset: 0, size: sec.size,
+            });
+        }
+    }
+
+    for out_sec in output_sections.iter_mut() {
+        let mut off: u64 = 0;
+        for input in &mut out_sec.inputs {
+            let a = objects[input.object_idx].sections[input.section_idx].addralign.max(1);
+            off = (off + a - 1) & !(a - 1);
+            input.output_offset = off;
+            off += input.size;
+        }
+        out_sec.mem_size = off;
+    }
+
+    for (out_idx, out_sec) in output_sections.iter().enumerate() {
+        for input in &out_sec.inputs {
+            section_map.insert((input.object_idx, input.section_idx), (out_idx, input.output_offset));
+        }
+    }
+
+    // Sort: RO -> Exec -> RW(progbits) -> RW(nobits)
+    let len = output_sections.len();
+    let mut opts: Vec<Option<OutputSection>> = output_sections.drain(..).map(Some).collect();
+    let mut sort_indices: Vec<usize> = (0..len).collect();
+    sort_indices.sort_by_key(|&i| {
+        let sec = opts[i].as_ref().unwrap();
+        let is_exec = sec.flags & SHF_EXECINSTR != 0;
+        let is_write = sec.flags & SHF_WRITE != 0;
+        let is_nobits = sec.sh_type == SHT_NOBITS;
+        if is_exec { (1u32, is_nobits as u32) }
+        else if !is_write { (0, is_nobits as u32) }
+        else { (2, is_nobits as u32) }
+    });
+
+    let mut index_remap: HashMap<usize, usize> = HashMap::new();
+    for (new_idx, &old_idx) in sort_indices.iter().enumerate() {
+        index_remap.insert(old_idx, new_idx);
+    }
+    for &old_idx in &sort_indices {
+        output_sections.push(opts[old_idx].take().unwrap());
+    }
+
+    let old_map: Vec<_> = section_map.drain().collect();
+    for ((obj_idx, sec_idx), (old_out_idx, off)) in old_map {
+        if let Some(&new_out_idx) = index_remap.get(&old_out_idx) {
+            section_map.insert((obj_idx, sec_idx), (new_out_idx, off));
+        }
+    }
+}
+
+/// Allocate SHN_COMMON symbols into the .bss output section.
+pub fn allocate_common_symbols_elf64<G: GlobalSymbolOps>(
+    globals: &mut HashMap<String, G>, output_sections: &mut Vec<OutputSection>,
+) {
+    let common_syms: Vec<(String, u64, u64)> = globals.iter()
+        .filter(|(_, sym)| sym.section_idx() == SHN_COMMON && sym.is_defined())
+        .map(|(name, sym)| (name.clone(), sym.value().max(1), sym.size())).collect();
+    if common_syms.is_empty() { return; }
+
+    let bss_idx = output_sections.iter().position(|s| s.name == ".bss").unwrap_or_else(|| {
+        let idx = output_sections.len();
+        output_sections.push(OutputSection {
+            name: ".bss".to_string(), sh_type: SHT_NOBITS,
+            flags: SHF_ALLOC | SHF_WRITE, alignment: 1,
+            inputs: Vec::new(), data: Vec::new(),
+            addr: 0, file_offset: 0, mem_size: 0,
+        });
+        idx
+    });
+
+    let mut bss_off = output_sections[bss_idx].mem_size;
+    for (name, alignment, size) in &common_syms {
+        let a = (*alignment).max(1);
+        bss_off = (bss_off + a - 1) & !(a - 1);
+        if let Some(sym) = globals.get_mut(name) {
+            sym.set_common_bss(bss_off);
+        }
+        if *alignment > output_sections[bss_idx].alignment {
+            output_sections[bss_idx].alignment = *alignment;
+        }
+        bss_off += size;
+    }
+    output_sections[bss_idx].mem_size = bss_off;
+}
+
+/// Register symbols from an object file into the global symbol table.
+///
+/// Handles defined symbols, COMMON symbols, and undefined references.
+/// For defined symbols, a GLOBAL definition replaces a WEAK one.
+/// The `should_replace_extra` callback allows x86's linker to also check
+/// `is_dynamic` when deciding whether to replace an existing symbol.
+pub fn register_symbols_elf64<G: GlobalSymbolOps>(
+    obj_idx: usize,
     obj: &Elf64Object,
-    undefined: &dyn Fn(&str) -> bool,
+    globals: &mut HashMap<String, G>,
+    should_replace_extra: fn(existing: &G) -> bool,
+) {
+    for sym in &obj.symbols {
+        if sym.sym_type() == STT_SECTION || sym.sym_type() == STT_FILE { continue; }
+        if sym.name.is_empty() || sym.is_local() { continue; }
+
+        let is_defined = !sym.is_undefined() && sym.shndx != SHN_COMMON;
+
+        if is_defined {
+            let should_replace = match globals.get(&sym.name) {
+                None => true,
+                Some(e) => !e.is_defined() || should_replace_extra(e)
+                    || (e.info() >> 4 == STB_WEAK && sym.is_global()),
+            };
+            if should_replace {
+                globals.insert(sym.name.clone(), G::new_defined(obj_idx, sym));
+            }
+        } else if sym.shndx == SHN_COMMON {
+            let should_insert = match globals.get(&sym.name) {
+                None => true,
+                Some(e) => !e.is_defined(),
+            };
+            if should_insert {
+                globals.insert(sym.name.clone(), G::new_common(obj_idx, sym));
+            }
+        } else if !globals.contains_key(&sym.name) {
+            globals.insert(sym.name.clone(), G::new_undefined(sym));
+        }
+    }
+}
+
+// ── Archive and file loading ────────────────────────────────────────────
+
+/// Check if an archive member defines any currently-undefined, non-dynamic symbol.
+fn member_resolves_undefined_generic<G: GlobalSymbolOps>(
+    obj: &Elf64Object, globals: &HashMap<String, G>,
 ) -> bool {
     for sym in &obj.symbols {
         if sym.is_undefined() || sym.is_local() { continue; }
         if sym.sym_type() == STT_SECTION || sym.sym_type() == STT_FILE { continue; }
         if sym.name.is_empty() { continue; }
-        if undefined(&sym.name) { return true; }
+        if let Some(existing) = globals.get(&sym.name) {
+            if !existing.is_defined() && !existing.is_dynamic() { return true; }
+        }
     }
     false
 }
 
-/// Load and resolve archive members that satisfy undefined symbols.
+/// Iterative archive member resolution (the --start-group algorithm).
 ///
-/// Parses the archive, then iteratively pulls in members that define currently-
-/// undefined symbols until no more progress is made (group resolution).
-///
-/// Returns the list of parsed objects that were pulled in.
-// TODO: migrate x86/ARM archive loading to use this shared implementation
-#[allow(dead_code)]
-pub fn load_archive_members_elf64(
-    data: &[u8],
-    archive_path: &str,
-    expected_machine: u16,
-    undefined: &dyn Fn(&str) -> bool,
-) -> Result<Vec<Elf64Object>, String> {
+/// Given a list of parsed archive member objects, pull in members that define
+/// any currently-undefined global symbol. Repeat until no more progress.
+fn resolve_archive_members<G: GlobalSymbolOps>(
+    member_objects: &mut Vec<Elf64Object>,
+    objects: &mut Vec<Elf64Object>,
+    globals: &mut HashMap<String, G>,
+    should_replace_extra: fn(&G) -> bool,
+) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < member_objects.len() {
+            if member_resolves_undefined_generic(&member_objects[i], globals) {
+                let obj = member_objects.remove(i);
+                let obj_idx = objects.len();
+                register_symbols_elf64(obj_idx, &obj, globals, should_replace_extra);
+                objects.push(obj);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Load a regular archive (.a), parsing members and pulling in those that
+/// resolve undefined symbols.
+pub fn load_archive_elf64<G: GlobalSymbolOps>(
+    data: &[u8], archive_path: &str,
+    objects: &mut Vec<Elf64Object>, globals: &mut HashMap<String, G>,
+    expected_machine: u16, should_replace_extra: fn(&G) -> bool,
+) -> Result<(), String> {
     let members = parse_archive_members(data)?;
     let mut member_objects: Vec<Elf64Object> = Vec::new();
     for (name, offset, size) in &members {
         let member_data = &data[*offset..*offset + *size];
         if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC { continue; }
-        // Optionally check machine type
         if expected_machine != 0 && member_data.len() >= 20 {
             let e_machine = read_u16(member_data, 18);
             if e_machine != expected_machine { continue; }
@@ -890,22 +1125,115 @@ pub fn load_archive_members_elf64(
             member_objects.push(obj);
         }
     }
+    resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    Ok(())
+}
 
-    let mut pulled_in = Vec::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut i = 0;
-        while i < member_objects.len() {
-            if member_resolves_undefined_elf64(&member_objects[i], undefined) {
-                pulled_in.push(member_objects.remove(i));
-                changed = true;
-            } else {
-                i += 1;
-            }
+/// Load a GNU thin archive. Members are external files referenced by name
+/// relative to the archive's directory.
+pub fn load_thin_archive_elf64<G: GlobalSymbolOps>(
+    data: &[u8], archive_path: &str,
+    objects: &mut Vec<Elf64Object>, globals: &mut HashMap<String, G>,
+    expected_machine: u16, should_replace_extra: fn(&G) -> bool,
+) -> Result<(), String> {
+    let member_names = parse_thin_archive_members(data)?;
+    let archive_dir = Path::new(archive_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut member_objects: Vec<Elf64Object> = Vec::new();
+    for name in &member_names {
+        let member_path = archive_dir.join(name);
+        let member_data = std::fs::read(&member_path).map_err(|e| {
+            format!("thin archive {}: failed to read member '{}': {}",
+                archive_path, member_path.display(), e)
+        })?;
+        if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC { continue; }
+        let full_name = format!("{}({})", archive_path, name);
+        if let Ok(obj) = parse_elf64_object(&member_data, &full_name, expected_machine) {
+            member_objects.push(obj);
         }
     }
-    Ok(pulled_in)
+    resolve_archive_members(&mut member_objects, objects, globals, should_replace_extra);
+    Ok(())
+}
+
+/// Load a file, dispatching by format (archive, thin archive, linker script,
+/// shared library, or object file).
+///
+/// The `on_shared_lib` callback handles shared libraries (.so files). This allows
+/// x86 and ARM to handle dynamic symbol extraction differently. Pass a no-op
+/// closure for static-only linking.
+pub fn load_file_elf64<G: GlobalSymbolOps>(
+    path: &str,
+    objects: &mut Vec<Elf64Object>,
+    globals: &mut HashMap<String, G>,
+    expected_machine: u16,
+    lib_paths: &[String],
+    prefer_static: bool,
+    should_replace_extra: fn(&G) -> bool,
+    on_shared_lib: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    if std::env::var("LINKER_DEBUG").is_ok() {
+        eprintln!("load_file: {}", path);
+    }
+
+    let data = std::fs::read(path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
+
+    // Regular archive
+    if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
+        return load_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra);
+    }
+
+    // Thin archive
+    if is_thin_archive(&data) {
+        return load_thin_archive_elf64(&data, path, objects, globals, expected_machine, should_replace_extra);
+    }
+
+    // Not ELF? Try linker script (handles GROUP and INPUT directives)
+    if data.len() >= 4 && data[0..4] != ELF_MAGIC {
+        if let Ok(text) = std::str::from_utf8(&data) {
+            if let Some(entries) = parse_linker_script_entries(text) {
+                let script_dir = Path::new(path).parent().map(|p| p.to_string_lossy().to_string());
+                for entry in &entries {
+                    match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if Path::new(lib_path).exists() {
+                                load_file_elf64(lib_path, objects, globals, expected_machine, lib_paths, prefer_static, should_replace_extra, on_shared_lib)?;
+                            } else if let Some(ref dir) = script_dir {
+                                let resolved = format!("{}/{}", dir, lib_path);
+                                if Path::new(&resolved).exists() {
+                                    load_file_elf64(&resolved, objects, globals, expected_machine, lib_paths, prefer_static, should_replace_extra, on_shared_lib)?;
+                                }
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            if let Some(resolved_path) = resolve_lib(lib_name, lib_paths, prefer_static) {
+                                load_file_elf64(&resolved_path, objects, globals, expected_machine, lib_paths, prefer_static, should_replace_extra, on_shared_lib)?;
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        return Err(format!("{}: not a valid ELF object or archive", path));
+    }
+
+    // Shared library
+    if data.len() >= 18 {
+        let e_type = u16::from_le_bytes([data[16], data[17]]);
+        if e_type == ET_DYN {
+            return on_shared_lib(path, &data);
+        }
+    }
+
+    // Regular ELF object
+    let obj = parse_elf64_object(&data, path, expected_machine)?;
+    let obj_idx = objects.len();
+    register_symbols_elf64(obj_idx, &obj, globals, should_replace_extra);
+    objects.push(obj);
+    Ok(())
 }
 
 // ── Library resolution helper ─────────────────────────────────────────────

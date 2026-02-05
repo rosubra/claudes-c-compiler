@@ -49,9 +49,9 @@ pub fn link_shared(
          |                |                 |                  |
          v                v                 v                  v
     +----------------------------------------------------------------+
-    |                    Input Loading                               |
-    |  - Parse ELF .o  (parse_object)                                |
-    |  - Parse .a archives  (parse_archive_members)                  |
+    |              Input Loading (via linker_common)                  |
+    |  - Parse ELF .o  (linker_common::parse_elf64_object)           |
+    |  - Parse .a archives  (linker_common::load_archive_elf64)      |
     |  - Parse .so dynamic symbols  (parse_shared_library_symbols)   |
     |  - Parse linker scripts  (parse_linker_script)                 |
     +----------------------------------------------------------------+
@@ -60,8 +60,8 @@ pub fn link_shared(
                               |
                               v
     +----------------------------------------------------------------+
-    |              Symbol Resolution                                 |
-    |  - register_symbols: collect defined/undefined globals         |
+    |              Symbol Resolution (via linker_common)              |
+    |  - register_symbols_elf64: collect defined/undefined globals   |
     |  - Archive selective loading: pull in members that satisfy     |
     |    undefined references (iterated to fixed point)              |
     |  - resolve_dynamic_symbols: match against system .so files     |
@@ -69,7 +69,7 @@ pub fn link_shared(
                               |
                               v
     +----------------------------------------------------------------+
-    |              Section Merging                                   |
+    |              Section Merging (via linker_common)                |
     |  - Map input sections to output sections by name               |
     |  - Compute per-input-section offsets within output sections     |
     |  - Sort output sections: RO -> Exec -> RW -> BSS               |
@@ -114,8 +114,8 @@ pub fn link_shared(
 
 | File | Lines | Role |
 |------|-------|------|
-| `mod.rs` | ~2600 | Linker orchestration for both executables and shared libraries: loading, symbol resolution, section merging, PLT/GOT creation, layout, relocation application, output emission |
-| `elf.rs` | ~71 | x86-64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction |
+| `mod.rs` | ~2820 | Linker orchestration for both executables and shared libraries: PLT/GOT creation, layout, relocation application, output emission. Delegates section merging, COMMON allocation, symbol registration, and archive loading to `linker_common`. |
+| `elf.rs` | ~77 | x86-64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing, shared library symbols, and SONAME extraction |
 
 
 ## Key Data Structures
@@ -199,7 +199,7 @@ struct GlobalSymbol {
 }
 ```
 
-### `OutputSection` (mod.rs)
+### `OutputSection` (linker_common.rs)
 
 Represents one merged output section in the final executable:
 
@@ -217,7 +217,7 @@ struct OutputSection {
 }
 ```
 
-### `InputSection` (mod.rs)
+### `InputSection` (linker_common.rs)
 
 Tracks where one input section is placed within an output section:
 
@@ -299,7 +299,7 @@ check since they are defined during the layout phase.
 
 ### Phase 2: Symbol Resolution
 
-`register_symbols()` processes each object file's symbol table:
+`linker_common::register_symbols_elf64()` processes each object file's symbol table:
 
 1. **Local symbols** are skipped (not relevant to inter-object linking).
 2. **Section symbols** and **file symbols** are skipped.
@@ -314,8 +314,8 @@ Resolution priority: `static defined > dynamic defined > weak > undefined`.
 
 ### Phase 3: Section Merging
 
-`merge_sections()` combines input sections from all objects into output
-sections:
+`linker_common::merge_sections_elf64()` combines input sections from all
+objects into output sections:
 
 1. **Filtering** -- Only `SHF_ALLOC` sections are included.  Non-allocatable
    sections (`.strtab`, `.symtab`, `.rela.*`, group sections) and
@@ -347,8 +347,8 @@ sections:
 
 ### Phase 4: COMMON Symbol Allocation
 
-`allocate_common_symbols()` places COMMON symbols (from `.comm` directives)
-into the `.bss` section:
+`linker_common::allocate_common_symbols_elf64()` places COMMON symbols (from
+`.comm` directives) into the `.bss` section:
 
 1. Collect all globals with `SHN_COMMON`.
 2. For each, align and append to `.bss`'s `mem_size`.
