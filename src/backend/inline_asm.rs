@@ -730,12 +730,15 @@ fn assign_scratch_registers(
         }
     }
 
-    // Collect registers assigned to early-clobber outputs ("&" in constraint).
-    // Early-clobber means the output is written before all inputs are consumed,
-    // so input operands must NOT share a register with any early-clobber output.
+    // Collect registers assigned to early-clobber ("&") and read-write ("+")
+    // outputs. Early-clobber means the output is written before all inputs are
+    // consumed. Read-write ("+") means the register is pre-loaded with an input
+    // value before the asm executes. In both cases, input operands must NOT
+    // share a register with the output, or the input loading phase would
+    // overwrite the pre-loaded value.
     let mut input_excluded: Vec<String> = specific_regs.to_vec();
     for i in 0..outputs.len() {
-        if outputs[i].0.contains('&') && !operands[i].reg.is_empty() {
+        if (outputs[i].0.contains('&') || outputs[i].0.contains('+')) && !operands[i].reg.is_empty() {
             let reg = &operands[i].reg;
             // Normalize to 64-bit canonical name for x86 (e.g., "ecx" -> "rcx")
             let canonical = x86_normalize_reg_to_64bit(reg)
