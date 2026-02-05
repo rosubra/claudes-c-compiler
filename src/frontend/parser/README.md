@@ -77,8 +77,9 @@ parser/
 
 All parsing methods are `pub(super)` so they can call each other across module
 boundaries within the parser crate, while remaining invisible outside it.  The
-only public API is `Parser::new()`, `Parser::parse()`, and the AST types
-exported from `ast.rs`.
+public API consists of `Parser::new()`, `Parser::parse()`,
+`Parser::set_diagnostics()`, `Parser::take_diagnostics()`, the `error_count`
+field, and the AST types exported from `ast.rs`.
 
 This split keeps each file focused on one aspect of the grammar.  The type
 specifier parser (`types.rs`) handles the combinatorial complexity of C's
@@ -123,11 +124,11 @@ Key design points:
   `Vec<Token>` rather than a streaming lexer.  This enables O(1) lookahead at
   any depth and trivial backtracking by saving and restoring `pos`.
 
-- **Typedef tracking.**  The `typedefs` set is pre-seeded with common standard
-  library type names (`size_t`, `uint32_t`, `FILE`, `va_list`, etc.) and grows
-  as `typedef` declarations are parsed.  The `shadowed_typedefs` set tracks
-  typedef names that have been redeclared as local variables in the current
-  scope, which is necessary for correct disambiguation.
+- **Typedef tracking.**  The `typedefs` set is pre-seeded with ~90 common
+  standard library type names (`size_t`, `uint32_t`, `FILE`, `va_list`, etc.)
+  and grows as `typedef` declarations are parsed.  The `shadowed_typedefs`
+  set tracks typedef names that have been redeclared as local variables in
+  the current scope, which is necessary for correct disambiguation.
 
 - **Attribute accumulator.**  `ParsedDeclAttrs` is a temporary buffer that
   collects storage-class specifiers, type qualifiers, and GCC attributes as
@@ -258,11 +259,10 @@ The parser resolves this with four mechanisms:
    prevents the parser from misinterpreting labeled statements as declarations.
 
 4. **Builtin typedefs.**  The parser pre-seeds `typedefs` with approximately
-   100 common standard library type names (`size_t`, `int32_t`, `FILE`,
-   `va_list`, `pthread_t`, GCC vector types, etc.).  Since the compiler does
-   not process system headers through a full preprocessor, these built-in
-   entries ensure that code using standard types parses correctly without
-   requiring the actual header files.
+   90 common standard library type names (`size_t`, `int32_t`, `FILE`,
+   `va_list`, `pthread_t`, GCC vector types, etc.).  These built-in entries
+   ensure that code using standard types parses correctly even when compiling
+   without real system headers (e.g., cross-compiling without a sysroot).
 
 ---
 
@@ -407,8 +407,11 @@ Declarations are parsed in `declarations.rs`.  The top-level entry point
 1. **Top-level `asm` directives** -- `asm("...")` outside any function, emitted
    verbatim as `ExternalDecl::TopLevelAsm`.
 
-2. **`_Static_assert`** -- consumed and discarded (assertions are checked at
-   compile time but do not produce visible AST nodes).
+2. **`_Static_assert`** -- the assertion expression is evaluated at parse
+   time; if it evaluates to zero, a compile error is emitted with the
+   assertion message.  No meaningful AST node is produced (at file scope,
+   an empty `Declaration` sentinel is returned to satisfy the
+   `ExternalDecl` return type).
 
 3. **Implicit `int`** -- C89 compatibility: if no type specifier is found but
    the token sequence looks like `identifier(`, it is treated as a function
@@ -779,9 +782,13 @@ encountering invalid input:
 
 ## Known Limitations
 
-- **No full preprocessor integration.**  The parser does not run a C
-  preprocessor.  It relies on an external preprocessing step and pre-seeded
-  builtin typedef names for standard library types.
+- **Parser does not invoke the preprocessor.**  The compiler has a fully
+  integrated C preprocessor (see `frontend/preprocessor/`), but the driver
+  orchestrates the pipeline: preprocessing runs first, then lexing, then
+  parsing.  From the parser's perspective, input tokens are already
+  macro-expanded and include-resolved.  The parser also pre-seeds a set of
+  builtin typedef names (see below) so that standard types like `size_t`
+  parse correctly even when compiling without real system headers.
 
 - **No type checking during parsing.**  The parser produces an untyped AST.
   Type resolution, implicit conversions, and semantic checks happen in later
