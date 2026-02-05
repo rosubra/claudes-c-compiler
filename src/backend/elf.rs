@@ -2531,6 +2531,40 @@ impl ElfWriterBase {
         result
     }
 
+    /// Resolve label names in an expression to their offsets regardless of section.
+    ///
+    /// Unlike `resolve_expr_all_labels` which only resolves labels in the same
+    /// section, this resolves ALL labels to their offsets. This is safe for
+    /// expressions that compute differences between labels in the same section
+    /// (the section offsets cancel out), which is common in kernel ALTERNATIVE
+    /// macros (e.g., `889f - 888f` computing the size of alternative code).
+    pub fn resolve_expr_cross_section(&self, expr: &str) -> String {
+        let resolved = self.resolve_expr_aliases(expr);
+        let mut result = String::with_capacity(resolved.len());
+        let bytes = resolved.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'.' || c == b'_' || c.is_ascii_alphabetic() {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i] == b'.' || bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                    i += 1;
+                }
+                let sym = &resolved[start..i];
+                if let Some((_sec, off)) = self.labels.get(sym) {
+                    result.push_str(&off.to_string());
+                } else {
+                    result.push_str(sym);
+                }
+            } else {
+                result.push(c as char);
+                i += 1;
+            }
+        }
+        result
+    }
+
     /// Emit a plain integer value for .byte (size=1), .short (size=2), .long (size=4) or .quad (size=8).
     pub fn emit_data_integer(&mut self, val: i64, size: usize) {
         match size {
