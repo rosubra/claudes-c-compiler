@@ -171,6 +171,7 @@ and a no-op).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `pthread` | `bool` | `false` | `-pthread` (defines `_REENTRANT` for configure scripts like `ax_pthread.m4`) |
 | `assembler_extra_args` | `Vec<String>` | `[]` | `-Wa,` assembler passthrough flags |
 | `raw_args` | `Vec<String>` | `[]` | Raw CLI args for GCC `-m16` passthrough |
 
