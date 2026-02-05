@@ -164,7 +164,9 @@ pub(crate) fn encode_mrs(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => parse_generic_sysreg(&sysreg)?,
     };
 
-    let word = 0xd5300000 | (encoding << 5) | rt;
+    // MRS encoding: 0xd520_0000 has L=1 (bit 21) for read.
+    // Bits [20:19] = op0, supplied entirely by the sysreg encoding field.
+    let word = 0xd5200000 | (encoding << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
@@ -356,7 +358,9 @@ pub(crate) fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
         _ => parse_generic_sysreg(&sysreg)?,
     };
 
-    let word = 0xd5100000 | (encoding << 5) | rt;
+    // MSR encoding: 0xd500_0000 has L=0 (bit 21) for write.
+    // Bits [20:19] = op0, supplied entirely by the sysreg encoding field.
+    let word = 0xd5000000 | (encoding << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
