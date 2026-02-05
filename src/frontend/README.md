@@ -152,7 +152,7 @@ stream and produces a typed AST rooted at `TranslationUnit`.
 - **`Parser::new(tokens: Vec<Token>) -> Self`** -- takes ownership of the
   token stream. The `DiagnosticEngine` is configured after construction via
   a separate `set_diagnostics()` method. Typedef names are seeded from a
-  hardcoded `builtin_typedefs()` list of approximately 80 common C standard
+  hardcoded `builtin_typedefs()` list of approximately 90 common C standard
   library and system types (`size_t`, `int32_t`, `FILE`, `pthread_t`, `va_list`,
   etc.), not from the preprocessor's macro table. This is necessary because the
   compiler does not always process real system headers.
@@ -293,7 +293,7 @@ Two points of cross-phase information flow deserve special mention:
    `T * x;` is either a multiplication expression or a pointer declaration,
    depending on whether `T` is a typedef name. The parser maintains its own set
    of typedef names, seeded from a hardcoded `builtin_typedefs()` list of
-   approximately 80 common C standard library and system types (`size_t`,
+   approximately 90 common C standard library and system types (`size_t`,
    `int32_t`, `FILE`, `pthread_t`, `va_list`, `__Float32x4_t`, etc.) and
    extended during parsing as `typedef` declarations are encountered. No
    preprocessor state flows to the parser -- only the expanded source text
