@@ -30,6 +30,21 @@
 #define _mm_insert_epi64(a, i, imm) \
     __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pinsrq128((a), (i), (imm)))
 
+/* === SSE4.1 comparison intrinsics === */
+
+/* _mm_cmpeq_epi64: compare packed 64-bit integers for equality (PCMPEQQ) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cmpeq_epi64(__m128i __a, __m128i __b)
+{
+    long long *__pa = (long long *)&__a;
+    long long *__pb = (long long *)&__b;
+    __m128i __r;
+    long long *__pr = (long long *)&__r;
+    __pr[0] = (__pa[0] == __pb[0]) ? -1LL : 0LL;
+    __pr[1] = (__pa[1] == __pb[1]) ? -1LL : 0LL;
+    return __r;
+}
+
 /* === SSE4.1 blending === */
 
 /* _mm_blendv_epi8: byte-level blend using mask high bits (PBLENDVB) */
