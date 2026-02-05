@@ -650,6 +650,17 @@ impl Lowerer {
                             if let Some(sub_layout) = sub_layout {
                                 let anon_offset = f.offset;
                                 let sub_base = self.emit_gep_offset(base, anon_offset, IrType::Ptr);
+                                // If the current item is a braced sub-initializer (List),
+                                // it is the initializer for this anonymous member as a whole.
+                                // Unwrap and pass the inner items to the sub-layout.
+                                // This handles `(T){ { .field = val } }` where the inner
+                                // braces wrap the anonymous union/struct member.
+                                if let Initializer::List(sub_items) = &item.init {
+                                    self.lower_local_struct_init(sub_items, sub_base, &sub_layout);
+                                    item_idx += 1;
+                                    current_field_idx = *idx + 1;
+                                    continue;
+                                }
                                 let anon_field_count = sub_layout.fields.iter()
                                     .filter(|ff| !ff.name.is_empty() || ff.bit_width.is_none())
                                     .count();
