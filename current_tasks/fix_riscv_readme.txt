@@ -1,1 +1,0 @@
-Fix RISC-V backend top-level README: correct misleading "dynamic linker" description (it's a static linker), update RV64C compression status (currently disabled), and clarify linker relaxation claims.

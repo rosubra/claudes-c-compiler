@@ -3,16 +3,17 @@
 The RISC-V backend targets RV64GC (RV64IMAFDC) with the LP64D calling
 convention. It covers the full pipeline from IR to ELF executable: code
 generation (instruction selection, register allocation, peephole optimization),
-a builtin assembler (RV assembly syntax parser, instruction encoder with RV64C
-compression, ELF object writer), and a builtin dynamic linker.
+a builtin assembler (RV assembly syntax parser, instruction encoder, ELF object
+writer), and a builtin linker (static and dynamic linking, shared library
+output, TLS support).
 
 ## Directory Structure
 
 ```
 riscv/
   codegen/            Code generation and peephole optimizer
-  assembler/          Builtin RV64 assembler (parser, encoder, RV64C compression)
-  linker/             Builtin RV64 linker (dynamic linking)
+  assembler/          Builtin RV64 assembler (parser, encoder, ELF writer)
+  linker/             Builtin RV64 linker (static/dynamic linking, TLS)
 ```
 
 ## Sub-Module Documentation
@@ -37,5 +38,7 @@ riscv/
   (no Zbb extension dependency)
 - **Atomics**: AMO instructions for word/doubleword; LR/SC with bit masking
   for sub-word atomics
-- **Assembler**: RV assembly syntax, RV64C compressed instruction support
-- **Linker**: Dynamic linking with GOT/PLT, relaxation markers
+- **Assembler**: RV assembly syntax, all RV64IMAFDC instructions, macro and
+  conditional preprocessor
+- **Linker**: Static and dynamic linking, shared library (`.so`) output,
+  PLT/GOT generation, TLS (LE, IE, GD→LE relaxation for static binaries)
