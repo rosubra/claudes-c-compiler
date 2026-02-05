@@ -87,7 +87,7 @@ All code generation logic lives under `src/backend/i686/codegen/`:
 | `prologue.rs` | Stack frame setup: `calculate_stack_space`, `emit_prologue`/`emit_epilogue`/`emit_epilogue_and_ret`, parameter storage from stack/registers to slots, register allocator integration, frame pointer omission logic, `aligned_frame_size` computation, and `emit_param_ref` for parameter re-reads. |
 | `calls.rs` | Call ABI: stack argument layout, `regparm` register argument emission (reverse-order to avoid clobbering `%eax`), call instruction emission (direct/indirect/PLT), result retrieval (`%eax`, `%eax:%edx`, `st(0)` for float/double/F128). |
 | `memory.rs` | Load/store for all type widths, 64-bit and F128 split load/store via `%eax:%edx` and x87, constant-offset load/store with offset folding, GEP address computation (direct, indirect, over-aligned), dynamic alloca support, memcpy emission via `rep movsb`, and over-aligned alloca handling via runtime `leal`+`andl` alignment. |
-| `alu.rs` | Integer ALU: `add`/`sub`/`mul`/`and`/`or`/`xor`/`shl`/`shr`/`sar`, signed and unsigned division (`idivl`/`divl`), LEA strength reduction for multiply by 3/5/9, immediate-operand fast paths, integer negation (`negl`), bitwise NOT (`notl`), CLZ (`lzcntl`), CTZ (`tzcntl`), bswap, popcount, and float negation (SSE `xorps` for F32, sign-bit XOR for F64). |
+| `alu.rs` | Integer ALU: `add`/`sub`/`mul`/`and`/`or`/`xor`/`shl`/`shr`/`sar`, signed and unsigned division (`idivl`/`divl`), LEA strength reduction for multiply by 3/5/9, immediate-operand fast paths, integer negation (`negl`), bitwise NOT (`notl`), CLZ (`lzcntl`), CTZ (`tzcntl`), bswap, popcount, and F32 negation (SSE `xorps` with sign-bit mask).  (F64 negation uses x87 `fchs` in `emit.rs`; F128 negation is in `float_ops.rs`.) |
 | `i128_ops.rs` | 64-bit register-pair operations (called "i128" in the shared trait): `add`/`adc`, `sub`/`sbb`, `mul` (schoolbook cross-product), `shld`/`shrd` shifts with 32-bit boundary handling, constant shift specializations, comparisons (XOR+OR reduction for equality, high-first branching for ordered), `__divdi3`/`__udivdi3` calls for division, float conversions via x87 `fildq`/`fisttpq` with unsigned 2^63 correction. |
 | `comparison.rs` | Float comparisons (SSE `ucomiss` for F32, x87 `fucomip` for F64/F128), integer comparisons (`cmpl` + `setCC` for all 10 comparison operators), fused compare-and-branch (`cmpl` + `jCC`), and `select` via conditional branching (test condition, branch to true/false label, copy appropriate value). |
 | `casts.rs` | Type conversions: integer widening (`movsbl`/`movzbl`/`movswl`/`movzwl`) and narrowing, float-to-int and int-to-float via x87 (`fildl`/`fildq`/`fisttpl`/`fisttpq`), F128 conversions via `fldt`/`fstpt`, unsigned-to-float fixup for values with the sign bit set (2^64 / 2^63 correction paths), SSE scalar F32 casts (`cvtsi2ssl`/`cvttss2si`), and I64 widening/narrowing (sign-extension via `cltd` and half-word extraction). |
@@ -155,16 +155,20 @@ where N accounts for the stack bytes the callee must clean up.
 
 ### ABI Configuration
 
-The `CallAbiConfig` for i686 is:
+The `CallAbiConfig` for i686 is (from `calls.rs`):
 
 ```
-max_int_regs: regparm (0-3)             // 0 for cdecl, 1-3 for -mregparm=N
-max_float_regs: 0                        // all floats go on the stack
-f128_in_fp_regs: false                   // long double is on the x87 stack
-f128_in_gp_pairs: false                  // F128 not split into GP pairs
-large_struct_by_ref: false               // large structs pushed by value
-use_sysv_struct_classification: false    // no per-eightbyte classification
-allow_struct_split_reg_stack: false      // no partial reg/stack split
+max_int_regs: regparm (0-3)                    // 0 for cdecl, 1-3 for -mregparm=N
+max_float_regs: 0                               // all floats go on the stack
+align_i128_pairs: false                          // no even-register alignment for i128
+f128_in_fp_regs: false                           // long double passed on the stack, not FP regs
+f128_in_gp_pairs: false                          // F128 not split into GP register pairs
+variadic_floats_in_gp: false                     // not needed (no FP reg args on i686)
+large_struct_by_ref: false                       // large structs pushed by value on the stack
+use_sysv_struct_classification: false            // no per-eightbyte classification (x86-64 only)
+use_riscv_float_struct_classification: false      // not applicable
+allow_struct_split_reg_stack: false              // no partial reg/stack split
+align_struct_pairs: false                        // no struct pair alignment
 ```
 
 ### Return Values
