@@ -82,6 +82,7 @@ downstream lexer uses these markers to maintain accurate source locations.
 | `set_asm_mode(asm_mode)` | Enable assembly preprocessing mode where `$` is not treated as an identifier character (for AT&T assembly `$MACRO_NAME` expansion). |
 | `set_riscv_abi(abi)` | Override RISC-V float ABI macros (`lp64` = soft-float, `lp64f` = single, `lp64d` = double). |
 | `set_riscv_march(march)` | Override RISC-V extension macros based on `-march=` (removes F/D macros when extensions not present). |
+| `set_strict_ansi(strict)` | Define or undefine `__STRICT_ANSI__` (set for `-std=cXX` non-GNU modes; checked by glibc and other headers to gate GNU extensions). |
 
 ### Output Inspection
 
@@ -437,15 +438,23 @@ static table of `(name, body)` pairs. Categories include:
 
 ### Special Built-in Macros
 
-These are not stored in the macro table but handled as special cases during
-expansion:
+`__LINE__` and `__COUNTER__` are **not** stored in the macro table. They use
+`Cell<usize>` fields on `MacroTable` and are expanded by special-case code in
+`expand_identifier`, avoiding per-line `MacroDef` allocation:
 
 | Macro | Behavior |
 |-------|----------|
-| `__LINE__` | Current line number; stored in a `Cell<usize>` and updated each line. Respects `#line` overrides. |
-| `__FILE__` | Current filename; updated efficiently via `MacroTable::set_file`. |
+| `__LINE__` | Current line number; stored in a `Cell<usize>` and updated each line via `set_line()`. Respects `#line` overrides. |
 | `__COUNTER__` | Monotonically incrementing counter (`Cell<usize>`); increments on each expansion. |
-| `__BASE_FILE__` | Always the top-level input filename (does not change during `#include`). |
+
+`__FILE__` and `__BASE_FILE__` **are** stored in the macro table as regular
+object-like macros but have dedicated update APIs to avoid full `MacroDef`
+reallocation on every `#include`:
+
+| Macro | Behavior |
+|-------|----------|
+| `__FILE__` | Current filename; updated in-place via `MacroTable::set_file()` (mutates the existing entry's body rather than inserting a new `MacroDef`). |
+| `__BASE_FILE__` | Always the top-level input filename (set once by `set_filename()`, does not change during `#include`). |
 
 ### Preprocessor Operator Intrinsics
 
@@ -533,7 +542,7 @@ enabling GCC-compatible `file:line:col: error:` / `warning:` output formatting.
 | `conditionals.rs` | `ConditionalStack` (push/pop state machine for `#if` nesting). `evaluate_condition` and `expand_condition_macros` for `#if` expression preprocessing. `eval_const_expr` recursive-descent expression evaluator and tokenizer. |
 | `expr_eval.rs` | `resolve_defined_in_expr` (replaces `defined()`, `__has_builtin()`, `__has_attribute()`, `__has_include()`, etc. with `0`/`1`). `replace_remaining_idents_with_zero` (C standard: undefined identifiers in `#if` are `0`). |
 | `includes.rs` | `#include` / `#include_next` handling. Include path resolution with GCC-compatible search order. Include guard detection (`detect_include_guard`). Path caching, symlink-preserving absolute path construction, computed include normalization, recursive inclusion depth limiting, and builtin header injection. |
-| `predefined_macros.rs` | Static tables of predefined macros (standard C, platform, GCC compat, sizeof, type limits, float characteristics). `set_target` for architecture switching (`"aarch64"`, `"riscv64"`, `"i686"`, `"i386"`). `set_pic`, `set_optimize`, `set_gnu89_inline`, `set_sse_macros`, `set_extended_simd_macros`, `set_riscv_abi`, `set_riscv_march` configuration methods. `bundled_include_dir` and `default_system_include_paths`. |
+| `predefined_macros.rs` | Static tables of predefined macros (standard C, platform, GCC compat, sizeof, type limits, float characteristics). `set_target` for architecture switching (`"aarch64"`, `"riscv64"`, `"i686"`, `"i386"`). `set_pic`, `set_optimize`, `set_gnu89_inline`, `set_sse_macros`, `set_extended_simd_macros`, `set_riscv_abi`, `set_riscv_march`, `set_strict_ansi` configuration methods. `bundled_include_dir` and `default_system_include_paths`. |
 | `pragmas.rs` | `handle_pragma` dispatcher. Handlers for `once`, `pack`, `push_macro`/`pop_macro`, `weak`, `redefine_extname`, and `GCC visibility push`/`pop`. Synthetic token emission for pack and visibility pragmas. |
 | `builtin_macros.rs` | Macro definitions substituting for `<limits.h>`, `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<stdatomic.h>`, `<float.h>`, and `<inttypes.h>`. Includes both object-like and function-like (suffix-pasting) macros. |
 | `text_processing.rs` | Low-level text transformations: `strip_block_comments` (with `LineMap` for line number remapping), `join_continued_lines`, `has_unbalanced_parens`, `strip_line_comment` (strips `//` comments outside string literals, returns `Cow<str>`), and `split_first_word` (splits directive keyword from arguments, treating `(` as a word boundary). |
