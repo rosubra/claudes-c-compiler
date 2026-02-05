@@ -122,11 +122,12 @@ It is active by default (when the `gcc_linker` Cargo feature is not enabled).
 
 ## File Inventory
 
-| File          | Lines | Role                                                          |
-|---------------|-------|---------------------------------------------------------------|
-| `mod.rs`      | ~13   | Module declaration; re-exports `link_to_executable` as the public API |
-| `link.rs`     | ~2570 | Core linker implementation: all 14 phases from input reading through ELF emission |
-| `elf_read.rs` | ~67   | Re-exports shared linker_common types; delegates parsing to shared infrastructure |
+| File              | Lines | Role                                                          |
+|-------------------|-------|---------------------------------------------------------------|
+| `mod.rs`          | ~22   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
+| `link.rs`         | ~3900 | Core linker implementation: `link_builtin` (executable) and `link_shared` (shared library) |
+| `relocations.rs`  | ~610  | RISC-V relocation constants, instruction patching, shared types (GlobalSym, MergedSection, InputSecRef), and utility functions used by both executable and shared library linking |
+| `elf_read.rs`     | ~90   | Re-exports shared linker_common types; delegates parsing to shared infrastructure |
 
 ## Key Data Structures
 
@@ -203,7 +204,7 @@ DynSymbol {
 }
 ```
 
-### `MergedSection` (link.rs)
+### `MergedSection` (relocations.rs)
 
 A merged output section containing data concatenated from multiple input sections.
 
@@ -218,7 +219,7 @@ MergedSection {
 }
 ```
 
-### `GlobalSym` (link.rs)
+### `GlobalSym` (relocations.rs)
 
 Represents a global symbol's resolved state during linking.
 
@@ -237,7 +238,7 @@ GlobalSym {
 }
 ```
 
-### `InputSecRef` (link.rs, local to link_to_executable)
+### `InputSecRef` (relocations.rs)
 
 Tracks the mapping from an input section to its position in a merged section.
 
@@ -626,13 +627,15 @@ The final phase writes the complete ELF executable:
 
 ## Key Design Decisions and Trade-offs
 
-### 1. Monolithic single-pass architecture
+### 1. Two-function architecture
 
-The entire linker is implemented in a single function (`link_to_executable`)
-with clearly labeled phases. This was a deliberate choice for simplicity and
-debuggability -- the linker's state flows linearly from input to output with
-no callbacks, trait objects, or complex control flow. The trade-off is that the
-function is large (~2500 lines), but it reads top-to-bottom as a pipeline.
+The linker has two main entry points: `link_builtin` (for executables, ~2400
+lines) and `link_shared` (for shared libraries, ~1500 lines), each organized
+as a linear pipeline with clearly labeled phases. Shared types, relocation
+constants, instruction patching functions, and utility helpers are factored into
+`relocations.rs` to avoid duplication between the two functions. Each main
+function reads top-to-bottom as a pipeline with no callbacks, trait objects,
+or complex control flow.
 
 ### 2. In-memory linking
 
