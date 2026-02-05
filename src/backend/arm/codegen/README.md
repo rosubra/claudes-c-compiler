@@ -64,7 +64,7 @@ All codegen source files reside under `src/backend/arm/codegen/`.
 | `cast_ops.rs` | Type casts: float-to-int (`FCVTZS`/`FCVTZU`), int-to-float (`SCVTF`/`UCVTF`), float-to-float (`FCVT`), sign/zero extension, and truncation with appropriate `SXTB`/`SXTH`/`SXTW`/`AND` masking. |
 | `f128.rs` | IEEE 754 binary128 (quad-precision) support implementing the `F128SoftFloat` trait. Provides AArch64-specific primitives for Q-register loads/stores, constant materialization into `v0`, and calls to compiler-rt/libgcc soft-float routines. |
 | `i128_ops.rs` | 128-bit integer arithmetic: add/sub via `ADDS`/`ADC`/`SUBS`/`SBC`, multiplication via `MUL`/`UMULH`/`MADD`, bitwise ops, shifts (with >64 and ==64 special cases), division/remainder via `__divti3`/`__modti3` libcalls, float-to-i128 and i128-to-float conversions, and comparisons. |
-| `atomics.rs` | Atomic operations: `LDXR`/`STXR` exclusive load/store loops for RMW (exchange, add, sub, and, or, xor, test-and-set), compare-and-exchange with `CLREX` on failure, atomic loads (`LDAR`/`LDARB`/`LDARH`), atomic stores (`STLR`/`STLRB`/`STLRH`), and fences (`DMB ISH`/`ISHLD`/`ISHST`). |
+| `atomics.rs` | Atomic operations: `LDXR`/`STXR` exclusive load/store loops for RMW (exchange, add, sub, and, or, xor, nand, test-and-set), compare-and-exchange with `CLREX` on failure, atomic loads (`LDAR`/`LDARB`/`LDARH`), atomic stores (`STLR`/`STLRB`/`STLRH`), and fences (`DMB ISH`/`ISHLD`/`ISHST`). |
 | `intrinsics.rs` | NEON/SIMD intrinsic emission (SSE-equivalent operations), hardware builtins (CRC32, `fsqrt`, `fabs`), memory barriers (`DMB`), non-temporal stores, cache maintenance (`DC CIVAC`), `__builtin_frame_address`, `__builtin_return_address`, and `__builtin_thread_pointer`. |
 | `globals.rs` | Global symbol addressing: `ADRP`+`ADD :lo12:` for direct access (used for all regular symbols, including in PIC/PIE mode), `ADRP`+`LDR :got:` for GOT-indirect access (weak extern symbols only), and TLS access via `MRS TPIDR_EL0` + `tprel_hi12`/`tprel_lo12_nc`. |
 | `returns.rs` | Return value handling: integer returns in `x0`, F32 in `s0`, F64 in `d0`, F128 in `q0` (with `__extenddftf2` promotion), I128 in `x0:x1`, struct return via `x8` (sret pointer), and second-slot float returns in `d1`/`s1`. |
@@ -209,10 +209,38 @@ must remain 16-byte aligned at all times.
 
 ### Prologue Sequence
 
+The prologue uses one of three code paths depending on frame size:
+
+**Small frame (≤504 bytes):**
 ```asm
     stp x29, x30, [sp, #-FRAME_SIZE]!   // save FP and LR, allocate frame
     mov x29, sp                           // establish frame pointer
 ```
+
+**Medium frame (505–4096 bytes):**
+```asm
+    sub sp, sp, #FRAME_SIZE              // allocate frame (via emit_sub_sp)
+    stp x29, x30, [sp]                   // save FP and LR at bottom of frame
+    mov x29, sp                           // establish frame pointer
+```
+
+**Large frame (>4096 bytes) — with stack probing:**
+```asm
+    mov x17, #FRAME_SIZE                 // materialize frame size
+.Lstack_probe_N:
+    sub sp, sp, #4096                    // step down one page
+    str xzr, [sp]                        // probe (touch page to grow stack)
+    sub x17, x17, #4096
+    cmp x17, #4096
+    b.hi .Lstack_probe_N                 // repeat for remaining pages
+    sub sp, sp, x17                      // allocate residual bytes
+    str xzr, [sp]                        // probe final page
+    stp x29, x30, [sp]                   // save FP and LR
+    mov x29, sp                           // establish frame pointer
+```
+
+Stack probing ensures the kernel can grow the stack mapping page-by-page. Without
+probing, a single large `sub sp` can skip guard pages and cause a segfault.
 
 For variadic functions, the prologue additionally saves `x0`-`x7` (and optionally
 `q0`-`q7` unless `-mgeneral-regs-only`) to the register save areas.
@@ -260,7 +288,7 @@ the AArch64 stack alignment requirement.
 
 The backend supports three addressing modes for global symbols:
 
-**Direct (non-PIC):**
+**Direct (PC-relative, used for all regular symbols including PIC/PIE):**
 ```asm
     adrp x0, symbol           // load 4KB-aligned page address
     add  x0, x0, :lo12:symbol // add page offset
@@ -459,7 +487,7 @@ loop pattern:
 ```asm
 .Latomic_N:
     ldxr  x0, [x1]          // load-exclusive old value
-    <op>  x3, x0, x2        // compute new value (add, sub, and, or, xor, etc.)
+    <op>  x3, x0, x2        // compute new value (add, sub, and, or, xor, nand)
     stxr  w4, x3, [x1]      // store-exclusive new value
     cbnz  w4, .Latomic_N    // retry if exclusive monitor lost
 ```
@@ -519,9 +547,12 @@ Supported operations include:
 | `pcmpeqb` | `cmeq v.16b` | Byte-wise equality comparison |
 | `pcmpeqd` | `cmeq v.4s` | 32-bit lane equality |
 | `psubusb` | `uqsub v.16b` | Unsigned saturating byte subtract |
+| `psubsb` | `sqsub v.16b` | Signed saturating byte subtract |
 | `por` | `orr v.16b` | Bitwise OR |
 | `pand` | `and v.16b` | Bitwise AND |
 | `pxor` | `eor v.16b` | Bitwise XOR |
+| `loaddqu` | `ldr q` | 128-bit unaligned load |
+| `storedqu` | `str q` | 128-bit unaligned store |
 
 ### Scalar Operations
 
@@ -542,6 +573,8 @@ Supported operations include:
 - **Cache**: `DC CIVAC` (clean and invalidate by VA to Point of Coherency)
 - **Non-temporal stores**: Mapped to regular `STR` (ARM has no direct NT store hint
   for general-purpose data)
+- **x86-only intrinsics** (AES-NI, CLMUL, `pslldq`, `pshufd`, `paddw`, `pmulhw`,
+  etc.): Stubbed to zero their output since no NEON equivalents are implemented
 
 ### Popcount
 
@@ -623,9 +656,12 @@ integer/enum comparisons rather than repeated string parsing.
 
 The optimizer runs in three phases:
 
-1. **Iterative local passes** (up to 8 rounds): core pattern elimination
+1. **Iterative local passes** (up to 8 rounds): all core pattern elimination passes
+   (store/load elimination, redundant branches, self-moves, move chains,
+   branch-over-branch fusion)
 2. **Global passes**: register copy propagation and dead store elimination
-3. **Local cleanup** (up to 4 rounds): mop up patterns exposed by global passes
+3. **Local cleanup** (up to 4 rounds): a subset of the local passes (same as Phase 1
+   but without branch-over-branch fusion) to mop up patterns exposed by global passes
 
 ### Optimization Catalog
 
