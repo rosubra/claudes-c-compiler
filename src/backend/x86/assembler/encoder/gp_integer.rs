@@ -201,6 +201,18 @@ impl super::InstructionEncoder {
                     _ => unreachable!(),
                 }
             }
+            ImmediateValue::Symbol(sym) | ImmediateValue::SymbolPlusOffset(sym, _) => {
+                let addend = if let ImmediateValue::SymbolPlusOffset(_, a) = imm { *a } else { 0 };
+                if size >= 4 {
+                    // movq uses R_X86_64_32S because the 32-bit immediate is sign-extended
+                    // to 64 bits; movl uses R_X86_64_32 (unsigned, no sign extension).
+                    let reloc_type = if size == 8 { R_X86_64_32S } else { R_X86_64_32 };
+                    self.add_relocation(sym, reloc_type, addend);
+                    self.bytes.extend_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    return Err("symbol immediate only supported for 32/64-bit mov to memory".to_string());
+                }
+            }
             _ => return Err("unsupported immediate for mov to memory".to_string()),
         }
         self.adjust_rip_reloc_addend(reloc_count, trailing);
