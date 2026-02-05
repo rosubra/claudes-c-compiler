@@ -572,20 +572,22 @@ pub struct StructFieldLayout {
 impl StructLayout {
     /// Return the smallest integer CType that can hold at least `needed_bytes` bytes.
     /// Preserves signedness.
+    /// Uses LongLong (always 8 bytes) instead of Long for >4 bytes, because on
+    /// i686 (ILP32) Long is only 4 bytes and would truncate 64-bit bitfields.
     fn smallest_int_ctype_for_bytes(needed_bytes: usize, is_signed: bool) -> CType {
         if is_signed {
             match needed_bytes {
                 0..=1 => CType::Char,
                 2 => CType::Short,
                 3..=4 => CType::Int,
-                _ => CType::Long,
+                _ => CType::LongLong,
             }
         } else {
             match needed_bytes {
                 0..=1 => CType::UChar,
                 2 => CType::UShort,
                 3..=4 => CType::UInt,
-                _ => CType::ULong,
+                _ => CType::ULongLong,
             }
         }
     }
