@@ -493,10 +493,15 @@ compile-time evaluation of array dimension expressions.
 This design guarantees that the mapping from `TypeSpecifier::Int` to
 `CType::Int` (and all 21 other primitives) is defined in exactly one place.
 
-**`build_full_ctype(ctx, type_spec, derived)`** -- A public function (~140
-lines) that builds a complete CType from a TypeSpecifier and a
-DerivedDeclarator chain. This is the single canonical implementation of the
-C "inside-out" declarator rule, used by both sema and lowering. It handles:
+**`build_full_ctype(ctx, type_spec, derived)`** and its variant
+**`build_full_ctype_with_base(ctx, base, derived)`** -- Public functions
+(~140 lines of shared implementation) that build a complete CType from a
+DerivedDeclarator chain. The first resolves the TypeSpecifier to a base
+CType, while the second accepts an already-resolved base type (used to
+avoid re-resolving anonymous struct type specs which would generate
+different anonymous struct keys). Together they are the single canonical
+implementation of the C "inside-out" declarator rule, used by both sema
+and lowering. They handle:
 - Simple pointer and array chains (`int **p`, `int arr[3][4]`)
 - Function pointer declarators (`int (*fp)(int)`)
 - Arrays of function pointers (`int (*fp[10])(void)`)
@@ -548,6 +553,10 @@ Key evaluators:
 - `bitnot_const(val)` -- (public) Bitwise NOT with sub-int promotion to i32.
 - `is_zero_expr(expr)` -- (public) Detects zero-literal expressions (0 or
   cast of 0), used for offsetof pattern detection (`&((type*)0)->member`).
+- `is_null_pointer_constant(expr)` -- (public) Checks whether an expression
+  is a null pointer constant per C11 6.3.2.3p3 (integer literal 0, or a
+  `(void*)` cast of an integer constant expression that evaluates to zero).
+  Used by sema and lowering for ternary operator type checking.
 - `truncate_and_extend_bits(bits, target_width, target_signed)` -- (public)
   Raw bit truncation to a target width and optional sign-extension back to
   64 bits, used for evaluating cast chains at compile time.
