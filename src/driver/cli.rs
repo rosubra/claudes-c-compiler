@@ -615,7 +615,10 @@ impl Driver {
                 "-rdynamic" => {
                     self.linker_ordered_items.push("-rdynamic".to_string());
                 }
-                "-pipe" | "-pthread" | "-Xa" | "-Xc" | "-Xt" => {}
+                "-pipe" | "-Xa" | "-Xc" | "-Xt" => {}
+                "-pthread" => {
+                    self.pthread = true;
+                }
 
                 // GCC --param flag: --param <name>=<value> or --param=<name>=<value>
                 // Used by nix CC wrapper for hardening flags like ssp-buffer-size=4

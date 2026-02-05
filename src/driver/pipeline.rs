@@ -230,6 +230,10 @@ pub struct Driver {
     /// Used for GCC -m16 passthrough: we forward all flags directly to GCC
     /// rather than trying to reconstruct them from parsed state.
     pub(super) raw_args: Vec<String>,
+    /// Whether -pthread was specified. When true, the preprocessor defines
+    /// _REENTRANT=1 (matching GCC/Clang behavior). Build systems that detect
+    /// pthread support via configure (ax_pthread.m4) add -lpthread themselves.
+    pub(super) pthread: bool,
 }
 
 impl Driver {
@@ -297,6 +301,7 @@ impl Driver {
             omit_frame_pointer: false,
             no_unwind_tables: false,
             raw_args: Vec::new(),
+            pthread: false,
         }
     }
 
@@ -826,6 +831,13 @@ impl Driver {
                 self.enable_avx,
                 self.enable_avx2,
             );
+        }
+        // Define _REENTRANT when -pthread is used.
+        // GCC and Clang automatically define _REENTRANT=1 when -pthread is passed.
+        // Many configure scripts (e.g., iperf3's ax_pthread.m4) check for this macro
+        // to verify that pthread support is properly configured.
+        if self.pthread {
+            preprocessor.define_macro("_REENTRANT", "1");
         }
         for def in &self.defines {
             preprocessor.define_macro(&def.name, &def.value);
