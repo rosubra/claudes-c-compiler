@@ -1,1 +1,0 @@
-Fix preprocessor line continuation fast path for backslash + whitespace + newline
