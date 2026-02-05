@@ -390,6 +390,14 @@ pub fn write_phdr64(
     w64(buf, off + 48, p_align);
 }
 
+/// Write an ELF64 program header with `p_paddr = p_vaddr` (the common case).
+/// This is a convenience wrapper around `write_phdr64` used by multiple linker
+/// backends to avoid repeating the vaddr twice.
+#[inline]
+pub fn wphdr(buf: &mut [u8], off: usize, pt: u32, flags: u32, foff: u64, va: u64, fsz: u64, msz: u64, align: u64) {
+    write_phdr64(buf, off, pt, flags, foff, va, va, fsz, msz, align);
+}
+
 /// Write an ELF64 symbol table entry to `buf`.
 pub fn write_sym64(
     buf: &mut Vec<u8>,

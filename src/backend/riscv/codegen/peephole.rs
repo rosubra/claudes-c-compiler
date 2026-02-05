@@ -924,92 +924,10 @@ fn eliminate_dead_reg_moves(lines: &[String], kinds: &mut [LineKind], n: usize) 
     changed
 }
 
-/// Check if a byte is a "word character" for the purposes of register name matching.
-/// Includes alphanumeric, `.`, and `_` since these appear in symbol names
-/// (e.g. `main.s1.0`, `_start`) and must not be treated as word boundaries.
-#[inline]
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'.' || b == b'_'
-}
-
-/// Check if `text` contains `word` at a word boundary (no adjacent identifier chars).
-fn has_whole_word(text: &str, word: &str) -> bool {
-    let bytes = text.as_bytes();
-    let word_bytes = word.as_bytes();
-    let word_len = word_bytes.len();
-    let text_len = bytes.len();
-
-    let mut i = 0;
-    while i + word_len <= text_len {
-        if &bytes[i..i + word_len] == word_bytes {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + word_len >= text_len || !is_ident_char(bytes[i + word_len]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Replace a register name in source operand positions of an instruction.
-/// Returns None if the register is the destination (first operand) or not found.
-fn replace_source_reg_in_instruction(line: &str, old_reg: &str, new_reg: &str) -> Option<String> {
-    let trimmed = line.trim();
-
-    // Find the first space to separate mnemonic from operands
-    let space_pos = trimmed.find(' ')?;
-    let args_start = space_pos + 1;
-    let args = &trimmed[args_start..];
-
-    // Find first comma — everything after it is source operands
-    let comma_pos = args.find(',')?;
-    let after_first_arg = &args[comma_pos..];
-
-    // Only replace in the source part (after the first comma)
-    let new_suffix = replace_whole_word(after_first_arg, old_reg, new_reg);
-    if new_suffix == after_first_arg {
-        return None;
-    }
-
-    // Build the new line
-    let prefix = &trimmed[..args_start + comma_pos];
-    let new_trimmed = format!("{}{}", prefix, new_suffix);
-
-    // Preserve leading whitespace
-    let leading = line.len() - line.trim_start().len();
-    let leading_ws = &line[..leading];
-    Some(format!("{}{}", leading_ws, new_trimmed))
-}
-
-/// Replace `old` with `new` in `text` only at word boundaries.
-/// A word boundary is where the adjacent character is not an identifier char
-/// (alphanumeric, `.`, or `_`). This prevents "s1" from matching inside
-/// "s10", "main.s1.0", or "_s1_var".
-fn replace_whole_word(text: &str, old: &str, new: &str) -> String {
-    let bytes = text.as_bytes();
-    let old_bytes = old.as_bytes();
-    let old_len = old_bytes.len();
-    let text_len = bytes.len();
-    let mut result = String::with_capacity(text.len());
-    let mut i = 0;
-
-    while i < text_len {
-        if i + old_len <= text_len && &bytes[i..i + old_len] == old_bytes {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + old_len >= text_len || !is_ident_char(bytes[i + old_len]);
-            if before_ok && after_ok {
-                result.push_str(new);
-                i += old_len;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-    result
-}
+// Shared peephole string utilities -- see backend/peephole_common.rs
+use crate::backend::peephole_common::{has_whole_word, replace_source_reg_in_instruction};
+#[cfg(test)]
+use crate::backend::peephole_common::replace_whole_word;
 
 // ── Global dead store elimination ────────────────────────────────────────────
 //

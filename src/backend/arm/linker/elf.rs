@@ -8,8 +8,8 @@
 // continue to work via `use super::elf::*`.
 pub use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, ET_EXEC, ET_DYN, EM_AARCH64,
-    SHT_NULL, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_REL, SHT_GROUP, SHT_NOBITS,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
+    SHT_NOBITS,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
     STB_GLOBAL, STB_WEAK,
     STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS, STT_GNU_IFUNC,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
@@ -25,7 +25,7 @@ pub use crate::backend::elf::{
     DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ,
     DT_NULL, DT_RELACOUNT,
     DT_FLAGS, DF_BIND_NOW, DT_FLAGS_1, DF_1_NOW,
-    w16, w32, w64, write_bytes,
+    w16, w32, w64, write_bytes, wphdr,
 };
 
 use crate::backend::linker_common;

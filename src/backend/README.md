@@ -107,7 +107,8 @@ architecture-specific subdirectories:
 src/backend/
   mod.rs              Target enum, CodegenOptions, top-level dispatch
   elf.rs              Shared ELF constants, StringTable, read/write helpers, archive parsing
-  linker_common.rs    Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash, lib resolution
+  linker_common.rs    Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash, GC sections
+  peephole_common.rs  Shared peephole optimizer utilities: word matching, register replacement, LineStore
   asm_expr.rs         Shared integer expression evaluator (all 4 assembler parsers)
   asm_preprocess.rs   Shared GAS preprocessing: comments, macros, .rept, .if/.elseif/.else/.endif
   elf_writer_common.rs Shared generic ELF object writer for x86-64 and i686 assemblers

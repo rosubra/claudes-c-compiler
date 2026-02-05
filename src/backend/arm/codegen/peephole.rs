@@ -833,72 +833,10 @@ fn propagate_register_copies(lines: &mut [String], kinds: &mut [LineKind], n: us
     changed
 }
 
-/// Replace a register name in source operand positions of an instruction.
-/// Returns None if the register is the destination (first operand) or not found.
-fn replace_source_reg_in_instruction(line: &str, old_reg: &str, new_reg: &str) -> Option<String> {
-    let trimmed = line.trim();
-
-    // Find the first comma to separate destination from source operands
-    let space_pos = trimmed.find(' ')?;
-    let args_start = space_pos + 1;
-    let args = &trimmed[args_start..];
-
-    // Find first comma — everything after it is source operands
-    let comma_pos = args.find(',')?;
-    let after_first_arg = &args[comma_pos..];
-
-    // Only replace in the source part (after the first comma)
-    // Use whole-word replacement to avoid substring issues (e.g., x1 in x11)
-    let new_suffix = replace_whole_word(after_first_arg, old_reg, new_reg);
-    if new_suffix == after_first_arg {
-        return None;
-    }
-
-    // Build the new line
-    let prefix = &trimmed[..args_start + comma_pos];
-    let new_trimmed = format!("{}{}", prefix, new_suffix);
-
-    // Preserve leading whitespace
-    let leading = line.len() - line.trim_start().len();
-    let leading_ws = &line[..leading];
-    Some(format!("{}{}", leading_ws, new_trimmed))
-}
-
-/// Check if a byte is a "word character" for the purposes of register name matching.
-/// Includes alphanumeric, `.`, and `_` since these appear in symbol names
-/// (e.g. `main.s1.0`, `_start`) and must not be treated as word boundaries.
-#[inline]
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'.' || b == b'_'
-}
-
-/// Replace `old` with `new` in `text` only at word boundaries.
-/// A word boundary is a position where the adjacent character is not an identifier
-/// char (alphanumeric, `.`, or `_`). This prevents "x1" from matching inside
-/// "x11", "x10", or symbol names like "main.x1.0".
-fn replace_whole_word(text: &str, old: &str, new: &str) -> String {
-    let bytes = text.as_bytes();
-    let old_bytes = old.as_bytes();
-    let old_len = old_bytes.len();
-    let text_len = bytes.len();
-    let mut result = String::with_capacity(text.len());
-    let mut i = 0;
-
-    while i < text_len {
-        if i + old_len <= text_len && &bytes[i..i + old_len] == old_bytes {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + old_len >= text_len || !is_ident_char(bytes[i + old_len]);
-            if before_ok && after_ok {
-                result.push_str(new);
-                i += old_len;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-    result
-}
+// Shared peephole string utilities -- see backend/peephole_common.rs
+use crate::backend::peephole_common::replace_source_reg_in_instruction;
+#[cfg(test)]
+use crate::backend::peephole_common::replace_whole_word;
 
 // ── Global dead store elimination ────────────────────────────────────────────
 //

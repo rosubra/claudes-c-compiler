@@ -554,69 +554,9 @@ fn parse_jmp_target(s: &str) -> Option<&str> {
 /// Efficient line storage that avoids reallocating strings.
 /// Lines are stored as byte offsets into the original assembly string.
 /// Replaced lines are stored in a side buffer.
-struct LineStore {
-    original: String,
-    /// (start, end) byte offsets into `original` for each line.
-    /// If start == usize::MAX, the line has been replaced and lives in `replacements`.
-    entries: Vec<(usize, usize)>,
-    /// Replacement strings, keyed by line index.
-    replacements: Vec<(usize, String)>,
-}
-
-impl LineStore {
-    fn new(asm: String) -> Self {
-        let mut entries = Vec::new();
-        let mut start = 0;
-        for (i, b) in asm.bytes().enumerate() {
-            if b == b'\n' {
-                entries.push((start, i));
-                start = i + 1;
-            }
-        }
-        if start < asm.len() {
-            entries.push((start, asm.len()));
-        }
-        LineStore { original: asm, entries, replacements: Vec::new() }
-    }
-
-    fn len(&self) -> usize { self.entries.len() }
-
-    fn get(&self, idx: usize) -> &str {
-        let (start, end) = self.entries[idx];
-        if start == usize::MAX {
-            // Find in replacements
-            for (ri, ref s) in &self.replacements {
-                if *ri == idx { return s; }
-            }
-            ""
-        } else {
-            &self.original[start..end]
-        }
-    }
-
-    fn replace(&mut self, idx: usize, new_line: String) {
-        self.entries[idx] = (usize::MAX, 0);
-        // Check if there's already a replacement for this index
-        for (ri, ref mut s) in &mut self.replacements {
-            if *ri == idx {
-                *s = new_line;
-                return;
-            }
-        }
-        self.replacements.push((idx, new_line));
-    }
-
-    fn build_result(&self, infos: &[LineInfo]) -> String {
-        let mut result = String::with_capacity(self.original.len());
-        for (i, info) in infos.iter().enumerate() {
-            if info.is_nop() { continue; }
-            let line = self.get(i);
-            result.push_str(line);
-            result.push('\n');
-        }
-        result
-    }
-}
+// Re-export the shared LineStore from peephole_common.
+// See backend/peephole_common.rs for the implementation.
+use crate::backend::peephole_common::LineStore;
 
 // ── Trimmed line helper ──────────────────────────────────────────────────────
 
@@ -1709,7 +1649,7 @@ pub fn peephole_optimize(asm: String) -> String {
     // Phase 4: Never-read store elimination
     eliminate_never_read_stores(&store, &mut infos);
 
-    store.build_result(&infos)
+    store.build_result(|i| infos[i].is_nop())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

@@ -7,10 +7,10 @@
 // Archive/linker-script functions are now called via linker_common.
 pub use crate::backend::elf::{
     ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, ET_EXEC, ET_DYN, EM_X86_64,
-    SHT_NULL, SHT_PROGBITS, SHT_NOBITS, SHT_STRTAB, SHT_SYMTAB, SHT_RELA,
-    SHT_REL, SHT_GROUP, SHT_DYNAMIC, SHT_DYNSYM,
+    SHT_PROGBITS, SHT_NOBITS, SHT_STRTAB, SHT_RELA,
+    SHT_DYNAMIC, SHT_DYNSYM,
     SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_GNU_HASH, SHT_GNU_VERSYM, SHT_GNU_VERNEED,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
     STB_GLOBAL, STB_WEAK,
     STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS, STT_GNU_IFUNC,
     SHN_UNDEF, SHN_ABS, SHN_COMMON,
@@ -22,6 +22,7 @@ pub use crate::backend::elf::{
     is_thin_archive,
     parse_linker_script_entries, LinkerScriptEntry,
     LinkerSymbolAddresses, get_standard_linker_symbols,
+    w16, w32, w64, write_bytes, wphdr,
 };
 
 use crate::backend::linker_common;

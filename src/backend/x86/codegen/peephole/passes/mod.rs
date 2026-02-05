@@ -137,7 +137,7 @@ pub fn peephole_optimize(asm: String) -> String {
     // created gaps in the frame.
     frame_compact::compact_frame(&mut store, &mut infos);
 
-    store.build_result(&infos)
+    store.build_result(|i| infos[i].is_nop())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
