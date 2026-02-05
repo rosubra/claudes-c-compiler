@@ -108,22 +108,22 @@ Defined in `mod.rs`.  Called when the built-in assembler is selected
 | File | Lines | Role |
 |------|-------|------|
 | `mod.rs` | ~30 | Public `assemble()` entry point; module wiring |
-| `parser.rs` | ~1700 | AT&T syntax parser with `.rept` expansion, GAS macro processing, expression evaluation; produces `Vec<AsmItem>` |
-| `encoder.rs` | ~5600 | x86-64 instruction encoder with 300+ match arms; REX, VEX, and EVEX prefix support; suffix inference for hand-written assembly |
+| `parser.rs` | ~1900 | AT&T syntax parser with `.rept` expansion, GAS macro processing, expression evaluation; produces `Vec<AsmItem>` |
+| `encoder.rs` | ~6200 | x86-64 instruction encoder with 800+ match arms; REX, VEX, and EVEX prefix support; suffix inference for hand-written assembly |
 | `elf_writer.rs` | ~90 | Thin x86-64 adapter: implements `X86Arch` trait for `ElfWriterCore<X86_64Arch>`, wiring architecture constants and instruction encoding |
 
 The bulk of the ELF building logic (section management, jump relaxation,
 deferred evaluation, ELF serialization) lives in the shared
-`backend::elf_writer_common` module (~1560 lines), parameterized by the
+`backend::elf_writer_common` module (~1600 lines), parameterized by the
 `X86Arch` trait.  Expression evaluation for deferred `.skip` directives uses
-the shared `backend::asm_expr` module (~310 lines).  C-comment stripping,
+the shared `backend::asm_expr` module (~410 lines).  C-comment stripping,
 semicolon splitting, and some preprocessing helpers come from
 `backend::asm_preprocess`.
 
 
 ## Key Data Structures
 
-### `AsmItem` enum (30 variants) -- parser.rs
+### `AsmItem` enum (31 variants) -- parser.rs
 
 The fundamental intermediate representation.  Each non-empty line of assembly
 maps to one `AsmItem` variant:
@@ -332,7 +332,7 @@ to unique names via a shared utility, then calls `process_item()` for each
 ### Step 3: Instruction Encoding (encoder.rs)
 
 The encoder translates one `Instruction` into machine code bytes.  Its main
-dispatch is a large `match` on the mnemonic string (300+ arms).
+dispatch is a large `match` on the mnemonic string (800+ arms).
 
 **Suffix inference** -- The `infer_suffix()` function infers AT&T size
 suffixes from register operands for unsuffixed mnemonics.  This enables
@@ -538,7 +538,7 @@ table small.
 
 ## Instruction Encoding -- Supported Families
 
-The encoder covers the following instruction categories (300+ match arms):
+The encoder covers the following instruction categories (800+ match arms):
 
 | # | Category | Instructions |
 |---|----------|-------------|
