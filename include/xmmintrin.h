@@ -1279,4 +1279,9 @@ _mm_undefined_ps(void)
     return __r;
 }
 
+/* GCC's xmmintrin.h includes emmintrin.h so that code which only includes
+ * <xmmintrin.h> still gets access to __m128i and SSE2 intrinsics.
+ * Match that behavior here. */
+#include <emmintrin.h>
+
 #endif /* _XMMINTRIN_H_INCLUDED */
