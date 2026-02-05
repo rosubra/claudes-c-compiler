@@ -460,16 +460,23 @@ pub trait ArchCodegen {
             }
             // Promote the first single-register GP stack arg to the freed slot (max_int_regs - 1).
             // The classification originally overflowed this arg because sret consumed a slot.
+            // IMPORTANT: Only promote non-float Stack args. Float args that overflowed from
+            // FP registers should stay on the stack, not be moved to a GP register.
             let freed_reg = max_int_regs - 1; // x7
-            for cls in arg_classes.iter_mut().skip(1) {
-                match cls {
+            for i in 1..arg_classes.len() {
+                match &arg_classes[i] {
                     CallArgClass::Stack => {
-                        *cls = CallArgClass::IntReg { reg_idx: freed_reg };
-                        break;
+                        // Check if this arg is a float type -- floats that overflowed
+                        // from FP registers must stay on the stack, not go in GP regs.
+                        let is_float = i < arg_types.len() && arg_types[i].is_float();
+                        if !is_float {
+                            arg_classes[i] = CallArgClass::IntReg { reg_idx: freed_reg };
+                            break;
+                        }
                     }
                     CallArgClass::StructByValStack { size } if *size <= 8 => {
                         let sz = *size;
-                        *cls = CallArgClass::StructByValReg { base_reg_idx: freed_reg, size: sz };
+                        arg_classes[i] = CallArgClass::StructByValReg { base_reg_idx: freed_reg, size: sz };
                         break;
                     }
                     _ => {}
