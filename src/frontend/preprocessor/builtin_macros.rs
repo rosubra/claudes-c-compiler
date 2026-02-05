@@ -273,6 +273,9 @@ fn define_float_macros(macros: &mut MacroTable) {
     def(macros, "LDBL_MIN_10_EXP", "(-4931)");
     def(macros, "LDBL_MAX_EXP", "16384");
     def(macros, "LDBL_MAX_10_EXP", "4932");
+    def(macros, "LDBL_MAX", "__LDBL_MAX__");
+    def(macros, "LDBL_MIN", "__LDBL_MIN__");
+    def(macros, "LDBL_EPSILON", "__LDBL_EPSILON__");
 
     // Decimal DIG
     def(macros, "DECIMAL_DIG", "21");
