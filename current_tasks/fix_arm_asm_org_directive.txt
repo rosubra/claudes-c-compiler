@@ -13,3 +13,4 @@ Fix: Implement .org as a directive that pads the current section to the
 specified offset with zeros (matching GAS behavior).
 
 Started: 2026-02-05
+Locked by: 3364d85074230a922419bccfdeeea40597ce9665 at 2026-02-05 15:46:20
