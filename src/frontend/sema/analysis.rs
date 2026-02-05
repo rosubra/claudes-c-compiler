@@ -1580,6 +1580,13 @@ impl SemanticAnalyzer {
             _ => return, // Not a struct/union; skip check
         };
 
+        // If the struct tag has been redefined in an inner scope, the current layout
+        // in the map may not match the layout the variable was actually declared with.
+        // Skip the check to avoid false positives (codegen uses layout snapshots).
+        if self.result.type_context.is_struct_key_shadowed(key.as_ref()) {
+            return;
+        }
+
         let layouts = self.result.type_context.borrow_struct_layouts();
         let layout = match layouts.get(key.as_ref()) {
             Some(l) => l,

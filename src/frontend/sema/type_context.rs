@@ -345,6 +345,21 @@ impl TypeContext {
         self.struct_layouts.borrow_mut().insert(key.to_string(), Rc::new(layout));
     }
 
+    /// Check if a struct key is currently shadowed by an inner scope redefinition.
+    /// Returns true if any scope frame has saved a previous layout for this key,
+    /// meaning the current layout in the map differs from an outer scope's definition.
+    pub fn is_struct_key_shadowed(&self, key: &str) -> bool {
+        let stack = self.scope_stack.borrow();
+        for frame in stack.iter() {
+            for (k, _) in &frame.struct_layouts_shadowed {
+                if k == key {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Push a new type-system scope frame.
     pub fn push_scope(&mut self) {
         self.scope_stack.get_mut().push(TypeScopeFrame::new());
