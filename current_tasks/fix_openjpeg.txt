@@ -1,2 +1,0 @@
-Fixing openjpeg project to compile and pass tests with ccc compilers.
-Working on diagnosing what fails and fixing the compiler as needed.

@@ -249,3 +249,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | mimalloc | PASS | TODO | TODO | TODO | Fixed sema+lowerer: __auto_type in stmt exprs defaulted to int, truncating 64-bit atomic_load results via movslq |
 | gforth  | PASS | TODO | TODO | TODO | Fixed: (1) preprocessor #line directives consumed during multi-line accumulation in included files, (2) cast-wrapped &&label in static initializers (e.g. (Label)&&I_noop) no longer zero-initialized |
 | wasm3   | PASS | TODO | TODO | TODO | Fixed: (1) x86 tail call optimization peephole pass for threaded interpreter dispatch, (2) 3D function pointer array initializer inner stride bug in global_init, (3) tail call safety check for lea-of-local (dangling stack pointer) |
+| openjpeg | PASS | PASS | PASS | PASS | All architectures pass out of the box |
