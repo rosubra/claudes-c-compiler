@@ -951,8 +951,59 @@ pub const LINKER_DEFINED_SYMBOLS: &[&str] = &[
 ];
 
 /// Check whether a symbol name is one that the linker provides during layout.
+///
+/// This includes the static list of well-known linker symbols, plus the
+/// GNU ld `__start_<section>` / `__stop_<section>` pattern: when an undefined
+/// symbol matches `__start_X` or `__stop_X` where `X` is a valid C identifier,
+/// the linker will auto-generate it to point to the start/end of section `X`.
 pub fn is_linker_defined_symbol(name: &str) -> bool {
-    LINKER_DEFINED_SYMBOLS.contains(&name)
+    if LINKER_DEFINED_SYMBOLS.contains(&name) {
+        return true;
+    }
+    // Recognize __start_<ident> and __stop_<ident> patterns (GNU ld feature).
+    // The section name must be a valid C identifier for this to apply.
+    // Note: GNU ld only resolves these when section X actually exists, but we
+    // accept the pattern here to suppress "undefined symbol" errors early.
+    // Actual resolution (in each backend) is guarded by section existence.
+    if let Some(suffix) = name.strip_prefix("__start_").or_else(|| name.strip_prefix("__stop_")) {
+        return is_valid_c_identifier_for_section(suffix);
+    }
+    false
+}
+
+/// Check if a string is a valid C identifier (used for __start_/__stop_ section pattern).
+/// Also used by RISC-V linker which has different section structures.
+pub fn is_valid_c_identifier_for_section(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Resolve `__start_<section>` and `__stop_<section>` symbols against the output sections.
+///
+/// GNU ld auto-generates these symbols when there are undefined references to
+/// `__start_X` or `__stop_X` where `X` is the name of an existing output section
+/// that is also a valid C identifier. `__start_X` gets the address of the section's
+/// start, `__stop_X` gets the address of the section's end (start + size).
+///
+/// Returns a vector of (name, address) pairs for all resolved symbols.
+pub fn resolve_start_stop_symbols(
+    output_sections: &[OutputSection],
+) -> Vec<(String, u64)> {
+    let mut result = Vec::new();
+    for sec in output_sections {
+        if is_valid_c_identifier_for_section(&sec.name) {
+            result.push((format!("__start_{}", sec.name), sec.addr));
+            result.push((format!("__stop_{}", sec.name), sec.addr + sec.mem_size));
+        }
+    }
+    result
 }
 
 // ── Shared linker functions ─────────────────────────────────────────────

@@ -1004,6 +1004,17 @@ fn emit_shared_library(
         }
     }
 
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
+    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+        if let Some(entry) = globals.get_mut(&name) {
+            if entry.defined_in.is_none() && !entry.is_dynamic {
+                entry.value = addr;
+                entry.defined_in = Some(usize::MAX);
+                entry.section_idx = SHN_ABS;
+            }
+        }
+    }
+
     // === Build output buffer ===
     let file_size = offset as usize;
     let mut out = vec![0u8; file_size];
@@ -2295,6 +2306,19 @@ fn emit_executable(
             entry.value = sym.value;
             entry.defined_in = Some(usize::MAX); // sentinel: linker-defined
             entry.section_idx = SHN_ABS;
+        }
+    }
+
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature).
+    // These are created for output sections whose names are valid C identifiers,
+    // when there are undefined references to those symbols.
+    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+        if let Some(entry) = globals.get_mut(&name) {
+            if entry.defined_in.is_none() && !entry.is_dynamic {
+                entry.value = addr;
+                entry.defined_in = Some(usize::MAX);
+                entry.section_idx = SHN_ABS;
+            }
         }
     }
 

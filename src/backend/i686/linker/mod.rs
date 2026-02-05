@@ -3196,6 +3196,23 @@ fn assign_symbol_addresses(
             "__rel_iplt_end" => sym.address = rel_iplt_vaddr + rel_iplt_size,
             _ => {}
         }
+        // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature).
+        // Uses data.len() for __stop_ (equals mem_size for PROGBITS; custom sections are always PROGBITS).
+        if let Some(sec_name) = name.strip_prefix("__start_") {
+            if linker_common::is_valid_c_identifier_for_section(sec_name) {
+                if let Some(sec) = output_sections.iter().find(|s| s.name == sec_name) {
+                    sym.address = sec.addr;
+                    sym.is_defined = true;
+                }
+            }
+        } else if let Some(sec_name) = name.strip_prefix("__stop_") {
+            if linker_common::is_valid_c_identifier_for_section(sec_name) {
+                if let Some(sec) = output_sections.iter().find(|s| s.name == sec_name) {
+                    sym.address = sec.addr + sec.data.len() as u32;
+                    sym.is_defined = true;
+                }
+            }
+        }
     }
 }
 

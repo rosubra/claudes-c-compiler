@@ -1232,6 +1232,31 @@ pub fn link_builtin(
     define_linker_sym("_Unwind_ForcedUnwind", 0, STB_WEAK);
     define_linker_sym("_Unwind_GetCFA", 0, STB_WEAK);
 
+    // Drop the closure so we can use global_syms directly below
+    drop(define_linker_sym);
+
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature).
+    // Uses data.len() for __stop_ which equals mem_size for PROGBITS sections;
+    // custom-named sections with valid C identifiers are always PROGBITS in practice.
+    for sec in &merged_sections {
+        if linker_common::is_valid_c_identifier_for_section(&sec.name) {
+            let start_name = format!("__start_{}", sec.name);
+            let stop_name = format!("__stop_{}", sec.name);
+            if let Some(entry) = global_syms.get_mut(&start_name) {
+                if !entry.defined {
+                    entry.value = sec.vaddr;
+                    entry.defined = true;
+                }
+            }
+            if let Some(entry) = global_syms.get_mut(&stop_name) {
+                if !entry.defined {
+                    entry.value = sec.vaddr + sec.data.len() as u64;
+                    entry.defined = true;
+                }
+            }
+        }
+    }
+
     // Patch dynsym entries for COPY-relocated symbols with their final addresses
     for (i, name) in dynsym_names.iter().enumerate() {
         if let Some(&(addr, size)) = copy_sym_addrs.get(name) {

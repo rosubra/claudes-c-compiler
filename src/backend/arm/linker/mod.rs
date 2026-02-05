@@ -934,6 +934,17 @@ fn emit_dynamic_executable(
         }
     }
 
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
+    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+        if let Some(entry) = globals.get_mut(&name) {
+            if entry.defined_in.is_none() && !entry.is_dynamic {
+                entry.value = addr;
+                entry.defined_in = Some(usize::MAX);
+                entry.section_idx = SHN_ABS;
+            }
+        }
+    }
+
     let entry_addr = globals.get("_start").map(|s| s.value).unwrap_or(text_page_addr);
 
     // === Build output buffer ===
@@ -2090,6 +2101,17 @@ fn emit_shared_library(
         }
     }
 
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
+    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+        if let Some(entry) = globals.get_mut(&name) {
+            if entry.defined_in.is_none() && !entry.is_dynamic {
+                entry.value = addr;
+                entry.defined_in = Some(usize::MAX);
+                entry.section_idx = SHN_ABS;
+            }
+        }
+    }
+
     // Save RW segment file size before appending section headers
     let rw_end_offset = offset;
 
@@ -3021,6 +3043,18 @@ fn emit_executable(
         if globals.get(sym.name).map(|g| g.defined_in.is_none()).unwrap_or(true) {
             globals.insert(sym.name.to_string(), GlobalSymbol {
                 value: sym.value, size: 0, info: (sym.binding << 4) | STT_OBJECT,
+                defined_in: Some(usize::MAX), section_idx: SHN_ABS,
+                from_lib: None, plt_idx: None, got_idx: None,
+                is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
+            });
+        }
+    }
+
+    // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
+    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+        if globals.get(&name).map(|g| g.defined_in.is_none()).unwrap_or(false) {
+            globals.insert(name, GlobalSymbol {
+                value: addr, size: 0, info: (STB_GLOBAL << 4),
                 defined_in: Some(usize::MAX), section_idx: SHN_ABS,
                 from_lib: None, plt_idx: None, got_idx: None,
                 is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
