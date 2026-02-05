@@ -1,0 +1,2 @@
+Attempting to fix coreutils_GNU project compilation and tests.
+Will diagnose failures across architectures starting with x86.
