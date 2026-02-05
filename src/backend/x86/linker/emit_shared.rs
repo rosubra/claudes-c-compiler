@@ -584,7 +584,7 @@ pub(super) fn emit_shared_library(
     }
 
     // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
-    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+    for (name, addr) in linker_common::resolve_start_stop_symbols(output_sections) {
         if let Some(entry) = globals.get_mut(&name) {
             if entry.defined_in.is_none() && !entry.is_dynamic {
                 entry.value = addr;

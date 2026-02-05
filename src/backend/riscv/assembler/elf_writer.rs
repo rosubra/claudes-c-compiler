@@ -946,17 +946,12 @@ impl ElfWriter {
                     // .2byte expressions in .alternative reference labels placed
                     // in .text (or a subsection merged into .text).
                     let cross_resolved = self.base.resolve_expr_cross_section(&def.expr);
-                    match crate::backend::asm_expr::parse_integer_expr(&cross_resolved) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // TODO: emit a warning here instead of silently producing 0.
-                            // This fallback handles cases where macro argument splitting
-                            // produces single-symbol expressions (e.g., ".Lnum_889_0"
-                            // from "889f - 888f" being split by whitespace in macro args).
-                            // Proper fix: make split_macro_args respect parameter count.
-                            0
-                        }
-                    }
+                    // TODO: emit a warning on Err instead of silently producing 0.
+                    // This fallback handles cases where macro argument splitting
+                    // produces single-symbol expressions (e.g., ".Lnum_889_0"
+                    // from "889f - 888f" being split by whitespace in macro args).
+                    // Proper fix: make split_macro_args respect parameter count.
+                    crate::backend::asm_expr::parse_integer_expr(&cross_resolved).unwrap_or_default()
                 }
             };
             if let Some(section) = self.base.sections.get_mut(&def.section) {

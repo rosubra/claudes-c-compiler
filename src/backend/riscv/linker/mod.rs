@@ -33,5 +33,7 @@ mod link;
 mod emit_exec;
 mod emit_shared;
 
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_builtin;
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_shared;

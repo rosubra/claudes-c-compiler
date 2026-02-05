@@ -1817,13 +1817,6 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Build a full CType from a TypeSpecifier + derived declarators.
-    /// Delegates to the shared type_builder module for canonical inside-out
-    /// declarator application logic.
-    fn build_full_ctype(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
-        type_builder::build_full_ctype(self, type_spec, derived)
-    }
-
     // === Constant expression evaluation ===
 
     /// Try to evaluate a constant expression at compile time.

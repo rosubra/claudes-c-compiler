@@ -84,9 +84,6 @@ pub use parse_object::parse_elf64_object;
 // parse_shared.rs
 pub use parse_shared::{parse_shared_library_symbols, parse_soname};
 
-// section_map.rs
-pub use section_map::map_section_name;
-
 // dynstr.rs
 pub use dynstr::DynStrTab;
 
@@ -95,8 +92,8 @@ pub use hash::{gnu_hash, sysv_hash};
 
 // symbols.rs
 pub use symbols::{
-    InputSection, OutputSection, GlobalSymbolOps,
-    LINKER_DEFINED_SYMBOLS, is_linker_defined_symbol,
+    OutputSection, GlobalSymbolOps,
+    is_linker_defined_symbol,
     is_valid_c_identifier_for_section, resolve_start_stop_symbols,
 };
 
@@ -105,12 +102,12 @@ pub use merge::{merge_sections_elf64, merge_sections_elf64_gc, allocate_common_s
 
 // dynamic.rs
 pub use dynamic::{
-    match_shared_library_dynsyms, load_shared_library_elf64,
+    load_shared_library_elf64,
     resolve_dynamic_symbols_elf64, register_symbols_elf64,
 };
 
 // archive.rs
-pub use archive::{load_archive_elf64, load_thin_archive_elf64, load_file_elf64};
+pub use archive::{load_archive_elf64, load_thin_archive_elf64};
 
 // resolve_lib.rs
 pub use resolve_lib::resolve_lib;
@@ -119,7 +116,7 @@ pub use resolve_lib::resolve_lib;
 pub use write::{write_elf64_shdr, write_elf64_phdr, write_elf64_phdr_at, align_up_64, pad_to};
 
 // args.rs
-pub use args::{LinkerArgs, parse_linker_args};
+pub use args::parse_linker_args;
 
 // check.rs
 pub use check::check_undefined_symbols_elf64;

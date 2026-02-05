@@ -1077,6 +1077,7 @@ impl Parser {
     /// Used by the parser-level constant evaluator for:
     /// - Truncating bitwise NOT results to the correct width
     /// - Using unsigned comparison semantics for relational operators
+    ///
     /// Only detects obvious cases from the AST structure; non-obvious cases are
     /// handled by the sema-level evaluator which has full type information.
     fn is_unsigned_int_expr(expr: &Expr) -> bool {

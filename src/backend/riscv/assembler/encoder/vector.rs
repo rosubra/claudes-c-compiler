@@ -50,7 +50,7 @@ pub(crate) fn encode_vsetvli(operands: &[Operand]) -> Result<EncodeResult, Strin
     let rs1 = get_reg(operands, 1)?;
     let vtypei = parse_vtypei(operands, 2)?;
     // bit 31 = 0 for vsetvli
-    let word = (0u32 << 31) | ((vtypei & 0x7FF) << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_V;
+    let word = ((vtypei & 0x7FF) << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 
@@ -93,8 +93,8 @@ pub(crate) fn encode_vload(operands: &[Operand], width: u32, lumop: u32) -> Resu
     };
     // vm=1 means unmasked (no v0.t)
     let vm: u32 = 1;
-    // nf=000 (single segment), mew=0, mop=00
-    let word = (0b000u32 << 29) | (0u32 << 28) | (0b00u32 << 26) | (vm << 25)
+    // nf=000 (single segment), mew=0, mop=00 (bits 31:26 = 0)
+    let word = (vm << 25)
         | (lumop << 20) | (rs1 << 15) | (width << 12) | (vd << 7) | OP_LOAD_FP;
     Ok(EncodeResult::Word(word))
 }
@@ -113,7 +113,8 @@ pub(crate) fn encode_vstore(operands: &[Operand], width: u32, sumop: u32) -> Res
         other => return Err(format!("expected (rs1) at operand 1, got {:?}", other)),
     };
     let vm: u32 = 1;
-    let word = (0b000u32 << 29) | (0u32 << 28) | (0b00u32 << 26) | (vm << 25)
+    // nf=000, mew=0, mop=00 (bits 31:26 = 0)
+    let word = (vm << 25)
         | (sumop << 20) | (rs1 << 15) | (width << 12) | (vs3 << 7) | OP_STORE_FP;
     Ok(EncodeResult::Word(word))
 }
@@ -124,7 +125,8 @@ pub(crate) fn encode_v_arith_vv(operands: &[Operand], funct6: u32) -> Result<Enc
     let vs2 = get_vreg(operands, 1)?;
     let vs1 = get_vreg(operands, 2)?;
     let vm: u32 = 1; // unmasked
-    let word = (funct6 << 26) | (vm << 25) | (vs2 << 20) | (vs1 << 15) | (0b000 << 12) | (vd << 7) | OP_V;
+    // funct3=000 (OPIVV)
+    let word = (funct6 << 26) | (vm << 25) | (vs2 << 20) | (vs1 << 15) | (vd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 
@@ -152,7 +154,8 @@ pub(crate) fn encode_v_arith_vi(operands: &[Operand], funct6: u32) -> Result<Enc
 pub(crate) fn encode_vmv_v_v(operands: &[Operand]) -> Result<EncodeResult, String> {
     let vd = get_vreg(operands, 0)?;
     let vs1 = get_vreg(operands, 1)?;
-    let word = (0b010111u32 << 26) | (1u32 << 25) | (0u32 << 20) | (vs1 << 15) | (0b000 << 12) | (vd << 7) | OP_V;
+    // funct6=010111, vm=1, vs2=0, funct3=000 (OPIVV)
+    let word = (0b010111u32 << 26) | (1u32 << 25) | (vs1 << 15) | (vd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 
@@ -160,7 +163,8 @@ pub(crate) fn encode_vmv_v_v(operands: &[Operand]) -> Result<EncodeResult, Strin
 pub(crate) fn encode_vmv_v_x(operands: &[Operand]) -> Result<EncodeResult, String> {
     let vd = get_vreg(operands, 0)?;
     let rs1 = get_reg(operands, 1)?;
-    let word = (0b010111u32 << 26) | (1u32 << 25) | (0u32 << 20) | (rs1 << 15) | (0b100 << 12) | (vd << 7) | OP_V;
+    // funct6=010111, vm=1, vs2=0
+    let word = (0b010111u32 << 26) | (1u32 << 25) | (rs1 << 15) | (0b100 << 12) | (vd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 
@@ -168,7 +172,8 @@ pub(crate) fn encode_vmv_v_x(operands: &[Operand]) -> Result<EncodeResult, Strin
 pub(crate) fn encode_vmv_v_i(operands: &[Operand]) -> Result<EncodeResult, String> {
     let vd = get_vreg(operands, 0)?;
     let simm5 = get_imm(operands, 1)? as u32 & 0x1F;
-    let word = (0b010111u32 << 26) | (1u32 << 25) | (0u32 << 20) | (simm5 << 15) | (0b011 << 12) | (vd << 7) | OP_V;
+    // funct6=010111, vm=1, vs2=0
+    let word = (0b010111u32 << 26) | (1u32 << 25) | (simm5 << 15) | (0b011 << 12) | (vd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 
@@ -176,7 +181,8 @@ pub(crate) fn encode_vmv_v_i(operands: &[Operand]) -> Result<EncodeResult, Strin
 /// Encoding: funct6=010100 | vm=1 | vs2=00000 | 10001 | 010 | vd | OP_V
 pub(crate) fn encode_vid_v(operands: &[Operand]) -> Result<EncodeResult, String> {
     let vd = get_vreg(operands, 0)?;
-    let word = (0b010100u32 << 26) | (1u32 << 25) | (0u32 << 20) | (0b10001u32 << 15) | (0b010 << 12) | (vd << 7) | OP_V;
+    // vs2=0 (bits 24:20), funct6=010100, vm=1
+    let word = (0b010100u32 << 26) | (1u32 << 25) | (0b10001u32 << 15) | (0b010 << 12) | (vd << 7) | OP_V;
     Ok(EncodeResult::Word(word))
 }
 

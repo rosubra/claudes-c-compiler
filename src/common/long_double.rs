@@ -442,16 +442,14 @@ fn round_to_nearest_even_113(big_val: &BigUint) -> Option<(u128, i32)> {
         let guard = big_val.bit_at(guard_pos);
         let sticky = if guard_pos > 0 { big_val.any_bits_below(guard_pos) } else { false };
 
-        if guard {
-            if sticky || (mantissa113 & 1 != 0) {
-                // Round up
-                mantissa113 = mantissa113.wrapping_add(1);
-                // If mantissa overflowed past 113 bits, we need to adjust
-                if mantissa113 >> 113 != 0 {
-                    // This means we went from 0x1FFF...FFF to 0x2000...000 (114 bits)
-                    // Shift right and increment exponent
-                    return Some((mantissa113 >> 1, binary_exp + 1));
-                }
+        if guard && (sticky || (mantissa113 & 1 != 0)) {
+            // Round up
+            mantissa113 = mantissa113.wrapping_add(1);
+            // If mantissa overflowed past 113 bits, we need to adjust
+            if mantissa113 >> 113 != 0 {
+                // This means we went from 0x1FFF...FFF to 0x2000...000 (114 bits)
+                // Shift right and increment exponent
+                return Some((mantissa113 >> 1, binary_exp + 1));
             }
         }
     }

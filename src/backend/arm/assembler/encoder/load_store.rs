@@ -602,8 +602,8 @@ pub(crate) fn encode_ldxp_stxp(operands: &[Operand], is_load: bool, acquire_rele
             _ => return Err("ldxp needs memory operand".to_string()),
         };
         let sz = if is_64 { 1u32 } else { 0 };
-        // 1 sz 001000 0 1 1 11111 o0 Rt2 Rn Rt
-        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24) | (0 << 23) | (1 << 22)
+        // 1 sz 001000 0 1 1 11111 o0 Rt2 Rn Rt  (bit23=0)
+        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24) | (1 << 22)
             | (1 << 21) | (0b11111 << 16) | (o0 << 15) | (rt2 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     } else {
@@ -616,8 +616,8 @@ pub(crate) fn encode_ldxp_stxp(operands: &[Operand], is_load: bool, acquire_rele
             _ => return Err("stxp needs memory operand".to_string()),
         };
         let sz = if is_64 { 1u32 } else { 0 };
-        // 1 sz 001000 0 0 1 Rs o0 Rt2 Rn Rt
-        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24) | (0 << 23) | (0 << 22)
+        // 1 sz 001000 0 0 1 Rs o0 Rt2 Rn Rt  (bit23=0, bit22=0)
+        let word = (1u32 << 31) | (sz << 30) | (0b001000 << 24)
             | (1 << 21) | (ws << 16) | (o0 << 15) | (rt2 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     }

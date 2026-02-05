@@ -187,14 +187,12 @@ pub fn emit_executable(
             entry[0..4].copy_from_slice(&name_off.to_le_bytes());
             if copy_sym_set.contains(name) {
                 entry[4] = (STB_GLOBAL << 4) | STT_OBJECT;
+            } else if let Some(gsym) = global_syms.get(name) {
+                let bind = gsym.binding;
+                let stype = if gsym.sym_type != 0 { gsym.sym_type } else { STT_FUNC };
+                entry[4] = (bind << 4) | stype;
             } else {
-                if let Some(gsym) = global_syms.get(name) {
-                    let bind = gsym.binding;
-                    let stype = if gsym.sym_type != 0 { gsym.sym_type } else { STT_FUNC };
-                    entry[4] = (bind << 4) | stype;
-                } else {
-                    entry[4] = (STB_GLOBAL << 4) | STT_FUNC;
-                }
+                entry[4] = (STB_GLOBAL << 4) | STT_FUNC;
             }
             entry[5] = STV_DEFAULT;
             entry[6..8].copy_from_slice(&0u16.to_le_bytes());
@@ -510,42 +508,43 @@ pub fn emit_executable(
         rela_iplt_size: 0,
     };
 
-    let mut define_linker_sym = |name: &str, value: u64, binding: u8| {
-        let entry = global_syms.entry(name.to_string()).or_insert_with(|| GlobalSym {
-            value: 0, size: 0, binding, sym_type: STT_NOTYPE,
-            visibility: STV_DEFAULT, defined: false, needs_plt: false,
-            plt_idx: 0, got_offset: None, section_idx: None,
-        });
-        if !entry.defined {
-            entry.value = value;
-            entry.defined = true;
-            entry.binding = binding;
+    {
+        let mut define_linker_sym = |name: &str, value: u64, binding: u8| {
+            let entry = global_syms.entry(name.to_string()).or_insert_with(|| GlobalSym {
+                value: 0, size: 0, binding, sym_type: STT_NOTYPE,
+                visibility: STV_DEFAULT, defined: false, needs_plt: false,
+                plt_idx: 0, got_offset: None, section_idx: None,
+            });
+            if !entry.defined {
+                entry.value = value;
+                entry.defined = true;
+                entry.binding = binding;
+            }
+        };
+
+        for sym in &get_standard_linker_symbols(&linker_addrs) {
+            define_linker_sym(sym.name, sym.value, sym.binding);
         }
-    };
 
-    for sym in &get_standard_linker_symbols(&linker_addrs) {
-        define_linker_sym(sym.name, sym.value, sym.binding);
+        // RISC-V specific symbols
+        let gp_value = if sdata_vaddr != 0 { sdata_vaddr + 0x800 } else { data_vaddr + 0x800 };
+        define_linker_sym("__global_pointer$", gp_value, STB_GLOBAL);
+        define_linker_sym("__BSS_END__", bss_end, STB_GLOBAL);
+        define_linker_sym("__SDATA_BEGIN__", sdata_vaddr, STB_GLOBAL);
+        define_linker_sym("__DATA_BEGIN__", data_vaddr, STB_GLOBAL);
+        let rodata_vaddr = merged_map.get(".rodata").map(|&i| section_vaddrs[i]).unwrap_or(0);
+        define_linker_sym("_IO_stdin_used", rodata_vaddr, STB_GLOBAL);
+
+        // Weak symbols for optional features
+        define_linker_sym("_ITM_registerTMCloneTable", 0, STB_WEAK);
+        define_linker_sym("_ITM_deregisterTMCloneTable", 0, STB_WEAK);
+        define_linker_sym("__pthread_initialize_minimal", 0, STB_WEAK);
+        define_linker_sym("_dl_rtld_map", 0, STB_WEAK);
+        define_linker_sym("__gcc_personality_v0", 0, STB_WEAK);
+        define_linker_sym("_Unwind_Resume", 0, STB_WEAK);
+        define_linker_sym("_Unwind_ForcedUnwind", 0, STB_WEAK);
+        define_linker_sym("_Unwind_GetCFA", 0, STB_WEAK);
     }
-
-    // RISC-V specific symbols
-    let gp_value = if sdata_vaddr != 0 { sdata_vaddr + 0x800 } else { data_vaddr + 0x800 };
-    define_linker_sym("__global_pointer$", gp_value, STB_GLOBAL);
-    define_linker_sym("__BSS_END__", bss_end, STB_GLOBAL);
-    define_linker_sym("__SDATA_BEGIN__", sdata_vaddr, STB_GLOBAL);
-    define_linker_sym("__DATA_BEGIN__", data_vaddr, STB_GLOBAL);
-    let rodata_vaddr = merged_map.get(".rodata").map(|&i| section_vaddrs[i]).unwrap_or(0);
-    define_linker_sym("_IO_stdin_used", rodata_vaddr, STB_GLOBAL);
-
-    // Weak symbols for optional features
-    define_linker_sym("_ITM_registerTMCloneTable", 0, STB_WEAK);
-    define_linker_sym("_ITM_deregisterTMCloneTable", 0, STB_WEAK);
-    define_linker_sym("__pthread_initialize_minimal", 0, STB_WEAK);
-    define_linker_sym("_dl_rtld_map", 0, STB_WEAK);
-    define_linker_sym("__gcc_personality_v0", 0, STB_WEAK);
-    define_linker_sym("_Unwind_Resume", 0, STB_WEAK);
-    define_linker_sym("_Unwind_ForcedUnwind", 0, STB_WEAK);
-    define_linker_sym("_Unwind_GetCFA", 0, STB_WEAK);
-    drop(define_linker_sym);
 
     // __start_<section> / __stop_<section> symbols
     // Note: we use section_vaddrs[] for the final virtual address, not sec.vaddr,
@@ -628,15 +627,13 @@ pub fn emit_executable(
         } else if let Some(&(obj_idx, sym_idx, addend)) = local_got_sym_info.get(name) {
             let obj = &input_objs[obj_idx].1;
             let sym = &obj.symbols[sym_idx];
-            let final_val = if sym.sym_type() == STT_SECTION {
-                if let Some(&(merged_idx, sec_offset)) = sec_mapping.get(&(obj_idx, sym.shndx as usize)) {
+            let final_val = if let Some(&(merged_idx, sec_offset)) = sec_mapping.get(&(obj_idx, sym.shndx as usize)) {
+                if sym.sym_type() == STT_SECTION {
                     (section_vaddrs[merged_idx] + sec_offset) as i64 + addend
-                } else { 0 }
-            } else {
-                if let Some(&(merged_idx, sec_offset)) = sec_mapping.get(&(obj_idx, sym.shndx as usize)) {
+                } else {
                     (section_vaddrs[merged_idx] + sec_offset + sym.value) as i64 + addend
-                } else { 0 }
-            } as u64;
+                }
+            } else { 0 } as u64;
             if tls_got_symbols.contains(name) {
                 final_val.wrapping_sub(tls_vaddr)
             } else {

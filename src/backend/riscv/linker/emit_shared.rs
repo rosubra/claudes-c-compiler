@@ -48,7 +48,7 @@ const ELFDATA2LSB: u8 = 1;
 #[allow(clippy::too_many_arguments)]
 pub fn emit_shared_library(
     input_objs: &[(String, ElfObject)],
-    merged_sections: &mut Vec<MergedSection>,
+    merged_sections: &mut [MergedSection],
     _merged_map: &mut HashMap<String, usize>,
     sec_mapping: &HashMap<(usize, usize), (usize, u64)>,
     global_syms: &mut HashMap<String, GlobalSym>,

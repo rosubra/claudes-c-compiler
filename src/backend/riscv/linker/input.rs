@@ -24,9 +24,7 @@ pub fn load_input_files(
         let data = std::fs::read(path)
             .map_err(|e| format!("Cannot read {}: {}", path, e))?;
 
-        if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-            inline_archive_paths.push(path.clone());
-        } else if is_thin_archive(&data) {
+        if (data.len() >= 8 && &data[0..8] == b"!<arch>\n") || is_thin_archive(&data) {
             inline_archive_paths.push(path.clone());
         } else if data.len() >= 4 && &data[0..4] == b"\x7fELF" {
             let obj = parse_object(&data, path)

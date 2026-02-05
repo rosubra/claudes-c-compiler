@@ -525,7 +525,7 @@ impl super::InstructionEncoder {
                 // Emit 4-byte relocation for the symbol immediate.
                 // Use bytes.len() (instruction-relative offset) since
                 // elf_writer_common adds the section base offset separately.
-                self.add_relocation(&sym, R_X86_64_32S, addend);
+                self.add_relocation(sym, R_X86_64_32S, addend);
                 self.bytes.extend_from_slice(&[0; 4]);
                 self.adjust_rip_reloc_addend(rc, 4);
                 Ok(())
@@ -539,7 +539,7 @@ impl super::InstructionEncoder {
                 self.bytes.push(0x81);
                 self.bytes.push(self.modrm(3, alu_op, dst_num));
                 // Use instruction-relative offset; elf_writer_common adds section base.
-                self.add_relocation(&sym, R_X86_64_32S, addend);
+                self.add_relocation(sym, R_X86_64_32S, addend);
                 self.bytes.extend_from_slice(&[0; 4]);
                 Ok(())
             }

@@ -570,7 +570,7 @@ pub(super) fn emit_executable(
     // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature).
     // These are created for output sections whose names are valid C identifiers,
     // when there are undefined references to those symbols.
-    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+    for (name, addr) in linker_common::resolve_start_stop_symbols(output_sections) {
         if let Some(entry) = globals.get_mut(&name) {
             if entry.defined_in.is_none() && !entry.is_dynamic {
                 entry.value = addr;
@@ -821,12 +821,14 @@ pub(super) fn emit_executable(
                     }
                 } else if gsym.copy_reloc && gsym.value != 0 {
                     w64(&mut out, go, gsym.value);
-                } else if gsym.is_dynamic && gsym.plt_idx.is_some() {
-                    // Dynamic function with both PLT and GOTPCREL: fill GOT with
-                    // PLT entry address so address-of via GOTPCREL matches the
-                    // canonical PLT address used by R_X86_64_64 data relocations.
-                    let plt_entry_addr = plt_addr + 16 + gsym.plt_idx.unwrap() as u64 * 16;
-                    w64(&mut out, go, plt_entry_addr);
+                } else if gsym.is_dynamic {
+                    if let Some(plt_idx) = gsym.plt_idx {
+                        // Dynamic function with both PLT and GOTPCREL: fill GOT with
+                        // PLT entry address so address-of via GOTPCREL matches the
+                        // canonical PLT address used by R_X86_64_64 data relocations.
+                        let plt_entry_addr = plt_addr + 16 + plt_idx as u64 * 16;
+                        w64(&mut out, go, plt_entry_addr);
+                    }
                 }
             }
             go += 8;

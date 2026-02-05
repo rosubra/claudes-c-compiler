@@ -5,7 +5,6 @@
 //! management, label tracking, jump relaxation, ELF emission) lives in
 //! `backend::elf_writer_common`.
 
-use super::parser::*;
 use super::encoder::*;
 use crate::backend::elf::{ELFCLASS64, EM_X86_64};
 use crate::backend::elf_writer_common::{

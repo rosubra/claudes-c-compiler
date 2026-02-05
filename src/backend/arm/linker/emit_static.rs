@@ -414,7 +414,7 @@ pub(super) fn emit_executable(
     }
 
     // Auto-generate __start_<section> / __stop_<section> symbols (GNU ld feature)
-    for (name, addr) in linker_common::resolve_start_stop_symbols(&output_sections) {
+    for (name, addr) in linker_common::resolve_start_stop_symbols(output_sections) {
         if globals.get(&name).map(|g| g.defined_in.is_none()).unwrap_or(false) {
             globals.insert(name, GlobalSymbol {
                 value: addr, size: 0, info: (STB_GLOBAL << 4),

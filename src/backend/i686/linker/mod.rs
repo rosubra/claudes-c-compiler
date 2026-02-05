@@ -46,5 +46,7 @@ impl DynStrTab {
     fn as_bytes(&self) -> &[u8] { self.0.as_bytes() }
 }
 
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_builtin;
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_shared;

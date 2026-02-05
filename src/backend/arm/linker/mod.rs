@@ -36,5 +36,7 @@ mod emit_dynamic;
 mod emit_shared;
 mod emit_static;
 
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_builtin;
+#[cfg(not(feature = "gcc_linker"))]
 pub use link::link_shared;
