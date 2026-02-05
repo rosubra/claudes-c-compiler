@@ -303,6 +303,13 @@ impl DeclAnalysis {
             if let Some(elem_ir_ty) = self.vector_element_ir_type() {
                 return elem_ir_ty;
             }
+            // Complex arrays store scalar component pairs (e.g., _Complex float arr[N]
+            // stores 2*N F32 values). The fallback type must be the component's IR type
+            // (F32/F64/F128) rather than Ptr, so that zero coalescing emits the correct
+            // number of bytes per zero element.
+            if let Some(complex_ir_ty) = self.complex_component_ir_type() {
+                return complex_ir_ty;
+            }
             self.var_ty
         } else {
             self.var_ty
@@ -326,6 +333,23 @@ impl DeclAnalysis {
             return Some(IrType::from_ctype(elem_ct));
         }
         None
+    }
+
+    /// Get the IR component type if this is a complex or array-of-complex type.
+    /// Complex arrays are stored as flat scalar pairs (real, imag), so the fallback
+    /// type for data emission must be the component type, not Ptr.
+    fn complex_component_ir_type(&self) -> Option<IrType> {
+        let ct = self.c_type.as_ref()?;
+        // Unwrap array layers to find the element type
+        let mut inner = ct;
+        while let CType::Array(ref elem, _) = inner {
+            inner = elem.as_ref();
+        }
+        if inner.is_complex() {
+            Some(IrType::from_ctype(&inner.complex_component_type()))
+        } else {
+            None
+        }
     }
 }
 
